@@ -1,0 +1,740 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; overlay.ab3 -- the back playfield brought in front, as an overlay for the title and the
+;; options (the title-overlay plan, step 1).
+;; Compile in UAE. Not part of the game. Built on band-split.ab3: the same two lists (the HUD
+;; band over the dual-playfield world, fetch mode 3, DisplayAdjust -1 and -1, PF2OF 16) and
+;; the same band split by poked copper strings.
+;;
+;; Three things are new here:
+;; 1. PF2PRI. BPLCON2's bit 6 puts playfield 2, the back, in front of playfield 1. The
+;;    library's BPLCON2 is $224, so DisplayControls 1, $40, 0, 0 should set PF2PRI and
+;;    leave PF2OF at 16. Called at run time (line-scroll.ab3 proved a run-time call for
+;;    BPLCON3).
+;;    After each call the band strings are checked again: if the call rebuilt the list and
+;;    the strings are gone, the band falls back to CustomString and the results file says so.
+;; 2. A double-buffered canvas on the back bitmap: two 384 px pages side by side, at x 0 and
+;;    x 384. A change is drawn on the hidden page, then DisplayBitMap shows it by its x. The
+;;    band split shows the same page below #BAND_LINE: the hills' x is the page's x.
+;; 3. The cover under the overlay: the front shows a blank bitmap with entry 0 black, as the
+;;    options screen will.
+;;
+;; The front scrolls right at 1 px a frame with the bob load, as the attract mode will. The
+;; overlay is boxes standing in for the title: a logo block, three menu lines and a cursor.
+;; Keys:
+;;   O         the overlay on and off. Off, the back is the clouds and hills again (redrawn,
+;;             so they may show half drawn for a frame or two: the game does this behind a
+;;             cover)
+;;   Up, Down  move the cursor (one redraw of the page)
+;;   Space     redraw the page every frame, with a bar that grows (the worst case)
+;;   B         draw on the shown page instead of the hidden one (today's title, which
+;;             flickers): a red box in the HUD means single buffered
+;;   C         the cover under the overlay on and off (a bright yellow box in the HUD)
+;;   Esc       quit and write overlay-results.txt
+;;
+;; First run (2026-10-15): the overlay came to the front and lined up across the band line,
+;; the world showed through its pen 0, no flicker double buffered, and the band strings
+;; survived 11 run-time DisplayControls calls. A page redraw took 168 lines (the whole page
+;; cleared and drawn again). But the overlay was yellow, not blue: its colours were at
+;; entries 8 to 15. The library's _dobplcons (displaylib.ab3) XORs each argument with the
+;; register's CURRENT value in the list, not with the default the manual gives: the start's
+;; $1c00 made BPLCON3 $1000 (PF2OF 16), and the overlay's $1c00 XORed it back to $c00
+;; (PF2OF 8). So DisplayControls is a toggle at run time: the overlay now flips PF2PRI with
+;; DisplayControls 1, $40, 0, 0, the same call on and off. Also on the first run, C did not
+;; turn the screen black.
+;;
+;; Third run (2026-10-15, in the game): on the NTSC build the title overlay moved left and right
+;; a pixel as the level scrolled behind it; on PAL it did not. The NTSC attract mode steps the
+;; camera 213/256 px a tick, PAL a whole pixel, and the runs above only moved the front by whole
+;; pixels. Two keys to find which it is:
+;;   F         the front's speed: 1 px a frame, or 213/256 px (the NTSC attract mode's). A red
+;;             box at the HUD's left means the fractional speed.
+;;   U         stop and restart the band split's pokes (the overlay below the stripe then keeps
+;;             the last value: a dark red box at the HUD's left means stopped)
+;; Report: with F (fractional), on the PAL profile and on the NTSC profile, does the overlay move?
+;; All of it, or only below the stripe (the band line)? And with U as well, does it stop?
+;; Fourth run: it moved on NTSC only, and only with F; but on NTSC the HUD was corrupt and a HUD box
+;; out of place, because the lists started at line 44, PAL's, and ran past NTSC's last line. Now
+;; they start at 32 on NTSC, as the game's do, and the NTSC result needs taking again.
+;; Fifth run: the display solid on NTSC. F moves the overlay on both PAL and NTSC; with F off it is
+;; steady on both. So the front's fraction is the trigger, not NTSC (the game's PAL attract mode
+;; stepped whole pixels).
+;; Sixth run: with F all of the overlay moves; with U as well, the part below the stripe is steady
+;; and the part above still moves. Both writers of BPLCON1 (the library above the band line, the
+;; poked string below it) give it, with the back's bits unchanged: the display moves the back when
+;; only the front's sub-pixel bits change (the emulator or the chips), not this code.
+
+;; What to look at and report
+;; 1. With O: the boxes in front of the pillars and the ground; the pillars and ground show
+;;    wherever the overlay has pen 0 (the overlay's pen 0 is transparent, the hole in the
+;;    logo block too); the HUD band and its colours unchanged.
+;; 2. The overlay's lower part (below the stripe about a third of the way down, the band
+;;    line) lines up with the upper part: no step sideways, no torn line.
+;; 3. Up, Down and Space: no flicker, no half-drawn page. Then B and Space: the flicker, for
+;;    comparison.
+;; 4. O again: the clouds and hills back behind the pillars, the band split working (the
+;;    hills slower than the front, the clouds slower still).
+;; 5. C with the overlay on: black behind the boxes, nothing of the world showing.
+;; 6. The results file: whether the band strings survived the DisplayControls calls, and the
+;;    page redraw's lines.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_O     = $18
+#RAW_KEY_C     = $33
+#RAW_KEY_B     = $35
+#RAW_KEY_SPACE = $40
+#RAW_KEY_ESC   = $45
+#RAW_KEY_UP    = $4C
+#RAW_KEY_DOWN  = $4D
+#RAW_KEY_U     = $16
+#RAW_KEY_F     = $23
+
+;; The CopList object (displaylib.ab3, NEWTYPE .mycop): the pointer to its custom copper
+;; area is the eighth long. The byte offsets of the strings' value words, from customs.
+#POKE_FIRST    = 10
+#MYCOP_CUSTOMS = 28
+#POKE_SECOND   = 34
+
+;; The hills' x in quarter pixels, less the fine part: changes once every 64 px.
+#HILL_BLOCK_MASK = $FF00
+
+#LIST_GAP   = 3
+#HUD_H      = 16
+#COPPER_COLORS = 32
+#VIEW_TOP   = 32
+;; The lists' first line: 44 on a PAL machine, 32 on NTSC, as the game (constants.ab3,
+;; #HUD_YPOS_PAL and _NTSC; proofs/ntsc-lines.ab3: from 36 down the picture runs past NTSC's last
+;; line). The proof's first NTSC run used 44 and its HUD came out corrupt.
+#HUD_YPOS_PAL  = 44
+#HUD_YPOS_NTSC = 32
+#VIEW_H     = 208
+#VIEW_W     = 320
+
+#HUD_FLAGS   = $13014
+#WORLD_FLAGS = $13038
+
+#STRING_B_SLOT = 6
+#BAND_CUSTOMS  = 13
+
+;; DisplayControls XORs each register with its current value in the list: this flips PF2PRI
+;; (BPLCON2 bit 6), the back in front, on and off again.
+#PLAYFIELD2_PRIORITY = $40
+;; BPLCON3 is the library default $c00 XOR this: PF2OF 16 rather than 8.
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the shape source, 5 the cover.
+#BM_A       = 0
+#BM_B       = 1
+#BM_BACK    = 2
+#BM_HUD     = 3
+#BM_SHAPE   = 4
+#BM_COVER   = 5
+#WORLD_H    = 256
+#HUD_W      = 384
+#FRONT_WRAP = 512
+#PERIOD     = 768
+#FRONT_W    = 1024
+#BACK_W     = 1152
+
+;; The two pages of the canvas, each the view plus the fetch guard.
+#PAGE_W = 384
+
+#BAND_LINE = 80
+
+#BPL2PTH = $E4
+#BPL4PTH = $EC
+#BPL6PTH = $F4
+#BPL8PTH = $FC
+#BPLCON1 = $102
+
+#BOB_SHAPE = 0
+#TILE      = 16
+#BOB_BYTES = 16384
+
+#MENU_LINES = 3
+#BOBS       = 8
+#WORK_LINE  = 80
+#LINES_PAL  = 312
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+cameraX.q = 0
+frontX.q = 0
+cloudX.q = 0
+hillX.q = 0
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+backBytesPerRow.l = 0
+copListAddress.l = 0
+customsAddress.l = 0
+pokeMode.w = False
+overlayOn.w = False
+coverOn.w = False
+singleBuffer.w = False
+animateOn.w = False
+pageDirty.w = False
+shownPage.w = 0
+pageToShow.w = 0
+cursorLine.w = 0
+oWasDown.w = False
+cWasDown.w = False
+bWasDown.w = False
+spaceWasDown.w = False
+upWasDown.w = False
+downWasDown.w = False
+fractionalSpeed.w = False
+fWasDown.w = False
+bandFrozen.w = False
+uWasDown.w = False
+controlCalls.l = 0
+stringsLost.l = 0
+redrawCount.l = 0
+redrawLines.l = 0
+redrawSum.l = 0
+redrawMax.l = 0
+
+Dim backPlane.l(3)
+Dim frontScrollPart.l(255)
+Dim backScrollPart.l(255)
+lastHillBlock.l = -1
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_SHAPE, 16, #TILE, 4
+BitMap #BM_COVER, #PAGE_W, #WORLD_H, 4
+
+backBytesPerRow = Peek.w(Addr BitMap(#BM_BACK))
+For planeIndex.w = 0 To 3
+  backPlane(planeIndex) = Peek.l(Addr BitMap(#BM_BACK) + 8 + planeIndex*4)
+Next
+
+;; 0 the sky; 1 to 7 reds; 8 to 15 yellows; 16 black; 17 to 23 blues; 24 to 31 greys.
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+For colourIndex.w = 1 To 7
+  AGAPalRGB 0, colourIndex, 100 + colourIndex*22, 0, 0
+  AGAPalRGB 0, colourIndex + 8, 100 + colourIndex*22, 100 + colourIndex*22, 0
+  AGAPalRGB 0, colourIndex + 16, 0, 0, 100 + colourIndex*22
+  AGAPalRGB 0, colourIndex + 24, 60 + colourIndex*25, 60 + colourIndex*25, 60 + colourIndex*25
+Next
+AGAPalRGB 0, 8, 255, 255, 0
+AGAPalRGB 0, 16, 0, 0, 0
+AGAPalRGB 0, 24, 40, 40, 40
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+; The machine's standard, read in Amiga mode (as init.ab3 does): False on PAL, True on NTSC.
+videoIsNtsc.w = NTSC
+hudLine.w = #HUD_YPOS_PAL
+If videoIsNtsc = True Then hudLine = #HUD_YPOS_NTSC
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+; A 16 bit value as the signed word Mki$ and Poke.w take.
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+;; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels, in the
+;; playfield 1 bits. Playfield 2's part is this times 16.
+Function.l ScrollPart{delay.l}
+  Function Return (delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+;; The two copper strings at the band line, built from scratch (band-split.ab3).
+Statement UpdateBand{}
+  SHARED frontX, hillX, backPlane(), backBytesPerRow
+  frontQuarter.l = Int(frontX*4)
+  hillQuarter.l = Int(hillX*4)
+  control.l = ScrollPart{255 - (frontQuarter AND 255)} + ScrollPart{255 - (hillQuarter AND 255)}*16
+  coarseBytes.l = (hillQuarter/256)*8
+  rowStart.l = (#VIEW_TOP + #BAND_LINE - 1)*backBytesPerRow + coarseBytes
+  pointer0.l = backPlane(0) + rowStart
+  pointer1.l = backPlane(1) + rowStart
+  firstString$ = Mki$(#BPL2PTH) + Mki$(SignedWord{pointer0/65536}) + Mki$(#BPL2PTH + 2) + Mki$(SignedWord{pointer0})
+  firstString$ = firstString$ + Mki$(#BPL4PTH) + Mki$(SignedWord{pointer1/65536}) + Mki$(#BPL4PTH + 2) + Mki$(SignedWord{pointer1})
+  rowStart = rowStart + backBytesPerRow
+  pointer2.l = backPlane(2) + rowStart
+  pointer3.l = backPlane(3) + rowStart
+  secondString$ = Mki$(#BPL6PTH) + Mki$(SignedWord{pointer2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{pointer2})
+  secondString$ = secondString$ + Mki$(#BPL8PTH) + Mki$(SignedWord{pointer3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{pointer3})
+  secondString$ = secondString$ + Mki$(#BPLCON1) + Mki$(SignedWord{control})
+  CustomString 1, 0, #BAND_LINE - 2, firstString$
+  CustomString 1, #STRING_B_SLOT, #BAND_LINE - 1, secondString$
+End Statement
+
+Statement PokeBandPointers{hillQuarter.l}
+  SHARED backPlane(), backBytesPerRow, customsAddress
+  rowStart.l = (#VIEW_TOP + #BAND_LINE - 1)*backBytesPerRow + (hillQuarter/256)*8
+  pointer.l = backPlane(0) + rowStart
+  Poke.w customsAddress + #POKE_FIRST, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_FIRST + 4, SignedWord{pointer}
+  pointer = backPlane(1) + rowStart
+  Poke.w customsAddress + #POKE_FIRST + 8, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_FIRST + 12, SignedWord{pointer}
+  rowStart = rowStart + backBytesPerRow
+  pointer = backPlane(2) + rowStart
+  Poke.w customsAddress + #POKE_SECOND, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_SECOND + 4, SignedWord{pointer}
+  pointer = backPlane(3) + rowStart
+  Poke.w customsAddress + #POKE_SECOND + 8, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_SECOND + 12, SignedWord{pointer}
+End Statement
+
+Statement PokeBand{}
+  SHARED frontX, hillX, customsAddress, lastHillBlock, frontScrollPart(), backScrollPart()
+  frontQuarter.l = Int(frontX*4)
+  hillQuarter.l = Int(hillX*4)
+  control.l = frontScrollPart(frontQuarter AND 255) + backScrollPart(hillQuarter AND 255)
+  Poke.w customsAddress + #POKE_SECOND + 16, SignedWord{control}
+  hillBlock.l = hillQuarter AND #HILL_BLOCK_MASK
+  If hillBlock <> lastHillBlock
+    lastHillBlock = hillBlock
+    PokeBandPointers{hillQuarter}
+  EndIf
+End Statement
+
+Statement BuildScrollTables{}
+  SHARED frontScrollPart(), backScrollPart()
+  For fineIndex.w = 0 To 255
+    frontScrollPart(fineIndex) = ScrollPart{255 - fineIndex}
+    backScrollPart(fineIndex) = ScrollPart{255 - fineIndex}*16
+  Next
+End Statement
+
+;; The poke path is used only while both strings' first register words are where the
+;; layout puts them. Checked at start and after every DisplayControls call; strings found
+;; missing after a call are counted. lastHillBlock is cleared so the pointers are poked again.
+Statement CheckBandStrings{}
+  SHARED copListAddress, customsAddress, pokeMode, stringsLost, controlCalls, lastHillBlock
+  wasPoking.w = pokeMode
+  pokeMode = False
+  copListAddress = Addr CopList(1)
+  customsAddress = Peek.l(copListAddress + #MYCOP_CUSTOMS)
+  If customsAddress <> 0
+    If Peek.w(customsAddress + #POKE_FIRST - 2) = #BPL2PTH
+      If Peek.w(customsAddress + #POKE_SECOND - 2) = #BPL6PTH Then pokeMode = True
+    EndIf
+  EndIf
+  If controlCalls > 0 AND wasPoking = True AND pokeMode = False Then stringsLost = stringsLost + 1
+  lastHillBlock = -1
+End Statement
+
+;; The HUD: a red box for single buffered, a bright yellow box for the cover, a dull yellow
+;; box while the overlay is on.
+Statement DrawHud{}
+  SHARED singleBuffer, coverOn, overlayOn, fractionalSpeed, bandFrozen
+  Use BitMap #BM_HUD
+  Cls 0
+  If singleBuffer = True Then Boxf 296, 4, 303, 11, 4
+  If coverOn = True Then Boxf 284, 4, 291, 11, 15
+  If overlayOn = True Then Boxf 272, 4, 279, 11, 10
+  If fractionalSpeed = True Then Boxf 8, 4, 15, 11, 4
+  If bandFrozen = True Then Boxf 20, 4, 27, 11, 2
+End Statement
+
+;; The front: ground in pens 1 and 2, a tall pillar in pen 3 every 128 px.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 1
+    If columnIndex MOD 2 = 1 Then pen = 2
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 40, pillarX + 23, 207, 3
+  Next
+End Statement
+
+Statement DrawBackPiece{pieceX.w}
+  Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+  Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+  Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+  Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+End Statement
+
+;; The clouds and hills, as the game's StampBackPlayfield{} puts them back after the overlay.
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    DrawBackPiece{pieceX}
+  Next
+  Boxf 0, 36, 3, 95, 7
+  Boxf #PERIOD, 36, #PERIOD + 3, 95, 7
+  Boxf 0, 128, 3, 207, 7
+  Boxf #PERIOD, 128, #PERIOD + 3, 207, 7
+End Statement
+
+;; One page of the overlay at x pageX of the back bitmap, cleared to pen 0 first. The logo
+;; block where the title's logo sits (176 x 88 from row 48), with a hole of pen 0 through
+;; it, a stripe across the band line so a step there shows, three menu lines, the cursor
+;; and, while Space is on, a bar that grows a pixel a frame.
+Statement DrawPage{pageX.w}
+  SHARED cursorLine, animateOn, frameCount
+  Use BitMap #BM_BACK
+  Boxf pageX, #VIEW_TOP, pageX + #PAGE_W - 1, #VIEW_TOP + #VIEW_H - 1, 0
+  Boxf pageX + 72, 48, pageX + 247, 135, 3
+  Boxf pageX + 80, 56, pageX + 239, 127, 2
+  Boxf pageX + 136, 72, pageX + 183, 111, 0
+  Boxf pageX + 16, #VIEW_TOP + #BAND_LINE - 4, pageX + 303, #VIEW_TOP + #BAND_LINE + 3, 6
+  For lineIndex.w = 0 To #MENU_LINES - 1
+    Boxf pageX + 112, 160 + lineIndex*16, pageX + 223 - lineIndex*16, 167 + lineIndex*16, 7
+  Next
+  Boxf pageX + 96, 160 + cursorLine*16, pageX + 103, 167 + cursorLine*16, 5
+  If animateOn = True
+    Boxf pageX + 80, 216, pageX + 80 + (frameCount MOD 160), 223, 4
+  EndIf
+End Statement
+
+Statement MakeShapes{}
+  Use BitMap #BM_SHAPE
+  Cls 0
+  Circlef 7, 7, 7, 4
+  Circlef 7, 7, 3, 7
+  GetaShape #BOB_SHAPE, 0, 0, #TILE, #TILE
+End Statement
+
+BBlitMode CookieMode
+MakeShapes{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+DrawHud{}
+Use BitMap #BM_COVER
+Cls 0
+
+InitCopList 0, hudLine, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, #BAND_CUSTOMS
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+BuildScrollTables{}
+UpdateBand{}
+CheckBandStrings{}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  ;; O: the overlay. On, both pages are drawn before the back comes to the front, so the
+  ;; first frame shows a whole page. Off, the back goes behind, then the strip is redrawn.
+  If RawStatus(#RAW_KEY_O)
+    If oWasDown = False
+      overlayOn = NOT overlayOn
+      If overlayOn = True
+        DrawPage{0}
+        DrawPage{#PAGE_W}
+        shownPage = 0
+        pageToShow = 0
+        VWait
+        DisplayControls 1, #PLAYFIELD2_PRIORITY, 0, 0
+      Else
+        coverOn = False
+        AGAPalRGB 0, 0, 92, 148, 252
+        DisplayPalette 0, 0
+        VWait
+        DisplayControls 1, #PLAYFIELD2_PRIORITY, 0, 0
+        DrawBack{}
+      EndIf
+      controlCalls = controlCalls + 1
+      CheckBandStrings{}
+      DrawHud{}
+    EndIf
+    oWasDown = True
+  Else
+    oWasDown = False
+  EndIf
+
+  ;; C: the cover under the overlay, the front blank with entry 0 black.
+  If RawStatus(#RAW_KEY_C)
+    If cWasDown = False AND overlayOn = True
+      coverOn = NOT coverOn
+      If coverOn = True
+        AGAPalRGB 0, 0, 0, 0, 0
+      Else
+        AGAPalRGB 0, 0, 92, 148, 252
+      EndIf
+      DisplayPalette 0, 0
+      DrawHud{}
+    EndIf
+    cWasDown = True
+  Else
+    cWasDown = False
+  EndIf
+
+  If RawStatus(#RAW_KEY_B)
+    If bWasDown = False
+      singleBuffer = NOT singleBuffer
+      DrawHud{}
+    EndIf
+    bWasDown = True
+  Else
+    bWasDown = False
+  EndIf
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If spaceWasDown = False
+      animateOn = NOT animateOn
+      pageDirty = True
+    EndIf
+    spaceWasDown = True
+  Else
+    spaceWasDown = False
+  EndIf
+
+  If RawStatus(#RAW_KEY_UP)
+    If upWasDown = False AND cursorLine > 0
+      cursorLine = cursorLine - 1
+      pageDirty = True
+    EndIf
+    upWasDown = True
+  Else
+    upWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_DOWN)
+    If downWasDown = False AND cursorLine < #MENU_LINES - 1
+      cursorLine = cursorLine + 1
+      pageDirty = True
+    EndIf
+    downWasDown = True
+  Else
+    downWasDown = False
+  EndIf
+  If animateOn = True Then pageDirty = True
+
+  If RawStatus(#RAW_KEY_F)
+    If fWasDown = False
+      fractionalSpeed = NOT fractionalSpeed
+      DrawHud{}
+    EndIf
+    fWasDown = True
+  Else
+    fWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_U)
+    If uWasDown = False
+      bandFrozen = NOT bandFrozen
+      DrawHud{}
+    EndIf
+    uWasDown = True
+  Else
+    uWasDown = False
+  EndIf
+
+  ;; The front scrolls right at 1 px a frame (or 213/256, F); the clouds at a quarter, the hills at half.
+  If fractionalSpeed = True
+    cameraX = cameraX + 213*0.00390625
+  Else
+    cameraX = cameraX + 1
+  EndIf
+  If cameraX >= #PERIOD*4 Then cameraX = cameraX - #PERIOD*4
+  frontX = cameraX
+  While frontX >= #FRONT_WRAP
+    frontX = frontX - #FRONT_WRAP
+  Wend
+  cloudX = cameraX/4
+  While cloudX >= #PERIOD
+    cloudX = cloudX - #PERIOD
+  Wend
+  hillX = cameraX/2
+  While hillX >= #PERIOD
+    hillX = hillX - #PERIOD
+  Wend
+  viewX = Int(frontX)
+
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  UnBuffer drawBuf
+  For bobIndex.w = 0 To #BOBS - 1
+    BBlit drawBuf, #BOB_SHAPE, viewX + 20 + bobIndex*36, 112 + (bobIndex MOD 2)*48
+  Next
+
+  ;; A changed page: on the hidden page, shown after the VWait; or, single buffered, on the
+  ;; shown page while it is being displayed.
+  pageToShow = shownPage
+  If overlayOn = True AND pageDirty = True
+    startLine = RasterLine{}
+    If singleBuffer = True
+      DrawPage{shownPage*#PAGE_W}
+    Else
+      pageToShow = 1 - shownPage
+      DrawPage{pageToShow*#PAGE_W}
+    EndIf
+    endLine = RasterLine{}
+    redrawLines = endLine - startLine
+    If redrawLines < 0 Then redrawLines = redrawLines + #LINES_PAL
+    redrawCount = redrawCount + 1
+    redrawSum = redrawSum + redrawLines
+    If redrawLines > redrawMax Then redrawMax = redrawLines
+    pageDirty = False
+  EndIf
+
+  VWait
+  If overlayOn = True
+    shownPage = pageToShow
+    ;; The canvas does not scroll: both bands at the page's x.
+    cloudX = shownPage*#PAGE_W
+    hillX = cloudX
+  EndIf
+  If coverOn = True
+    frontX = 0
+    DisplayBitMap 1, #BM_COVER, 0, #VIEW_TOP, #BM_BACK, cloudX, #VIEW_TOP
+  Else
+    DisplayBitMap 1, drawBm, frontX, #VIEW_TOP, #BM_BACK, cloudX, #VIEW_TOP
+  EndIf
+  If bandFrozen = False
+    If pokeMode = True
+      PokeBand{}
+    Else
+      UpdateBand{}
+    EndIf
+  EndIf
+
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/overlay-results.txt")
+  FileOutput 0
+  NPrint "overlay: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", customs ", #BAND_CUSTOMS, ", ", frameCount, " frames"
+  NPrint "DisplayControls calls at run time: ", controlCalls, ", band strings lost after one: ", stringsLost
+  If pokeMode = True
+    NPrint "band update at exit: by poking the copper list (customs at $", Hex$(customsAddress), ")"
+  Else
+    NPrint "band update at exit: by CustomString, the poke check failed (CopList at $", Hex$(copListAddress), ", customs read as $", Hex$(customsAddress), ")"
+  EndIf
+  If redrawCount > 0
+    NPrint "page redraws: ", redrawCount, ", average lines ", redrawSum/redrawCount, ", worst ", redrawMax
+  Else
+    NPrint "page redraws: none (the overlay was never changed while on)"
+  EndIf
+  NPrint ""
+  NPrint "The picture is the main result: report the six points at the top of the proof."
+  CloseFile 0
+EndIf
+End

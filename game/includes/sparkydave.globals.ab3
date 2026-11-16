@@ -1,0 +1,1446 @@
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+;; Fast RAM at launch, read first, before any Dim: the library allocates every array from any memory (MEMF_PUBLIC,
+;; arrayslib.ab3), so Fast RAM when the machine has it. AvailMem_(4) is MEMF_FAST, AvailMem_($20004) its largest block.
+fastRamLaunch.l = AvailMem_(4)
+fastRamLaunchLargest.l = AvailMem_($20004)
+
+quitFlag.w = False
+; Non-zero when a level could not be begun (its area files are not good): the game stops, and says so on leaving.
+levelLoadFailCode.w = 0
+;; The highest level (an index into the level table) the player has got to, which the settings file keeps, and the level the
+;; title's LEVEL row chose for the next new game (a choice for this run only: it is not saved).
+levelReached.w = 0
+startLevelChosen.w = 0
+videoIsNtsc.w = False
+simAccumulator.w = 0
+simStepNumerator.w = #SIM_HZ
+simStepDenominator.w = #SIM_HZ
+soundAccumulator.w = 0
+soundStepDenominator.w = #SIM_HZ_PAL
+mapWidth.w = 0
+displayBitmap.w = #PLAY_BM_A
+drawBitmap.w = #PLAY_BM_B
+drawBuffer.w = #BOB_BUF_B
+cameraX.q = 0
+scrollX.q = 0
+;; The back playfield's display x (the clouds' band) and the hills' band's x: the camera's scrollX
+;; times the preset's rates, wrapped into the 768 px strip (BuildRenderView{}).
+backScrollX.q = 0
+hillScrollX.q = 0
+;; The speed presets, the clouds' and the hills' share of the camera's movement (constants.ab3,
+;; #PARALLAX_PRESETS): 1 and 1 is the cartridge's picture.
+parallaxPreset.w = #PARALLAX_DEFAULT
+;; The world's scroll is in whole pixels (True) or with the camera's 1/256 fraction (False). A front at
+;; fractions of a pixel moves the back playfield by a pixel (the main project's AMIGA_RENDERER note, "The overlay"), so whole pixels are used.
+;; Del switches it in debug mode, to compare the two.
+wholePixelScroll.w = True
+oldDel.w = False
+Dim parallaxCloudRate.q(#PARALLAX_PRESETS - 1)
+Dim parallaxHillRate.q(#PARALLAX_PRESETS - 1)
+parallaxCloudRate(0) = 1
+parallaxHillRate(0) = 1
+parallaxCloudRate(1) = 0.5
+parallaxHillRate(1) = 0.75
+parallaxCloudRate(2) = 0.25
+parallaxHillRate(2) = 0.5
+parallaxCloudRate(3) = 0.125
+parallaxHillRate(3) = 0.5
+parallaxCloudRate(4) = 0
+parallaxHillRate(4) = 0.5
+parallaxCloudRate(5) = 0.25
+parallaxHillRate(5) = 0.75
+oldF10.w = False
+;; The world bitmap check (F10 in debug mode, CheckWorldBitmaps{} in sparkydave.map.blitz.ab3; the report, WriteBitmapCheckReport{}):
+;; for each press, what was on show and how many words differed; for each word kept, the press, the bitmap (0 or 1), the cell's
+;; column, the pixel row in the world, the plane, the word the atlas wants and the word found.
+oldCheckKey.w = False
+checkPressCount.w = 0
+checkWordCount.w = 0
+Dim checkPressLevel.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressArea.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressCamera.l(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressDrawBitmap.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressQueued.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressWords.l(#BITMAP_CHECK_PRESSES - 1)
+Dim checkPressSkipped.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkWordPress.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordBitmap.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordColumn.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordRow.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordPlane.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordWanted.w(#BITMAP_CHECK_MAX - 1)
+Dim checkWordFound.w(#BITMAP_CHECK_MAX - 1)
+;; The whole-area part of the check: each press's strays (IsStrayWord{}), and each one kept: the press, the bitmap, the column, the
+;; pixel row, the plane and the word wanted. strayWanted is IsStrayWord{}'s word wanted, left for its caller.
+strayWanted.w = 0
+checkStrayCount.w = 0
+Dim checkPressStrays.w(#BITMAP_CHECK_PRESSES - 1)
+Dim checkStrayPress.w(#BITMAP_CHECK_STRAYS - 1)
+Dim checkStrayBitmap.w(#BITMAP_CHECK_STRAYS - 1)
+Dim checkStrayColumn.w(#BITMAP_CHECK_STRAYS - 1)
+Dim checkStrayRow.w(#BITMAP_CHECK_STRAYS - 1)
+Dim checkStrayPlane.w(#BITMAP_CHECK_STRAYS - 1)
+Dim checkStrayWanted.w(#BITMAP_CHECK_STRAYS - 1)
+;; The watch (WatchWorldBitmaps{}, switched by F10): whether it is on, its frame count (from 1) and frames on, the next pixel row
+;; to look at, the frame each row was last looked at (-1: not since the watch went on) and the columns it covered, and the ring of each frame's state
+;; (#WATCH_FIELDS numbers, the frame's at (frame MOD #WATCH_RING)*#WATCH_FIELDS). For each candidate word: when it was first seen,
+;; the frame its row was last seen clean, the bitmap, column, pixel row, plane, the word wanted, the camera, the frame it was seen
+;; again in the same place (0 not yet: only those are strays), and a copy of the ring at the first sighting. The candidates seen
+;; and the strays among them are counted.
+watchOn.w = False
+watchFrame.l = 0
+watchFramesOn.l = 0
+watchNextRow.w = 0
+watchFoundCount.w = 0
+watchFoundTotal.w = 0
+Dim watchRowFrame.l(#WATCH_PIXEL_ROWS - 1)
+Dim watchRowFirst.w(#WATCH_PIXEL_ROWS - 1)
+Dim watchRowLast.w(#WATCH_PIXEL_ROWS - 1)
+Dim watchRing.l(#WATCH_RING*#WATCH_FIELDS - 1)
+Dim watchFoundFrame.l(#WATCH_MAX - 1)
+Dim watchFoundSince.l(#WATCH_MAX - 1)
+Dim watchFoundBitmap.w(#WATCH_MAX - 1)
+Dim watchFoundColumn.w(#WATCH_MAX - 1)
+Dim watchFoundRow.w(#WATCH_MAX - 1)
+Dim watchFoundPlane.w(#WATCH_MAX - 1)
+Dim watchFoundWanted.w(#WATCH_MAX - 1)
+Dim watchFoundCamera.l(#WATCH_MAX - 1)
+Dim watchFoundConfirmed.l(#WATCH_MAX - 1)
+watchConfirmedTotal.w = 0
+Dim watchFoundRing.l(#WATCH_MAX*#WATCH_RING*#WATCH_FIELDS - 1)
+;; The stamp repair (RepairStampedBitmaps{}, every stamp; kept in debug mode): the stamps checked, whether the tile set changed since the
+;; last stamp (EnsureTileSet{} sets it), and for each stamp with words differing: its number, the level, the area, the area's type,
+;; the tile set flag and the words differing. For each word kept: its stamp, the column, the pixel row, the plane, whether a word
+;; is wanted there (False: a cell the stamp does not draw), the word wanted and the word in each bitmap.
+stampCheckTotal.l = 0
+tileSetJustChanged.w = False
+stampBadCount.w = 0
+stampWordCount.w = 0
+Dim stampBadNumber.l(#STAMP_CHECK_STAMPS - 1)
+Dim stampBadLevel.w(#STAMP_CHECK_STAMPS - 1)
+Dim stampBadArea.w(#STAMP_CHECK_STAMPS - 1)
+Dim stampBadType.w(#STAMP_CHECK_STAMPS - 1)
+Dim stampBadSetChanged.w(#STAMP_CHECK_STAMPS - 1)
+Dim stampBadWords.l(#STAMP_CHECK_STAMPS - 1)
+Dim stampWordStamp.l(#STAMP_CHECK_WORDS - 1)
+Dim stampWordColumn.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordRow.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordPlane.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordKnown.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordWanted.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordFoundA.w(#STAMP_CHECK_WORDS - 1)
+Dim stampWordFoundB.w(#STAMP_CHECK_WORDS - 1)
+;; The band split's state (sparkydave.parallax.blitz.ab3): the back's plane addresses and bytes a
+;; row, the BPLCON1 tables (by fine position, 0 to 255 quarter pixels), the copper list's custom
+;; area, whether poking it is safe, and the hills' last 64 px block.
+Dim backPlane.l(3)
+backBytesPerRow.l = 0
+Dim frontScrollPart.l(255)
+Dim backScrollPart.l(255)
+bandCustoms.l = 0
+;; List 2's custom area (the same strings as list 1's, #BAND_LINE_AWAY lines in), and the HUD-away state: the lists
+;; on show (True: list 2, the HUD gone) and the lists wanted this frame (HudAwayNeeded{}).
+bandCustomsAway.l = 0
+hudAwayShown.w = False
+hudAwayWanted.w = False
+;; Which scenery kind's strip the back playfield's bitmap holds (#SCENERY_*), or -1 when it holds none of them: at start, and
+;; when the title or pause overlay has used it as its canvas (EnsureBackStrip{}).
+backStampedKind.w = -1
+; The HUD's copy in the back bitmap (UpdateHudMirror{}) is stale: the HUD band changed, or the back was stamped afresh or used as a canvas.
+hudMirrorStale.w = False
+;; Debug only (the frame time report): the copies of the HUD into the world bitmap and the cuts of Mario at the top of the bitmap,
+;; how many, the raster lines they took in all and the worst one.
+hudStampTimed.l = 0
+; The frame each of Mario's cut-short shapes (#PLAYER_CLIP_SLOTS) holds, plus one: 0 is none.
+Dim playerClipFrame.w(#PLAYER_CLIP_SLOTS - 1)
+hudStampLines.l = 0
+hudStampWorst.l = 0
+clipCutTimed.l = 0
+clipDrawn.l = 0
+clipCutLines.l = 0
+clipCutWorst.l = 0
+bandPokeOk.w = False
+bandLastHillBlock.l = 0
+mapGid.w = 0
+mapPixelX.w = 0
+mapPixelY.w = 0
+
+;; Cells awaiting a repaint, drained into both playfield bitmaps by
+;; RedrawMetatileCells{}. See sparkydave.map.blitz.ab3.
+Dim redrawCell.w(#MAX_REDRAW_CELLS - 1)
+redrawCount.w = 0
+redrawDoneA.w = False
+redrawDoneB.w = False
+cameraTargetX.w = 0
+viewLeft.w = 0
+viewRight.w = 0
+cameraMaxX.q = 0
+playerX.w = 0
+playerY.w = 0
+playerFacing.w = #MARIO_FACE_RIGHT
+playerFrame.w = 0
+playerAnimTimer.w = 0
+playerAnimPeriod.w = #MARIO_ANIM_SLOW
+playerOnGround.w = True
+playerButtons.w = 0
+playerButtonsLast.w = 0
+;; Jump forgiveness (sparkydave.player.blitz.ab3, TryStartJump{}): the windows in ticks (0 is off)
+;; and the countdowns. The windows follow the two levels (#FORGIVENESS_*, the options page),
+;; ApplyForgiveness{} sets them: at the start, and on a change.
+Dim forgivenessLevel.w(1)
+forgivenessLevel(#FORGIVENESS_BUFFER) = #FORGIVENESS_DEFAULT
+forgivenessLevel(#FORGIVENESS_COYOTE) = #FORGIVENESS_DEFAULT
+;; Every level's name and window in one place: forgivenessWindowTicks(setting, level), the variant's
+;; lengths (0 is off, the cartridge's behaviour).
+Dim forgivenessName$(#FORGIVENESS_LEVELS - 1)
+forgivenessName$(#FORGIVENESS_OFF) = "OFF"
+forgivenessName$(#FORGIVENESS_LOW) = "LOW"
+forgivenessName$(#FORGIVENESS_MEDIUM) = "MEDIUM"
+forgivenessName$(#FORGIVENESS_HIGH) = "HIGH"
+Dim forgivenessWindowTicks.w(1, #FORGIVENESS_LEVELS - 1)
+forgivenessWindowTicks(#FORGIVENESS_BUFFER, #FORGIVENESS_OFF) = 0
+forgivenessWindowTicks(#FORGIVENESS_BUFFER, #FORGIVENESS_LOW) = #JUMP_BUFFER_LOW_TICKS
+forgivenessWindowTicks(#FORGIVENESS_BUFFER, #FORGIVENESS_MEDIUM) = #JUMP_BUFFER_TICKS
+forgivenessWindowTicks(#FORGIVENESS_BUFFER, #FORGIVENESS_HIGH) = #JUMP_BUFFER_HIGH_TICKS
+forgivenessWindowTicks(#FORGIVENESS_COYOTE, #FORGIVENESS_OFF) = 0
+forgivenessWindowTicks(#FORGIVENESS_COYOTE, #FORGIVENESS_LOW) = #COYOTE_LOW_TICKS
+forgivenessWindowTicks(#FORGIVENESS_COYOTE, #FORGIVENESS_MEDIUM) = #COYOTE_TICKS
+forgivenessWindowTicks(#FORGIVENESS_COYOTE, #FORGIVENESS_HIGH) = #COYOTE_HIGH_TICKS
+jumpBufferWindow.w = #JUMP_BUFFER_TICKS
+coyoteWindow.w = #COYOTE_TICKS
+jumpBufferTimer.w = 0
+coyoteTimer.w = 0
+;; Continues: the options page's choice (saved), each choice's name and number of continues (#CONTINUES_INFINITE for
+;; no limit), and how many this game has used (0 at a new game: RestartLevel{True}). What is left is the number less those used
+;; (ContinuesLeft{}), so a choice changed mid-game counts at once.
+continuesChoice.w = #CONTINUES_DEFAULT
+continuesUsed.w = 0
+Dim continuesName$(#CONTINUES_CHOICES - 1)
+Dim continuesAllowed.w(#CONTINUES_CHOICES - 1)
+continuesName$(0) = "NONE"
+continuesAllowed(0) = 0
+continuesName$(1) = "1"
+continuesAllowed(1) = 1
+continuesName$(2) = "2"
+continuesAllowed(2) = 2
+continuesName$(3) = "5"
+continuesAllowed(3) = 5
+continuesName$(4) = "10"
+continuesAllowed(4) = 10
+continuesName$(5) = "INFINITE"
+continuesAllowed(5) = #CONTINUES_INFINITE
+playerSpeedX.w = 0
+playerMoveForceX.w = 0
+playerFractionX.w = 0
+cameraFractionX.w = 0
+;; The whole pixels a platform has carried Mario since the camera last looked (the cartridge's Platform_X_Scroll, which ScrollHandler adds to
+;; the player's own scroll amount, smbdis 5377): set by UpdateLift{}, taken and cleared by CameraFollow{}.
+platformCarryX.w = 0
+playerSpeedY.w = 0
+playerMoveForceY.w = 0
+playerFractionY.w = 0
+playerVerticalForce.w = 0
+playerFallForce.w = #MARIO_GRAV_FALL_INIT
+;; Swimming (a water area): the cartridge's JumpSwimTimer (ticks a stroke may follow another while he still rises),
+;; its Whirlpool_Flag (he was in a whirlpool last tick: the next stroke is the weaker one) and the count whose low bit
+;; times the whirlpool's sideways pull (its FrameCounter).
+jumpSwimTimer.w = 0
+whirlpoolFlag.w = False
+whirlpoolTick.w = 0
+; Which of the three swim pictures he is on (the cartridge's PlayerAnimCtrl while swimming: 0 to 2).
+playerSwimStep.w = 0
+;; The cartridge's pseudorandom register (PseudoRandomBitReg, smbdis 803: seven bytes, seeded $a5 at power-up, stepped once a tick
+;; by StepRandomBits{}). The Bloober aims by it; the frenzies will too.
+Dim randomBits.w(6)
+randomBits(0) = $a5
+;; The frenzy (UpdateFrenzy{}): its kind now (#FRENZY_KIND_*, the cartridge's EnemyFrenzyBuffer), its timer (FrenzyEnemyTimer) and
+;; the heights it has used (BitMFilter, a bit each of frenzyHeights(), Enemy17YPosData: all eight are used before any again).
+frenzyKind.w = #FRENZY_KIND_STOP
+frenzyTimer.w = 0
+frenzyHeightFilter.w = 0
+;; The flying frenzy's tables (smbdis 8405): FlyCCXPositionData (how far from Mario a flyer comes), the sideways speeds and the timers
+;; (FlyCCXSpeedData and FlyCCTimerData, the variant files' #FLY_CHEEP_SPEED_* and _TIMER_*), and the nudge's heights: PRandomSubtracter's
+;; five, then the eleven bytes after it the cartridge reads too (FlyCCBPriority, then MoveFlyingCheepCheep's own first instructions).
+Dim flyCheepPosition.w(15)
+Dim flyCheepNudgeHeight.w(15)
+Dim flyCheepSpeed.w(11)
+Dim flyCheepTimer.w(3)
+flyCheepPosition(0) = $80
+flyCheepPosition(1) = $30
+flyCheepPosition(2) = $40
+flyCheepPosition(3) = $80
+flyCheepPosition(4) = $30
+flyCheepPosition(5) = $50
+flyCheepPosition(6) = $50
+flyCheepPosition(7) = $70
+flyCheepPosition(8) = $20
+flyCheepPosition(9) = $40
+flyCheepPosition(10) = $80
+flyCheepPosition(11) = $a0
+flyCheepPosition(12) = $70
+flyCheepPosition(13) = $40
+flyCheepPosition(14) = $90
+flyCheepPosition(15) = $68
+flyCheepNudgeHeight(0) = $f8
+flyCheepNudgeHeight(1) = $a0
+flyCheepNudgeHeight(2) = $70
+flyCheepNudgeHeight(3) = $bd
+flyCheepNudgeHeight(4) = $00
+flyCheepNudgeHeight(5) = $20
+flyCheepNudgeHeight(6) = $20
+flyCheepNudgeHeight(7) = $20
+flyCheepNudgeHeight(8) = $00
+flyCheepNudgeHeight(9) = $00
+flyCheepNudgeHeight(10) = $b5
+flyCheepNudgeHeight(11) = $1e
+flyCheepNudgeHeight(12) = $29
+flyCheepNudgeHeight(13) = $20
+flyCheepNudgeHeight(14) = $f0
+flyCheepNudgeHeight(15) = $08
+flyCheepSpeed(0) = #FLY_CHEEP_SPEED_0
+flyCheepSpeed(1) = #FLY_CHEEP_SPEED_1
+flyCheepSpeed(2) = #FLY_CHEEP_SPEED_2
+flyCheepSpeed(3) = #FLY_CHEEP_SPEED_3
+flyCheepSpeed(4) = #FLY_CHEEP_SPEED_4
+flyCheepSpeed(5) = #FLY_CHEEP_SPEED_5
+flyCheepSpeed(6) = #FLY_CHEEP_SPEED_6
+flyCheepSpeed(7) = #FLY_CHEEP_SPEED_7
+flyCheepSpeed(8) = #FLY_CHEEP_SPEED_8
+flyCheepSpeed(9) = #FLY_CHEEP_SPEED_9
+flyCheepSpeed(10) = #FLY_CHEEP_SPEED_10
+flyCheepSpeed(11) = #FLY_CHEEP_SPEED_11
+flyCheepTimer(0) = #FLY_CHEEP_TIMER_0
+flyCheepTimer(1) = #FLY_CHEEP_TIMER_1
+flyCheepTimer(2) = #FLY_CHEEP_TIMER_2
+flyCheepTimer(3) = #FLY_CHEEP_TIMER_3
+;; The firebars' tables (smbdis 9678 FirebarPosLookupTbl, 9691 FirebarMirrorData, 8366 FirebarSpinSpdData and FirebarSpinDirData): the
+;; offsets by part (9 a part: one quadrant's 0 to 8), the mirroring by quarter turn (bit 0 x to the right, bit 1 y down), and each kind's
+;; speed and way (0 clockwise, $10 counter-clockwise). firebarBallX and firebarBallY are FirebarBallOffset{}'s answer.
+Dim firebarTable.w(98)
+Dim firebarMirror.w(3)
+Dim firebarSpeed.w(4)
+Dim firebarWay.w(4)
+firebarTable(0) = 0
+firebarTable(1) = 1
+firebarTable(2) = 3
+firebarTable(3) = 4
+firebarTable(4) = 5
+firebarTable(5) = 6
+firebarTable(6) = 7
+firebarTable(7) = 7
+firebarTable(8) = 8
+firebarTable(9) = 0
+firebarTable(10) = 3
+firebarTable(11) = 6
+firebarTable(12) = 9
+firebarTable(13) = 11
+firebarTable(14) = 13
+firebarTable(15) = 14
+firebarTable(16) = 15
+firebarTable(17) = 16
+firebarTable(18) = 0
+firebarTable(19) = 4
+firebarTable(20) = 9
+firebarTable(21) = 13
+firebarTable(22) = 16
+firebarTable(23) = 19
+firebarTable(24) = 22
+firebarTable(25) = 23
+firebarTable(26) = 24
+firebarTable(27) = 0
+firebarTable(28) = 6
+firebarTable(29) = 12
+firebarTable(30) = 18
+firebarTable(31) = 22
+firebarTable(32) = 26
+firebarTable(33) = 29
+firebarTable(34) = 31
+firebarTable(35) = 32
+firebarTable(36) = 0
+firebarTable(37) = 7
+firebarTable(38) = 15
+firebarTable(39) = 22
+firebarTable(40) = 28
+firebarTable(41) = 33
+firebarTable(42) = 37
+firebarTable(43) = 39
+firebarTable(44) = 40
+firebarTable(45) = 0
+firebarTable(46) = 9
+firebarTable(47) = 18
+firebarTable(48) = 27
+firebarTable(49) = 33
+firebarTable(50) = 39
+firebarTable(51) = 44
+firebarTable(52) = 47
+firebarTable(53) = 48
+firebarTable(54) = 0
+firebarTable(55) = 11
+firebarTable(56) = 21
+firebarTable(57) = 31
+firebarTable(58) = 39
+firebarTable(59) = 46
+firebarTable(60) = 51
+firebarTable(61) = 55
+firebarTable(62) = 56
+firebarTable(63) = 0
+firebarTable(64) = 12
+firebarTable(65) = 24
+firebarTable(66) = 36
+firebarTable(67) = 45
+firebarTable(68) = 53
+firebarTable(69) = 59
+firebarTable(70) = 62
+firebarTable(71) = 64
+firebarTable(72) = 0
+firebarTable(73) = 14
+firebarTable(74) = 27
+firebarTable(75) = 40
+firebarTable(76) = 50
+firebarTable(77) = 59
+firebarTable(78) = 66
+firebarTable(79) = 70
+firebarTable(80) = 72
+firebarTable(81) = 0
+firebarTable(82) = 15
+firebarTable(83) = 31
+firebarTable(84) = 45
+firebarTable(85) = 56
+firebarTable(86) = 66
+firebarTable(87) = 74
+firebarTable(88) = 78
+firebarTable(89) = 80
+firebarTable(90) = 0
+firebarTable(91) = 17
+firebarTable(92) = 34
+firebarTable(93) = 49
+firebarTable(94) = 62
+firebarTable(95) = 73
+firebarTable(96) = 81
+firebarTable(97) = 86
+firebarTable(98) = 88
+firebarMirror(0) = $01
+firebarMirror(1) = $03
+firebarMirror(2) = $02
+firebarMirror(3) = $00
+firebarSpeed(0) = #FIREBAR_SPEED_SLOW
+firebarSpeed(1) = #FIREBAR_SPEED_FAST
+firebarSpeed(2) = #FIREBAR_SPEED_SLOW
+firebarSpeed(3) = #FIREBAR_SPEED_FAST
+firebarSpeed(4) = #FIREBAR_SPEED_SLOW
+firebarWay(0) = 0
+firebarWay(1) = 0
+firebarWay(2) = $10
+firebarWay(3) = $10
+firebarWay(4) = 0
+;; Bowser's state (constants.ab3, "BOWSER"): one Bowser at a time, as the cartridge's. The jump's waits and the flame's, by variant, and
+;; the pacing distances (both PRandomRange's).
+bowserOrigX.w = 0
+bowserMaxRange.w = 0
+bowserFeetCounter.w = 0
+bowserBodyControls.w = 0
+bowserFireBreathTimer.w = 0
+bowserFlameTimerCtrl.w = 0
+bowserHitPoints.w = 0
+Dim bowserWait.w(3)
+Dim bowserRange.w(3)
+Dim bowserFlameWait.w(7)
+bowserWait(0) = #BOWSER_WAIT_0
+bowserWait(1) = #BOWSER_WAIT_1
+bowserWait(2) = #BOWSER_WAIT_2
+bowserWait(3) = #BOWSER_WAIT_3
+bowserRange(0) = #BOWSER_RANGE_0
+bowserRange(1) = #BOWSER_RANGE_1
+bowserRange(2) = #BOWSER_RANGE_2
+bowserRange(3) = #BOWSER_RANGE_3
+bowserFlameWait(0) = #BOWSER_FLAME_WAIT_0
+bowserFlameWait(1) = #BOWSER_FLAME_WAIT_1
+bowserFlameWait(2) = #BOWSER_FLAME_WAIT_2
+bowserFlameWait(3) = #BOWSER_FLAME_WAIT_3
+bowserFlameWait(4) = #BOWSER_FLAME_WAIT_4
+bowserFlameWait(5) = #BOWSER_FLAME_WAIT_5
+bowserFlameWait(6) = #BOWSER_FLAME_WAIT_6
+bowserFlameWait(7) = #BOWSER_FLAME_WAIT_7
+; Bowser's flame's heights (FlameYPosData), by its random byte's two low bits.
+Dim flameHeights.w(3)
+flameHeights(0) = $90
+flameHeights(1) = $80
+flameHeights(2) = $70
+flameHeights(3) = $90
+firebarBallX.w = 0
+firebarBallY.w = 0
+;; Every part's offset at every angle, worked out once here (GetFirebarPosition's quadrant fold and mirroring), so a ball is two array
+;; reads in the touch and the draw instead of the arithmetic for 6 balls a bar twice a tick (tens of raster lines on NTSC): x and y of
+;; part p at spin state s at index s*#FIREBAR_LONG_PARTS + p.
+Dim firebarOffsetX.w(32*#FIREBAR_LONG_PARTS - 1)
+Dim firebarOffsetY.w(32*#FIREBAR_LONG_PARTS - 1)
+firebarFillQuarter.w = 0
+For firebarFillState.w = 0 To 31
+  firebarFillQuarter = firebarFillState/8
+  For firebarFillPart.w = 0 To #FIREBAR_LONG_PARTS - 1
+    firebarFillFoldX.w = firebarFillState AND 15
+    If firebarFillFoldX >= 9 Then firebarFillFoldX = 16 - firebarFillFoldX
+    firebarFillFoldY.w = (firebarFillState + 8) AND 15
+    If firebarFillFoldY >= 9 Then firebarFillFoldY = 16 - firebarFillFoldY
+    firebarFillIndex.w = firebarFillState*#FIREBAR_LONG_PARTS + firebarFillPart
+    firebarOffsetX(firebarFillIndex) = firebarTable(firebarFillPart*9 + firebarFillFoldX)
+    firebarOffsetY(firebarFillIndex) = firebarTable(firebarFillPart*9 + firebarFillFoldY)
+    If (firebarMirror(firebarFillQuarter) AND 1) = 0 Then firebarOffsetX(firebarFillIndex) = -firebarOffsetX(firebarFillIndex)
+    If (firebarMirror(firebarFillQuarter) AND 2) = 0 Then firebarOffsetY(firebarFillIndex) = -firebarOffsetY(firebarFillIndex)
+  Next
+Next
+;; The air bubbles (UpdateBubbles{}): each one's x and y (y -1: none, the cartridge's $f8), its rise's 256ths carried, and the shared
+;; timer (AirBubbleTimer).
+Dim bubbleX.w(#BUBBLE_SLOTS - 1)
+Dim bubbleY.w(#BUBBLE_SLOTS - 1)
+Dim bubbleFraction.w(#BUBBLE_SLOTS - 1)
+For bubbleIndex = 0 To #BUBBLE_SLOTS - 1
+  bubbleY(bubbleIndex) = -1
+Next
+airBubbleTimer.w = 0
+Dim frenzyHeights.w(7)
+frenzyHeights(0) = $40
+frenzyHeights(1) = $30
+frenzyHeights(2) = $90
+frenzyHeights(3) = $50
+frenzyHeights(4) = $20
+frenzyHeights(5) = $60
+frenzyHeights(6) = $a0
+frenzyHeights(7) = $70
+playerSpeedAbsolute.w = 0
+playerMaximumLeft.w = 0
+playerMaximumRight.w = 0
+playerFrictionLow.w = 0
+playerFrictionHigh.w = 0
+playerRunningTimer.w = 0
+playerRunningSpeed.w = 0
+playerMovingDirection.w = #MARIO_BTN_RIGHT
+playerFacingDirection.w = #MARIO_BTN_RIGHT
+playerScreenX.q = 0
+playerJumpOriginY.w = 0
+sideCollisionTimer.w = 0
+blockBounceTimer.w = 0
+
+;; Block bump. #MARIO_BLOCKBOUNCE is both the animation clock and the re-bump
+;; lockout, so one timer drives both. The bump cell stays solid in
+;; metatileBuffer for the whole bump; only mapBuffer changes (0 during the bob,
+;; the settled value at the end). One bump at a time, like the ROM.
+;;
+;; blockBumpOffset: the Y offset of the bob, indexed by
+;; #MARIO_BLOCKBOUNCE - blockBounceTimer. Rest -> pop -> rest, zero at both
+;; ends so the hand-off from the last bob frame to the stamped settled tile is
+;; seamless. The cartridge's own bounce (the main project's OBJECT_SYSTEM note, "The block bump"):
+;; speed -2, then ImposeGravity{} with force $50 a tick, played out from smbdis 7660 and 7704. It
+;; peaks 8 px up and is back at rest on the 14th tick; the last two entries are rest for the
+;; 16 tick lockout.
+Dim blockBumpOffset.w(#MARIO_BLOCKBOUNCE - 1)
+;; Played out the way the cartridge does it (BumpBlock, smbdis 7316, and ImposeGravity, 7704): the
+;; block starts at speed #BLOCK_BOUNCE_SPEED with no fractional force; each tick its fraction takes
+;; the force (a carry moves it a pixel further), then the force takes the gravity (a carry makes
+;; the speed a step slower on the way up). It is back at rest after about 14 ticks (NTSC), and
+;; the rest of the lockout is rest.
+blockBumpOffset(0) = 0
+bumpTableSpeed.w = #BLOCK_BOUNCE_SPEED
+bumpTableForce.w = 0
+bumpTableFraction.w = 0
+bumpTablePosition.w = 0
+For bumpTableStep.w = 1 To #MARIO_BLOCKBOUNCE - 1
+  bumpTableSum.w = bumpTableFraction + bumpTableForce
+  bumpTableCarry.w = 0
+  If bumpTableSum >= 256
+    bumpTableSum = bumpTableSum - 256
+    bumpTableCarry = 1
+  EndIf
+  bumpTableFraction = bumpTableSum
+  bumpTablePosition = bumpTablePosition + bumpTableSpeed + bumpTableCarry
+  bumpTableForce = bumpTableForce + #BLOCK_BOUNCE_GRAVITY
+  If bumpTableForce >= 256
+    bumpTableForce = bumpTableForce - 256
+    bumpTableSpeed = bumpTableSpeed + 1
+  EndIf
+  blockBumpOffset(bumpTableStep) = 0
+  If bumpTablePosition < 0 Then blockBumpOffset(bumpTableStep) = 0 - bumpTablePosition
+Next
+blockBumpActive.w = False
+blockBumpCell.w = 0
+;; #MT_EMPTY, by value: its named constant is defined in the metatile include,
+;; which comes after this file in the flatten.
+blockBumpClass.w = 0
+blockBumpGid.w = 0
+
+;; Flagpole. The pole is a third player state, after ground and air. It bypasses the audited movement path
+;; entirely rather than being a mode inside it.
+playerState.w = #PLAYER_ST_FREE
+playerPoleTimer.w = 0
+flagState.w = #FLAG_ST_IDLE
+;; Ticks until the slide sound is queued after the grab (the cartridge queues it a frame after
+;; the music is silenced, which would cut it off).
+flagpoleSoundDelay.w = 0
+flagX.w = 0
+flagY.w = 0
+
+;; ---------------------------------------------------------------
+;; Object Pool
+;; ---------------------------------------------------------------
+;; Fixed-capacity pool for block-spawned items (mushrooms, coins) and future
+;; enemies. Parallel arrays for deterministic iteration and no runtime allocation.
+;; See the main project's OBJECT_SYSTEM note for the pool contract.
+Dim objType.w(#MAX_OBJECTS - 1)
+Dim objState.w(#MAX_OBJECTS - 1)
+Dim objActive.w(#MAX_OBJECTS - 1)
+Dim objX.w(#MAX_OBJECTS - 1)
+Dim objY.w(#MAX_OBJECTS - 1)
+Dim objVelX.w(#MAX_OBJECTS - 1)
+Dim objVelY.w(#MAX_OBJECTS - 1)
+Dim objDir.w(#MAX_OBJECTS - 1)
+Dim objSprite.w(#MAX_OBJECTS - 1)
+Dim objAnimTimer.w(#MAX_OBJECTS - 1)
+Dim objAnimFrame.w(#MAX_OBJECTS - 1)
+Dim objAux.w(#MAX_OBJECTS - 1)
+
+; Item-specific arrays
+Dim objRiseRemaining.w(#MAX_OBJECTS - 1)
+Dim objRiseStep.w(#MAX_OBJECTS - 1)
+Dim objRiseTarget.w(#MAX_OBJECTS - 1)
+Dim objFractionY.w(#MAX_OBJECTS - 1)
+Dim objSourceCell.w(#MAX_OBJECTS - 1)
+Dim objPopTimer.w(#MAX_OBJECTS - 1)
+;; Enemies: the sideways remainder in sixteenths, and the cartridge's d0 collision
+;; bit (Enemy_CollisionBits): set while Mario overlaps, so a touch counts once.
+Dim objFractionX.w(#MAX_OBJECTS - 1)
+Dim objTouch.w(#MAX_OBJECTS - 1)
+;; True for a Koopa that a bump has turned upside down: it stays upside down, as a shell
+;; lying still or kicked, until it gets up (the cartridge's states 2 and 3, drawn flipped).
+Dim objFlipped.w(#MAX_OBJECTS - 1)
+; A Red Koopa (1), and whether it has landed since it was built or last stood up (a red one turns at a ledge only then).
+Dim objRed.w(#MAX_OBJECTS - 1)
+Dim objGrounded.w(#MAX_OBJECTS - 1)
+; A Koopa with wings, the Green Paratroopa (1): it hops, and a stomp or a bump takes the wings away.
+Dim objWinged.w(#MAX_OBJECTS - 1)
+; The cartridge's JumpspringAnimCtrl: 0, or the step (1 to 4) of a squash that holds Mario still (UpdateSpring{}, UpdatePlayer{}).
+jumpspringAnimCtrl.w = 0
+; After a jumpspring lets him go: 1 for the first tick (the spring's own rise force), then 2 until he lands (SelectVerticalForce{}).
+springLaunch.w = 0
+;; The vine and the climb (sparkydave.player.blitz.ab3). vineColumnX is the left x of the vine's column, -1 for none, vineBaseY the y of the
+;; top of the block it grows from, vineHeight and vineTarget its height now and at most. playerClimbing is the cartridge's player state 3;
+;; climbSpeedY the 1, 0 or -1 he moves by this tick, climbDummyY the carry of its movement force, climbSideTimer the wait before the
+;; next swap of sides, climbAnimTimer the picture's step. climbAutoUp is the take-over above the status bar; climbAreaChange is set when
+;; he has climbed out of the top of the world (the caller changes the area).
+vineColumnX.w = -1
+vineBaseY.w = 0
+vineHeight.w = 0
+vineTarget.w = 0
+playerClimbing.w = 0
+climbSpeedY.w = 0
+climbDummyY.w = 0
+climbSideTimer.w = 0
+climbAnimTimer.w = 0
+climbAutoUp.w = 0
+climbAreaChange.w = 0
+; The area on show is a cloud type (the sky bonus), and: walking off the vine by himself after the way in (vineWalkOut).
+currentAreaCloud.w = 0
+vineWalkOut.w = 0
+Dim climbAdder.w(3)
+climbAdder(0) = 14
+climbAdder(1) = 4
+climbAdder(2) = -4
+climbAdder(3) = -14
+Dim objStartY.w(#MAX_OBJECTS - 1)
+
+; playerIsBig is set by the resize routine (#PLAYER_ST_RESIZE), not by a key.
+playerIsBig.w = False
+;; The cartridge's CrouchingFlag (smbdis 5875, the main project's PLAYER_HITBOX note): True
+;; while a big Mario on the ground holds Down, and left as it is in the air. It picks the small
+;; probe set and box, the crouch frame, and stops fireballs and walking.
+playerCrouching.w = False
+
+;; Grow/shrink. The target size is latched up front; playerResizeTimer counts the ticks of the
+;; hold. worldFreezeTicks is the cartridge's master timer (TimerControl): while it is not zero
+;; the enemies and the timers stand still. playerSizeAnimTicks counts down the alternating
+;; picture (it can outlast the hold: a hit Mario is free while it shows), and
+;; playerSizeAnimGrow says which of the two patterns it is.
+playerResizeToBig.w = False
+playerResizeTimer.w = 0
+worldFreezeTicks.w = 0
+playerSizeAnimTicks.w = 0
+playerSizeAnimGrow.w = False
+
+;; Resolved once per head check from playerIsBig, so the bump path and the
+;; collision test cannot disagree about where Mario's head is.
+headProbeY.w = 2
+
+;; Player-vs-object bounding box: moving items, Goombas and Koopas read it. See
+;; the main project's OBJECT_SYSTEM note and the main project's PLAYER_HITBOX note section 5.
+boundBoxLeft.w = 0
+boundBoxTop.w = 0
+boundBoxRight.w = 0
+boundBoxBottom.w = 0
+oldF1.w = False
+
+;; Blocked input direction for the coming frame, the engine's Player_CollisionBits.
+;; Written by ImpedePlayerMove{} on a wall hit and reset to $ff after the button
+;; read in UpdatePlayer{} -- after ReadPlayerButtons{} so the previous frame's
+;; mask is applied, but before CheckPlayerSides{} writes the next one. The pole
+;; and resize branches, which return before ReadPlayerButtons{}, reset it
+;; themselves so a mask from a grab/mushroom tick does not survive the whole
+;; slide or resize. ApplyCollisionButtonMask{} then ANDs it into playerButtons.
+;; Only the low byte is read: bit 0 = RIGHT ($01), bit 1 = LEFT ($02), and the
+;; B and A bits pass through untouched because the cartridge ANDs the same byte
+;; into the whole joypad read.
+playerCollisionBits.w = $ff
+
+
+;; HUD values, read only by the HUD drawing. The Drawn copies start at -1 so the
+;; first UpdateHud{} draws everything.
+hudScore.l = 0
+;; The best score, shown on the title screen (TOP-): from the settings file at start, raised when a game or a level ends
+;; (UpdateTopScore{}). topScoreSaved is the one in the file, written only as a game ends (SaveTopScoreIfNew{}): a hudTopScore above it
+;; is not kept yet.
+hudTopScore.l = 0
+topScoreSaved.l = 0
+; Our process and its pr_WindowPtr before SystemRequestersOff{} (settings.ab3), to put back at the end.
+requesterProcess.l = 0
+requesterWindowBefore.l = 0
+hudCoins.w = 0
+hudWorld.w = 1
+hudLevel.w = 1
+hudTime.w = #HUD_TIME_START
+hudTimeTicks.w = 0
+hudDrawnScore.l = -1
+hudDrawnCoins.w = -1
+hudDrawnWorld.w = -1
+hudDrawnLevel.w = -1
+hudDrawnTime.w = -1
+;; The digit last drawn at each HUD digit position (#HUD_SLOT_*), -1 for none: a number that
+;; changed redraws only the digits that differ. DrawHudStatic{} sets them all to -1 when it clears
+;; the band, and InitHud{} runs it before the first UpdateHud{}.
+Dim hudDigitShown.w(#HUD_DIGIT_SLOTS - 1)
+hudGlyph.w = 0
+preFrame.w = 0
+preSlot.w = 0
+
+;; Multi-coin brick (see MultiCoinIndex{} in collision.blitz). intervalPhase is
+;; the free-running 21-tick counter the interval timers hang off; the per-brick
+;; started flags and interval counts are Dim'd with the generated multiCoinCell
+;; table in level.meta.ab3.
+intervalPhase.w = #INTERVAL_PERIOD - 1
+
+;; Hidden blocks (see ActivateHiddenBlocks{} in collision.blitz): the cartridge's
+;; Hidden1UpFlag, set for a new game and cleared when a hidden block is built.
+;; The per-block live flags are Dim'd with the generated hiddenBlockCell table.
+hiddenOneUpFlag.w = True
+
+;; Fire Mario (see sparkydave.palette.blitz.ab3). playerFire implies playerIsBig;
+;; playerResizeFire marks the freeze after a flower, which is not a size change.
+;; marioColourShown is the colour set on screen (0 normal, 1 fire, 2 to 5 the four
+;; star sets); marioColour() is each set's red, skin and brown role, three RGB
+;; triples, from the main project's PALETTE note.
+playerFire.w = False
+; Set by the course clear: the size Mario had, which the reload of the next level gives back (a death does not).
+levelCarrySize.w = False
+levelCarryBig.w = False
+levelCarryFire.w = False
+;; Cover screens: the kind up (0 none), its remaining ticks (-1 until Return), the
+;; kind that follows it, and whether Return was held when it came up. timeUpDeath is
+;; set when the timer ran out, so the death is followed by TIME UP.
+coverKind.w = 0
+coverTimer.w = 0
+;; The display frame a cover went up (ReadTimeOfDay{}, SetCover{}), and whether its first tick has yet to take off the time spent
+;; behind it before any tick ran (a reload, a level read from disk: CoverTicksLeft{}).
+coverShownAt.l = 0
+coverClockPending.w = False
+coverNext.w = 0
+coverStartHeld.w = False
+;; The overlay (sparkydave.cover.blitz.ab3): the page shown (0 or 1) and its x for DisplayBitMap (a
+;; quick, so the extended form is used), whether the page wanted has changed and is to be drawn on
+;; the hidden page (once a frame), and whether the back is in front (PF2PRI).
+overlayPageShown.w = 0
+overlayBackX.q = 0
+overlayDirty.w = False
+;; The overlay's screen: the one wanted (set by the menus' keys) and the one shown (set when its page
+;; is shown, UpdateOverlayPages{}), #SCREEN_*. Each menu's cursor row; where the options page goes
+;; back to; up and down as held at the last tick; a fresh Esc for a menu (ReadControls{}).
+overlayScreenWanted.w = 0
+overlayScreenShown.w = 0
+titleCursor.w = 0
+; Set while the title draws its text over the panel: DrawGlyphInto{} then does not clear the 8x8 under a glyph.
+glyphOverBackground.w = False
+; The size of the title panel's whole shape (DrawTitlePanel{}), 0 until it is cut: it is cut again when the text's width changes.
+panelCachedW.w = 0
+panelCachedH.w = 0
+panelOffsetX.w = 0
+;; What each overlay page was last drawn with (DrawOverlayPage{}): its screen (#SCREEN_NONE when unknown), its static key and its rows' keys
+;; (page * #OVERLAY_ROWS_MAX + row). Anything else that draws on the back bitmap makes both pages unknown (TakeBackAsCanvas{}).
+Dim pageScreenDrawn.w(1)
+Dim pageStaticKey$(1)
+Dim pageRowKey$(2*#OVERLAY_ROWS_MAX - 1)
+optionsCursor.w = 0
+pauseCursor.w = 0
+;; The continue screen: its cursor (YES or NO), and the request to open it, set by UpdateCover{} when the TIME UP
+;; cover ends with continues left and taken by HandleLifeEvent{} before the next sim (as the jukebox's and the palette page's are).
+continueCursor.w = #CONTINUE_YES
+continueOpenWanted.w = False
+optionsReturnTo.w = 0
+;; The jukebox page (sparkydave.jukebox.blitz.ab3): its cursor row, the song and the effect chosen, the
+;; song playing (-1 none) and one waiting for the silence before it, the readout line, a frame count
+;; (the walkers' steps), each character's hop height and fall speed, what each page shows of each
+;; character (shape -1: nothing) and which rows each page still has to draw (1 the whole row, 2 only its
+;; cursor cell; the last of a page's #JKB_ROWS + 1 is the readout), whether the BACK row was last drawn as
+;; SAVE AND BACK, and whether each page has had its static part drawn.
+jukeboxCursor.w = 0
+jukeboxSong.w = 0
+jukeboxEffect.w = 0
+jukeboxPlaying.w = -1
+jukeboxPending.w = -1
+jukeboxReadout$ = "SILENT"
+jukeboxFrame.w = 0
+jukeboxBackChanged.w = False
+Dim jukeboxHopHeight.w(3)
+Dim jukeboxHopSpeed.w(3)
+Dim jukeboxDrawnShape.w(7)
+Dim jukeboxDrawnX.w(7)
+; Mario's place on the jukebox page when he is the hardware sprite (the 15 colour look): x, the row of his top, whether he is off the ground (ShowMarioSprite{}).
+jukeboxMarioX.w = 0
+jukeboxMarioY.w = 0
+jukeboxMarioJump.w = False
+Dim jukeboxDrawnY.w(7)
+Dim jukeboxRowDirty.w(2*(#JKB_ROWS + 1) - 1)
+Dim jukeboxPageReady.w(1)
+;; The sound's five settings as they were when a page opened (pan, filter, three volumes): soundBaseline()
+;; 0 to 4 for the jukebox page, 5 to 9 for the options page, which also keeps the controls, the keys
+;; and the forgiveness levels (the page's Esc puts them back; BACK writes them).
+Dim soundBaseline.w(9)
+;; The jukebox page's frame time (debug mode, JukeboxTimeMark{}): the lines of each part of
+;; UpdateJukeboxPage{} (0 the static draw, 1 the hops, 2 the stage, 3 the rows), added up over the frames it
+;; ran and the worst of each, the whole page's, and the frames timed.
+jukeboxTimedFrames.l = 0
+jukeboxMarkLine.l = 0
+jukeboxFrameLines.l = 0
+jukeboxTotalSum.l = 0
+jukeboxTotalMax.l = 0
+Dim jukeboxPartSum.l(3)
+Dim jukeboxPartMax.l(3)
+optionsBaselineMode.w = 0
+optionsBaselineJoystick.w = 0
+Dim optionsBaselineKeys.w(#KEY_COUNT)
+Dim optionsBaselineForgiveness.w(1)
+optionsDirtyAtEntry.w = False
+menuEscape.w = False
+; A fresh press of the pause key on the pause menu (UpdatePause{}), read by UpdatePauseMenu{} the same tick: resume.
+pauseMenuResume.w = False
+jukeboxOpenWanted.w = False
+;; The NES palette chosen (0 "as drawn", then the palettes of sparkydave.palettes.data.ab3), saved in the settings;
+;; and the palette page's: its cursor, the area look and Mario's colours it shows the palette with (not saved), the choice it opened
+;; with (Esc puts it back), its own tick count (the glint and the Starman move while the sim, under a cover, does not), and the main
+;; loop's request to open it. The options page's baseline keeps the choice too.
+paletteChoice.w = #PALETTE_DEFAULT
+paletteCursor.w = 0
+paletteLook.w = 0
+paletteMarioMode.w = 0
+paletteBaseline.w = 0
+palettePageTicks.l = 0
+paletteOpenWanted.w = False
+optionsBaselinePalette.w = 0
+; The continues choice the options page opened with.
+optionsBaselineContinues.w = 0
+;; The palette page's looks, by paletteLook: each one's name and AreaLookIndex{}'s set for it (bits 0 and 2; bit 1, no back strip, clear:
+;; the page has none but its rows); and the names of Mario's colours, by paletteMarioMode (PalettePageMarioSet{} gives the set).
+Dim paletteLookName$(#PALETTE_LOOKS - 1)
+Dim paletteLookSet.w(#PALETTE_LOOKS - 1)
+Dim paletteMarioName$(#PALETTE_MARIO_MODES - 1)
+paletteLookName$(0) = "GROUND"
+paletteLookSet(0) = 0
+paletteLookName$(1) = "UNDERGROUND"
+paletteLookSet(1) = 1
+paletteLookName$(2) = "WATER"
+paletteLookSet(2) = 4
+paletteLookName$(3) = "CASTLE"
+paletteLookSet(3) = 5
+paletteMarioName$(0) = "NORMAL"
+paletteMarioName$(1) = "FIRE"
+paletteMarioName$(2) = "STARMAN"
+overlayFront.w = False
+;; The attract mode: its phase (#ATTRACT_*), the camera in 1/256 px, the ticks left of a hold or
+;; the black cover, and whether the back bitmap holds the title's pages (so the clouds and hills
+;; must be stamped again when the title goes).
+attractPhase.w = 0
+attractPosition.l = 0
+attractPauseTicks.w = 0
+backHoldsOverlay.w = False
+courseClearReady.w = False
+timeUpDeath.w = False
+; The palette model's last-applied state (sparkydave.palette.blitz.ab3).
+paletteKeyValid.w = False
+paletteCoverShown.w = False
+;; Areas and pipes: 0 the main level, 1 the bonus room; the event the sim asks the
+;; main loop for; the pipe timer; the block of tiles drawn over Mario while he is in
+;; a pipe (0 columns is none); the area whose palette is on screen; and each area's
+;; pens 0, 1 and 2 (the background, the brick, the brick's highlight) as RGB.
+currentArea.w = 0
+;; The type of the area on screen and of the level's start area (#AREA_TYPE_*, 1 is ground): the look and the
+;; music. currentArea says only whether he is in the level or in a room.
+currentAreaType.w = 1
+startAreaType.w = 1
+; The same for the back playfield's kind (#SCENERY_*, 2 is hills): the back is seen only over hills.
+currentAreaScenery.w = 2
+startAreaScenery.w = 2
+;; The running level's own numbers, from the level table when it begins (sparkydave.levels.blitz.ab3); these are
+;; 1-1's, which the harness keeps: the x of its halfway page, the timer it starts at and the columns of its area.
+levelHalfwayX.w = 1280
+hudTimeStart.w = 400
+areaColumns.w = 224
+areaEvent.w = 0
+pipeTimer.w = 0
+pipeOccludeCol.w = 0
+pipeOccludeRow.w = 0
+pipeOccludeCols.w = 0
+pipeOccludeRows.w = 0
+; Each pipe cell's GID when the move began (0: empty, nothing cut or drawn), row by row.
+Dim pipeOccludeGid.w(#PIPE_OCCLUDE_MAX - 1)
+; Whether each pipe cell's shape has been cut yet this move (DrawPipeOcclusion{} cuts it the first frame it is wanted).
+Dim pipeOccludeCut.w(#PIPE_OCCLUDE_MAX - 1)
+; False from StartPipe{} until DrawPipeOcclusion{} has cut the move's tiles.
+pipeOccludersCut.w = False
+areaPaletteShown.w = 0
+; The tile set the atlas and the enemies' and items' shapes are in now (EnsureTileSet{}): 0 the overground's, #TILE_SET_UNDERGROUND.
+tileSetShown.w = 0
+;; The All-Stars look's tile sets kept in Fast RAM (sparkydave.tileset.blitz.ab3): two blocks, each holding one set's atlas and
+;; enemies' and items' sheets (TileSetBytes{}), 0 when not allocated (the NES look, or no memory: the sets are then read from disk
+;; at each change), and the set each holds, -1 for none.
+Dim tileSetCacheBlock.l(1)
+Dim tileSetCacheSet.w(1)
+tileSetCacheSet(0) = -1
+tileSetCacheSet(1) = -1
+Dim areaPalette.w(35)
+areaPalette(0) = 193
+areaPalette(1) = 224
+areaPalette(2) = 254
+areaPalette(3) = 156
+areaPalette(4) = 74
+areaPalette(5) = 0
+areaPalette(6) = 254
+areaPalette(7) = 205
+areaPalette(8) = 198
+areaPalette(9) = 0
+areaPalette(10) = 0
+areaPalette(11) = 0
+areaPalette(12) = 0
+areaPalette(13) = 124
+areaPalette(14) = 142
+areaPalette(15) = 181
+areaPalette(16) = 236
+areaPalette(17) = 243
+; The water's set (#AREA_TYPE_WATER, 2-2): pen 0 the water, NES $12 (WaterPaletteData's colour 2), the brick pens the ground's.
+areaPalette(18) = 66
+areaPalette(19) = 64
+areaPalette(20) = 254
+areaPalette(21) = 156
+areaPalette(22) = 74
+areaPalette(23) = 0
+areaPalette(24) = 254
+areaPalette(25) = 205
+areaPalette(26) = 198
+;; The castle's set (#AREA_TYPE_CASTLE, 2-4): CastlePaletteData's background palette 1 (smbdis 2274), black behind, its $10 grey
+;; in pen 1 (the ground's brown role) and its $30 white in pen 2 (the skin role); its $00 dark grey would be pen 3's role, the shared black.
+areaPalette(27) = 0
+areaPalette(28) = 0
+areaPalette(29) = 0
+areaPalette(30) = 174
+areaPalette(31) = 174
+areaPalette(32) = 174
+areaPalette(33) = 254
+areaPalette(34) = 254
+areaPalette(35) = 254
+;; The end of the level (sparkydave.levelend.blitz.ab3): the pole band and the
+;; number riding the flag, Mario hidden at the castle, the task counter and its
+;; working values, the fireworks in the air, and the score index of each band.
+playerHidden.w = False
+poleBand.w = 0
+poleNumberY.w = 0
+poleNumberShown.w = False
+endTask.w = 0
+fireworksLeft.w = 0
+fireworkNextIndex.w = 5
+fireworkTimer.w = 0
+starFlagY.w = 0
+castleTopY.w = #CASTLE_TOP_Y
+endDelay.w = 0
+Dim fireworkActive.w(#FIREWORK_SLOTS - 1)
+Dim fireworkX.w(#FIREWORK_SLOTS - 1)
+Dim fireworkAtY.w(#FIREWORK_SLOTS - 1)
+Dim fireworkAge.w(#FIREWORK_SLOTS - 1)
+Dim poleScoreIndex.w(4)
+poleScoreIndex(0) = 9
+poleScoreIndex(1) = 7
+poleScoreIndex(2) = 5
+poleScoreIndex(3) = 3
+poleScoreIndex(4) = 1
+;; Where the fireworks go, as offsets from 48 px left of the star flag, and their
+;; heights (FireworksXPosData and FireworksYPosData, smbdis 8630).
+Dim fireworkDX.w(5)
+Dim fireworkY.w(5)
+fireworkDX(0) = 0
+fireworkDX(1) = 48
+fireworkDX(2) = 96
+fireworkDX(3) = 96
+fireworkDX(4) = 0
+fireworkDX(5) = 32
+fireworkY(0) = 96
+fireworkY(1) = 64
+fireworkY(2) = 112
+fireworkY(3) = 64
+fireworkY(4) = 96
+fireworkY(5) = 48
+; Intervals of Starman invincibility left (StarInvincibleTimer); 0 is none.
+playerStarIntervals.w = 0
+;; Fireballs: two slots (0 none, 1 flying, 2 exploding), the throw counter that picks
+;; the next slot, and the ticks Mario still shows his throwing pose.
+Dim fireballActive.w(#FIREBALL_SLOTS - 1)
+Dim fireballX.w(#FIREBALL_SLOTS - 1)
+Dim fireballY.w(#FIREBALL_SLOTS - 1)
+Dim fireballVelY.w(#FIREBALL_SLOTS - 1)
+Dim fireballFractionY.w(#FIREBALL_SLOTS - 1)
+Dim fireballFractionX.w(#FIREBALL_SLOTS - 1)
+Dim fireballDirection.w(#FIREBALL_SLOTS - 1)
+Dim fireballBounced.w(#FIREBALL_SLOTS - 1)
+Dim fireballAge.w(#FIREBALL_SLOTS - 1)
+fireballCounter.w = 0
+playerThrowTimer.w = 0
+; EnemyHitBox{} leaves the box it found here.
+enemyBoxLeft.w = 0
+enemyBoxTop.w = 0
+enemyBoxRight.w = 0
+enemyBoxBottom.w = 0
+playerResizeFire.w = False
+marioColourShown.w = 0
+Dim marioColour.w(53)
+marioColour(0) = 181
+marioColour(1) = 50
+marioColour(2) = 32
+marioColour(3) = 254
+marioColour(4) = 205
+marioColour(5) = 198
+marioColour(6) = 108
+marioColour(7) = 110
+marioColour(8) = 0
+marioColour(9) = 255
+marioColour(10) = 255
+marioColour(11) = 255
+marioColour(12) = 254
+marioColour(13) = 205
+marioColour(14) = 198
+marioColour(15) = 181
+marioColour(16) = 50
+marioColour(17) = 32
+marioColour(18) = 181
+marioColour(19) = 50
+marioColour(20) = 32
+marioColour(21) = 254
+marioColour(22) = 205
+marioColour(23) = 198
+marioColour(24) = 108
+marioColour(25) = 110
+marioColour(26) = 0
+marioColour(27) = 16
+marioColour(28) = 148
+marioColour(29) = 0
+marioColour(30) = 255
+marioColour(31) = 255
+marioColour(32) = 255
+marioColour(33) = 254
+marioColour(34) = 205
+marioColour(35) = 198
+marioColour(36) = 181
+marioColour(37) = 50
+marioColour(38) = 32
+marioColour(39) = 255
+marioColour(40) = 255
+marioColour(41) = 255
+marioColour(42) = 254
+marioColour(43) = 205
+marioColour(44) = 198
+marioColour(45) = 0
+marioColour(46) = 0
+marioColour(47) = 0
+marioColour(48) = 252
+marioColour(49) = 188
+marioColour(50) = 176
+marioColour(51) = 156
+marioColour(52) = 74
+marioColour(53) = 0
+
+;; Colour cycling. cycleColour(step*3 + 0 to 2) is the red, green and blue of step
+;; `step`: the cartridge's ColorRotatePalette ($27 $27 $27 $17 $07 $17) in the
+;; atlas's own colours for those (pens 4, 1 and 5): bright, bright, bright, mid,
+;; dark, mid. paletteCycleStep is the step on screen, -1 until the first update.
+Dim cycleColour.w(17)
+cycleColour(0) = 230
+cycleColour(1) = 156
+cycleColour(2) = 33
+cycleColour(3) = 230
+cycleColour(4) = 156
+cycleColour(5) = 33
+cycleColour(6) = 230
+cycleColour(7) = 156
+cycleColour(8) = 33
+cycleColour(9) = 156
+cycleColour(10) = 74
+cycleColour(11) = 0
+cycleColour(12) = 82
+cycleColour(13) = 33
+cycleColour(14) = 0
+cycleColour(15) = 156
+cycleColour(16) = 74
+cycleColour(17) = 0
+paletteCycleStep.w = -1
+; The All-Stars look's hue step (0 to 3: the colour set of pens 3 to 5) on screen, -1 until the first update, and the one the pens are being worked out for.
+hueStepShown.w = -1
+; Whether the All-Stars sky's Copper strings are on (True) or no-ops (False) in the world lists, -1 until the first update.
+allstarsSkyShown.w = -1
+; The sky the last palette update wanted (0 off, 1 the overground's, 2 the water's), written after the next VWait (ShowAllStarsSky{}).
+allstarsSkyWanted.w = -1
+allstarsHueStep.w = 0
+;; The All-Stars look's palette zones of the area on show (PaletteZone objects, ApplyAreaObjects{}): where each starts (the view's right edge reaching x)
+;; and its kind (1 up). allstarsZone is the kind the pens are worked out for (0 none), zoneShown the one on screen, -1 until the first update.
+Dim paletteZoneX.w(#MAX_PALETTE_ZONES - 1)
+Dim paletteZoneKind.w(#MAX_PALETTE_ZONES - 1)
+paletteZoneCount.w = 0
+allstarsZone.w = 0
+zoneShown.w = -1
+
+;; Floating score numbers and the stomp chain. stompChain counts stomps since Mario
+;; last stood on the ground (the cartridge's StompChainCounter). scorePoints(n) is
+;; the points of index n (ScoreUpdateData): 100, 200, 400, 500, 800, 1000, 2000,
+;; 4000, 5000, 8000, and 0 for index 11, the 1-UP. digitShape(d) is the digit's
+;; shape number in the items-4x8 sheet, -1 for a digit it has none of.
+stompChain.w = 0
+Dim floaterActive.w(#FLOATER_SLOTS - 1)
+Dim floaterX.w(#FLOATER_SLOTS - 1)
+Dim floaterY.w(#FLOATER_SLOTS - 1)
+Dim floaterIndex.w(#FLOATER_SLOTS - 1)
+Dim floaterTimer.w(#FLOATER_SLOTS - 1)
+Dim scorePoints.l(11)
+scorePoints(1) = #SCORE_STOMP
+scorePoints(2) = 200
+scorePoints(3) = 400
+scorePoints(4) = 500
+scorePoints(5) = 800
+scorePoints(6) = #SCORE_POWER_UP
+scorePoints(7) = 2000
+scorePoints(8) = 4000
+scorePoints(9) = 5000
+scorePoints(10) = 8000
+scorePoints(11) = 0
+Dim digitShape.w(9)
+digitShape(0) = 0
+digitShape(1) = 1
+digitShape(2) = 2
+digitShape(3) = -1
+digitShape(4) = 3
+digitShape(5) = 4
+digitShape(6) = -1
+digitShape(7) = -1
+digitShape(8) = 5
+digitShape(9) = -1
+
+;; Damage, death and lives (sparkydave.life.blitz.ab3). playerInjuryIntervals is
+;; the invulnerability left, in #INTERVAL_PERIOD tick intervals. lifeEvent is the
+;; hand-off from the sim to the main loop (#LIFE_*): the sim says what happened,
+;; HandleLifeEvent{} in restart.blitz does the reload. simTickCounter is the
+;; cartridge's FrameCounter. lifeStartCameraX is where the next restart puts the
+;; camera: 0, or #HALFWAY_X when he had passed the checkpoint.
+playerInjuryIntervals.w = 0
+playerLives.w = #LIVES_START
+deathKind.w = #DEATH_HOP
+deathTimer.w = 0
+lifeEvent.w = #LIFE_NONE
+lifeStartCameraX.w = 0
+simTickCounter.l = 0
+blockBumpExhausts.w = False
+
+;; Brick chunks (sparkydave.debris.blitz.ab3). Positions and speeds are 8.8
+;; fixed point pixels. Two sets of four pieces, set s owning entries
+;; s*#DEBRIS_PIECES to s*#DEBRIS_PIECES + 3; a break uses the next set in turn.
+Dim debrisX.l(#DEBRIS_SETS*#DEBRIS_PIECES - 1)
+Dim debrisY.l(#DEBRIS_SETS*#DEBRIS_PIECES - 1)
+Dim debrisVelocityX.l(#DEBRIS_SETS*#DEBRIS_PIECES - 1)
+Dim debrisVelocityY.l(#DEBRIS_SETS*#DEBRIS_PIECES - 1)
+Dim debrisActive.w(#DEBRIS_SETS - 1)
+Dim debrisAge.w(#DEBRIS_SETS - 1)
+debrisNextSet.w = 0
+
+; Chip RAM report. chipRamLaunch is read here, before any allocation.
+chipRamLaunch.l = AvailMem_(2)
+chipRamLaunchLargest.l = AvailMem_($20002)
+chipRamAfterInit.l = 0
+chipRamAfterInitLargest.l = 0
+chipRamFrames.l = 0
+chipRamSamples.l = 0
+chipRamLive.l = 0
+chipRamLiveLargest.l = 0
+chipRamLast.l = 0
+chipRamLowest.l = 0
+chipRamLowestLargest.l = 0
+; The same samples of Fast RAM (the launch's is at the top of this file).
+fastRamAfterInit.l = 0
+fastRamAfterInitLargest.l = 0
+fastRamLive.l = 0
+fastRamLiveLargest.l = 0
+fastRamLast.l = 0
+fastRamLowest.l = 0
+fastRamLowestLargest.l = 0
+
+; Frame time report. The raster lines at each mark and the running totals.
+frameTimePrimed.w = False
+frameTimeStartLine.l = 0
+frameTimeSimLine.l = 0
+;; The draw segment's own marks: after DrawFrame{} (the world) and after UpdateHud{}.
+;; What follows the HUD mark (the palette and the rest) is the draw segment less the two.
+frameTimeWorldLine.l = 0
+frameTimeHudLine.l = 0
+frameTimeWorldSum.l = 0
+frameTimeHudSum.l = 0
+frameTimeRestSum.l = 0
+frameTimeWorldMax.l = 0
+frameTimeHudMax.l = 0
+frameTimeRestMax.l = 0
+;; The sim segment's own marks: before RunSimTicks{} and after it (the sound follows).
+;; The objects and enemies are timed inside UpdatePlayer{} (ObjectsTimeBegin{} and ObjectsTimeEnd{},
+;; sparkydave.timing-marks.blitz.ab3), added up over the frame's ticks into frameTimeObjectsLines.
+;; The ...Now values are this frame's, for the slow-frame log.
+frameTimeTicksLine.l = 0
+;; The CIA-A frame count (its time of day's low byte) at each mark, the ground truth the beam cannot give: a part of the loop
+;; longer than a frame wraps the beam and reads short, but the count moves. A frame whose count moved between its start and its
+;; end ran into the next display frame; frameTimeCrossings counts them, frameTimeHidden those the line count called in budget.
+frameTimeTodStart.l = 0
+frameTimeTodTicks.l = 0
+frameTimeTodSound.l = 0
+frameTimeTodSim.l = 0
+frameTimeTodWorld.l = 0
+frameTimeTodHud.l = 0
+frameTimeCrossings.l = 0
+frameTimeHidden.l = 0
+frameTimeVblanksNow.l = 0
+frameTimeCrossNow.l = 0
+;; The whole loop by the same count, start to start: the display frames the last pass took (1 at full rate), so a pass that
+;; waited a frame more after its work (the VWait, the lists' switch) is seen too. frameTimeLongLoops counts those of 2 or more,
+;; frameTimeLongLoopsFit those whose work had not run into the next frame; frameTimeLoopFrames is shown in the slow-frame log.
+frameTimeTodLastStart.l = -1
+frameTimeLoopFrames.l = 0
+frameTimeLongLoops.l = 0
+frameTimeLongLoopsFit.l = 0
+frameTimeLoopTotal.l = 0
+frameTimeSoundLine.l = 0
+objectsBeginLine.l = 0
+frameTimeObjectsLines.l = 0
+frameTimeEventsNow.l = 0
+frameTimeSoundNow.l = 0
+frameTimeEventsSum.l = 0
+frameTimePlayerSum.l = 0
+frameTimeObjectsSum.l = 0
+frameTimeSoundSum.l = 0
+frameTimeEventsMax.l = 0
+frameTimePlayerMax.l = 0
+frameTimeObjectsMax.l = 0
+frameTimeSoundMax.l = 0
+; The sound's parts (#SOUND_PART_*, sparkydave.sound.ab3), summed and worst over the frames.
+Dim frameTimeSoundPartSum.l(3)
+Dim frameTimeSoundPartMax.l(3)
+frameTimeFrames.l = 0
+frameTimeSimSum.l = 0
+frameTimeDrawSum.l = 0
+frameTimeWorkSum.l = 0
+frameTimeStartSum.l = 0
+frameTimeSimMax.l = 0
+frameTimeDrawMax.l = 0
+frameTimeWorkMax.l = 0
+frameTimeDeadlineMax.l = 0
+frameTimeOverruns.l = 0
+frameTimeRestarts.l = 0
+; Sim ticks the last frame ran, for the slow-frame log.
+simTicksLast.w = 0
+slowLogCount.w = 0
+;; Once the slow-frame log is full, its lightest entry and that entry's work: a frame is compared with it alone, and the list is
+;; scanned for the new lightest only when an entry is replaced, which keeps the log's cost down on heavy frames.
+slowLogLightest.w = 0
+slowLogLightestWork.l = 0
+; The report's own work each frame after its last mark (the sums, the log), measured, so its overhead is a figure in the report.
+frameTimeOwnSum.l = 0
+frameTimeOwnMax.l = 0
+;; The display stretch, from right after the VWait to before the debug watch (FrameTimeAfterVWait{}, FrameTimeAfterDisplay{}): the lists
+;; given their pages, the sky, Mario's sprite (and a clip sprite cut for him, CutMarioClipSprite{}). Its line and CIA-A count at the VWait,
+;; its passes, sum and worst, the clip cuts (clipCutsNow this pass), and its slowest passes kept: lines, level, area, camera, his state,
+;; whether a clip was cut, and which of the passes it was.
+frameTimeVWaitLine.l = -1
+frameTimeTodVWait.l = 0
+frameTimeDisplayPasses.l = 0
+frameTimeDisplaySum.l = 0
+frameTimeDisplayMax.l = 0
+frameTimeClipCuts.l = 0
+clipCutsNow.w = 0
+displayLogCount.w = 0
+Dim displayLogLines.l(#DISPLAY_LOG_MAX - 1)
+Dim displayLogLevel.w(#DISPLAY_LOG_MAX - 1)
+Dim displayLogArea.w(#DISPLAY_LOG_MAX - 1)
+Dim displayLogCamera.l(#DISPLAY_LOG_MAX - 1)
+Dim displayLogState.w(#DISPLAY_LOG_MAX - 1)
+Dim displayLogClip.w(#DISPLAY_LOG_MAX - 1)
+Dim displayLogPass.l(#DISPLAY_LOG_MAX - 1)
+Dim slowLogFrame.l(#SLOW_LOG_MAX - 1)
+Dim slowLogSim.l(#SLOW_LOG_MAX - 1)
+Dim slowLogDraw.l(#SLOW_LOG_MAX - 1)
+Dim slowLogStart.l(#SLOW_LOG_MAX - 1)
+Dim slowLogWork.l(#SLOW_LOG_MAX - 1)
+Dim slowLogTicks.l(#SLOW_LOG_MAX - 1)
+Dim slowLogObjects.l(#SLOW_LOG_MAX - 1)
+Dim slowLogFloaters.l(#SLOW_LOG_MAX - 1)
+Dim slowLogWorld.l(#SLOW_LOG_MAX - 1)
+Dim slowLogHud.l(#SLOW_LOG_MAX - 1)
+Dim slowLogArea.l(#SLOW_LOG_MAX - 1)
+Dim slowLogState.l(#SLOW_LOG_MAX - 1)
+Dim slowLogEvents.l(#SLOW_LOG_MAX - 1)
+Dim slowLogObjectLines.l(#SLOW_LOG_MAX - 1)
+Dim slowLogSound.l(#SLOW_LOG_MAX - 1)
+Dim slowLogSoundTicks.l(#SLOW_LOG_MAX - 1)
+Dim slowLogMusic.l(#SLOW_LOG_MAX - 1)
+Dim slowLogSfx.l(#SLOW_LOG_MAX - 1)
+; Where it was: the level (its index), the camera's x, and whether the Starman was on.
+Dim slowLogLevel.l(#SLOW_LOG_MAX - 1)
+Dim slowLogCamera.l(#SLOW_LOG_MAX - 1)
+Dim slowLogStar.l(#SLOW_LOG_MAX - 1)
+; How many display frames began during its work (0 in budget), and the first part they began in (1 to 6, 0 none).
+Dim slowLogVblank.l(#SLOW_LOG_MAX - 1)
+Dim slowLogCrossAt.l(#SLOW_LOG_MAX - 1)
+; The display frames the pass before took, start to start (1 at full rate).
+Dim slowLogLoop.l(#SLOW_LOG_MAX - 1)
+oldF3.w = False
+oldF2.w = False
+; The tiles cut for the plants' pipes (DrawPlantOcclusion{}): the gid in each shape slot, and the slot to reuse next.
+Dim plantCellGid.w(#PLANT_CELL_CACHE - 1)
+plantCellNext.w = 0
+;; The warp zone of the loaded area: the x of its WarpZone object (#AREA_BOX_NONE if it has none), its warp pipes' x, top, height and
+;; world number (their PipeEntry objects with a world in the link: one whose world has a level in the table starts it, the others are
+;; inert), and whether its text has been drawn since the playfields were last stamped (0 not yet, 1 drawn). warpPipeTaken is the warp
+;; pipe Mario is going down (-1 for none: a plain pipe), warpLevelTarget the level it starts once he is down (-1 until then).
+areaWarpZoneX.w = #AREA_BOX_NONE
+Dim warpPipeX.w(#WARP_PIPES_MAX - 1)
+Dim warpPipeY.w(#WARP_PIPES_MAX - 1)
+Dim warpPipeH.w(#WARP_PIPES_MAX - 1)
+Dim warpPipeWorld.w(#WARP_PIPES_MAX - 1)
+warpPipeTaken.w = -1
+warpLevelTarget.w = -1
+warpPipeCount.w = 0
+; The left edge of the leftmost warp pipe, whatever order the objects came in: where the text starts and which page the camera stops at.
+warpLeftX.w = 0
+warpZoneState.w = 0
+;; Once the view reaches the warp zone's object the camera stops at the warp room's page (warpCameraLockX), so the room is in view
+;; and not scrolled half past; cleared with the stamp of the playfields.
+warpCameraLocked.w = False
+warpCameraLockX.w = 0
+;; A castle's scroll lock (the cartridge's ScrollLock, the area's ScrollLock object, 2-4's at x 2384): the view's right edge goes no
+;; further than its page's start (#AREA_BOX_NONE: the area has none) until the walk after the axe lifts it (scrollLockLifted, set by
+;; UpdateCastleEnd{} as the walk begins, cleared with the stamp).
+areaScrollLockX.w = #AREA_BOX_NONE
+scrollLockLifted.w = False
+;; A castle's axe (the area's Axe object: its cell's top left, #AREA_BOX_NONE when the area has none), the end's task (0 none,
+;; #CASTLE_END_*) and how many of the bridge's pieces have gone.
+areaAxeX.w = #AREA_BOX_NONE
+areaAxeY.w = #AREA_BOX_NONE
+castleEndTask.w = 0
+bridgeCollapseStep.w = 0
+;; The walk (castleWalkReady once set up; castleWalkDestX the retainer's page, castleWalkStopX where Mario stops), the messages (their
+;; ticks, how many are wanted and how many the world bitmaps have), the end's delay, and the retainer (the area's Retainer object).
+castleWalkReady.w = False
+castleWalkDestX.w = 0
+castleWalkStopX.w = 0
+castleMessageTicks.w = 0
+castleTextWanted.w = 0
+castleTextDrawnA.w = 0
+castleTextDrawnB.w = 0
+castleEndDelay.w = 0
+areaRetainerX.w = #AREA_BOX_NONE
+areaRetainerY.w = #AREA_BOX_NONE
+; The firebars' flicker this frame (DrawObjects{}), and which half of the balls this frame's bitmap draws.
+firebarFlickerOn.w = False
+firebarFlickerPhase.w = 0
+;; The test invincibility (F7, in debug mode or with the LEVELS argument): no enemy, firebar or flame hurts him (InjurePlayer{}), with none of the Starman's colour cycling
+;; or music. A pit or the clock still kills him.
+debugInvincible.w = False
+oldF7.w = False
+oldF8.w = False
+oldF9.w = False
+Dim transitionLabel$(#TRANSITION_LOG_MAX - 1)
+Dim transitionTime.l(#TRANSITION_LOG_MAX - 1)
+transitionCount.w = 0
+transitionDropped.w = 0
+; Cells the last stamp did not draw because their GID was above #STAMP_GID_MAX (BuildStampLists{}).
+stampSkipped.w = 0
+;; The pause: the game is frozen while gamePaused is True; pauseTimer is the lockout after a
+;; press; pauseStartHeld is the Start key as it was last tick (only a fresh press counts).
+gamePaused.w = False
+;; The controls: the keyboard's (#KEYBOARD_*) and the joysticks' (#JOYSTICK_*). menuAxisHeld() is the stick or the arrow keys as
+;; they were last tick on a menu, for each axis (#MENU_AXIS_*: -1 up or left, 0, 1 down or right),
+;; so that a hold moves or changes once.
+keyboardMode.w = #KEYBOARD_TWO_KEY
+joystickMode.w = #JOYSTICK_TWO_BUTTON
+; The joystick as UpdateJoystick{} read it this frame: its stick (-1, 0 or 1 on each axis) and Joyb's buttons (1 button 1, 2 button 2).
+joystickX.w = 0
+joystickY.w = 0
+joystickButtonBits.w = 0
+Dim menuAxisHeld.w(1)
+; The course-clear lines' x in the view (CutCourseClearText{}), each centred on its length.
+Dim courseClearLineX.w(1)
+;; Redefinable keys: keyMap() is the raw key for each #KEY_* action; redefineMap() holds the new
+;; choices while the redefine screen is up (committed at the end, dropped by Esc); keyNames$() is
+;; each raw code's name, and keyActionNames$() each action's. settingsDirty is True when the
+;; controls or the keys differ from the file; settingsPath$ is that file. redefineActive is True
+;; while the screen is up, redefineIndex the action being asked for, redefineKeyDown() each key as it
+;; was at the last scan (only a fresh press counts), redefineMessage$ a refusal to show, and
+;; escapeGuard an Esc that has done its one thing (one press, one action, until it is let go).
+Dim keyMap.w(#KEY_COUNT)
+Dim redefineMap.w(#KEY_COUNT)
+Dim keyNames$(#KEY_LAST)
+Dim keyActionNames$(#KEY_COUNT)
+;; Debug mode: the debug keys and the two reports, switched on by the parameter debug
+;; (sparkydave.init.ab3), and the folder the reports are written to.
+debugMode.w = False
+reportDir$ = "PROGDIR:"
+; Every level on the title's LEVEL row without debug mode, for testing a level at full speed: the parameter levels.
+allLevelsOpen.w = False
+; Where the game's data files are: a data drawer next to the program (Bthe main project's UILD note).
+dataDir$ = "PROGDIR:data/"
+settingsPath$ = "PROGDIR:SparkyDave.settings"
+settingsDirty.w = False
+redefineActive.w = False
+redefineIndex.w = 0
+Dim redefineKeyDown.w(#KEY_LAST)
+redefineMessage$ = ""
+escapeGuard.w = False
+; The cell of a block hit this tick, for what stands on it (BumpObjectsOn{}); -1 for none.
+bumpObjectCell.w = -1
+; One flag for each pair of enemies that are overlapping and have already turned round.
+Dim enemyPairTouch.w(#MAX_OBJECTS*#MAX_OBJECTS - 1)
+; The slots EnemiesTurnAround{} found able to turn this tick, in slot order.
+Dim turnCandidateSlot.w(#MAX_OBJECTS - 1)
+pauseTimer.w = 0
+pauseStartHeld.w = False
+
+;; Mario as a hardware sprite (#MARIO_SPRITE, sparkydave.mario-sprite.blitz.ab3): what DrawPlayer{} decided for this frame's sprite
+;; (the sprite number, -1 for none; the world x of his left; the bitmap row of his top), and the scratch pens a sprite is cut from.
+marioSpriteShape.w = -1
+marioSpriteX.w = 0
+marioSpriteRow.w = 0
+;; The sprite and visible rows the clip sprite was last cut for, as sprite*64 + rows, -1 for none, and the slot it was cut into (0 or 1, after
+;; #SPRITE_CLIP): the next cut goes into the other (ShowMarioSprite{}).
+marioClipKey.w = -1
+marioClipSlot.w = 0
+; Whether he is shown between the playfields now (SetMarioBehind{}), for the pipe move and the vine's cloud floor.
+marioBehindShown.w = False
+; Whether the big swim poses' second sprite pair (#SWIM_CHANNEL) may be on show (ShowMarioSprite{}, ParkSwimPair{}).
+swimPairShown.w = False
+Dim marioSpritePens.w(#MARIO_BIG_H - 1, 15)
+
+;; END OF GLOBALS

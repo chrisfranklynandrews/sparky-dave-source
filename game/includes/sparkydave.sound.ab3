@@ -1,0 +1,491 @@
+;; =======================================================
+;; SOUND (AMIGA MODE)
+;; =======================================================
+;; The cartridge's sound engine, ported (sparkydave.sound.blitz.ab3), drives a virtual
+;; APU, and a mapping layer plays the virtual APU on Paula. This file holds what the
+;; Blitz half needs declared first: the constants, the engine's variables, the APU's
+;; state, and the waveforms in Chip RAM. See the main project's SOUND note.
+
+;; --- The sound queues and music, as the game asks for them (smbdis's names and values).
+;; Square 1 effects.
+#SFX_BIG_JUMP         = 1
+#SFX_BUMP             = 2
+#SFX_ENEMY_STOMP      = 4
+#SFX_ENEMY_SMACK      = 8
+#SFX_PIPE_DOWN_INJURY = 16
+#SFX_FIREBALL         = 32
+#SFX_FLAGPOLE         = 64
+#SFX_SMALL_JUMP       = 128
+
+; Square 2 effects.
+#SFX_COIN_GRAB     = 1
+#SFX_GROW_POWER_UP = 2
+#SFX_GROW_VINE     = 4
+#SFX_BLAST         = 8
+#SFX_TIMER_TICK    = 16
+#SFX_POWER_UP_GRAB = 32
+#SFX_EXTRA_LIFE    = 64
+#SFX_BOWSER_FALL   = 128
+
+; Noise effects.
+#SFX_BRICK_SHATTER = 1
+#SFX_BOWSER_FLAME  = 2
+
+; Area music (the area queue).
+#MUSIC_GROUND      = 1
+#MUSIC_WATER       = 2
+#MUSIC_UNDERGROUND = 4
+#MUSIC_CASTLE      = 8
+#MUSIC_CLOUD       = 16
+#MUSIC_PIPE_INTRO  = 32
+#MUSIC_STAR_POWER  = 64
+#MUSIC_SILENCE     = 128
+
+; Event music (the event queue).
+#MUSIC_DEATH            = 1
+#MUSIC_GAME_OVER        = 2
+#MUSIC_VICTORY          = 4
+#MUSIC_END_OF_CASTLE    = 8
+#MUSIC_ALT_GAME_OVER    = 16
+#MUSIC_END_OF_LEVEL     = 32
+#MUSIC_TIME_RUNNING_OUT = 64
+
+;; --- The engine's variables, in one array (soundState), by index. The names are the
+;; cartridge's, spelled out.
+#SS_SQUARE1_QUEUE                = 0
+#SS_SQUARE2_QUEUE                = 1
+#SS_NOISE_QUEUE                  = 2
+#SS_AREA_MUSIC_QUEUE             = 3
+#SS_EVENT_MUSIC_QUEUE            = 4
+#SS_SQUARE1_BUFFER               = 5
+#SS_SQUARE2_BUFFER               = 6
+#SS_NOISE_BUFFER                 = 7
+#SS_AREA_MUSIC_BUFFER            = 8
+#SS_EVENT_MUSIC_BUFFER           = 9
+#SS_MUSIC_DATA                   = 10
+#SS_MUSIC_OFFSET_SQUARE2         = 11
+#SS_MUSIC_OFFSET_SQUARE1         = 12
+#SS_MUSIC_OFFSET_TRIANGLE        = 13
+#SS_MUSIC_OFFSET_NOISE           = 14
+#SS_NOTE_LENGTH_OFFSET           = 15
+#SS_NOISE_LOOPBACK_OFFSET        = 16
+#SS_LENGTH_TABLE_ADDER           = 17
+#SS_AREA_MUSIC_BUFFER_ALT        = 18
+#SS_GROUND_HEADER_OFFSET         = 19
+#SS_ALT_REG_CONTENT_FLAG         = 20
+#SS_SQUARE2_NOTE_LENGTH_BUFFER   = 21
+#SS_SQUARE2_NOTE_LENGTH_COUNTER  = 22
+#SS_SQUARE2_ENVELOPE_CONTROL     = 23
+#SS_SQUARE1_NOTE_LENGTH_COUNTER  = 24
+#SS_SQUARE1_ENVELOPE_CONTROL     = 25
+#SS_TRIANGLE_NOTE_LENGTH_BUFFER  = 26
+#SS_TRIANGLE_NOTE_LENGTH_COUNTER = 27
+#SS_NOISE_BEAT_LENGTH_COUNTER    = 28
+#SS_SQUARE1_SFX_LENGTH           = 29
+#SS_SQUARE2_SFX_LENGTH           = 30
+#SS_SFX_SECONDARY_COUNTER        = 31
+#SS_NOISE_SFX_LENGTH             = 32
+#SS_LOAD_VALUE                   = 33
+#SS_ENABLED                      = 34
+#SS_PAUSE_QUEUE                  = 35
+#SS_PAUSE_BUFFER                 = 36
+#SS_PAUSE_MODE                   = 37
+#SS_COUNT                        = 38
+
+;; --- The virtual APU: four channels (0 pulse 1, 1 pulse 2, 2 triangle, 3 noise), 16
+;; fields each.
+#AP_CONTROL        = 0
+#AP_SWEEP          = 1
+#AP_TIMER          = 2
+#AP_LENGTH         = 3
+#AP_ENABLED        = 4
+#AP_ENVELOPE_START = 5
+#AP_ENVELOPE_DIV   = 6
+#AP_ENVELOPE_LEVEL = 7
+#AP_SWEEP_RELOAD   = 8
+#AP_SWEEP_DIV      = 9
+#AP_LINEAR         = 10
+#AP_LINEAR_RELOAD  = 11
+#AP_NOISE_PERIOD   = 12
+#AP_NOISE_MODE     = 13
+#AP_LEVEL          = 14
+
+;; --- Paula
+#PAULA_PERIOD_MIN = 124
+#PAULA_DMA_AUDIO  = $820f
+#PAULA_PERIOD_MAX = 65535
+#PAULA_DMACON     = $dff096
+#PAULA_ADKCON     = $dff09e
+#PAULA_BASE       = $dff0a0
+
+;; The loudness of each NES channel on Paula, per step of the 4-bit volume (Paula's
+;; range is 0 to 64): by ear.
+#SOUND_NOISE_VOLUME    = 3
+#SOUND_PULSE_VOLUME    = 4
+#SOUND_TRIANGLE_VOLUME = 4
+
+;; The pan layouts the tuning keys step through (soundPanLayout(): four Paula channels for each,
+;; in the order pulse 1, pulse 2, triangle, noise). Paula's channels 0 and 3 are the left speaker
+;; and 1 and 2 the right. Layout 0 is the first one made.
+#SOUND_PAN_LAYOUTS = 5
+
+;; The settings the game starts with, chosen by ear (the main project's SOUND note, "The sound settings"): layout 3 (melody and
+;; noise left, harmony and bass right), the low-pass filter off (1 is on), and the volume steps above. A player's
+;; own choice replaces them through the settings file (the same variables the tuning keys change).
+#SOUND_FILTER_DEFAULT = 0
+#SOUND_PAN_DEFAULT    = 3
+
+;; The wave block in Chip RAM: the 4 pulse duties in 3 cycle lengths (56 bytes each
+;; duty), the triangle in 3 lengths (56), the long noise (32768, one 32767-step pass
+;; and the first byte again) and the short noise (two 93-step passes, 186).
+#SOUND_WAVE_LEVEL        = 90
+#SOUND_NOISE_SHORT_BYTES = 186
+#SOUND_NOISE_LONG_BYTES  = 32768
+#SOUND_WAVE_BLOCK_BYTES  = 33280
+
+Dim soundState.l(#SS_COUNT)
+Dim apuState.l(63)
+
+;; The jukebox page. While the page is up soundJukeboxOn is True: the engine runs
+;; whatever the cover (the title is silent otherwise) with its own clean state, and the game's state is
+;; kept in the soundSaved arrays by SoundJukeboxBegin{} and put back by SoundJukeboxEnd{}
+;; (sparkydave.sound.blitz.ab3), so the game's music goes on where it was.
+soundJukeboxOn.w = False
+Dim soundSavedState.l(#SS_COUNT)
+Dim soundSavedApu.l(63)
+
+;; What the page lists, in order: the songs (area music loops, event tunes play once; jukeboxSongEvent
+;; says which queue the bit goes to) and the effects (group 0 square 1, 1 square 2, 2 noise).
+#JUKEBOX_SONGS   = 14
+#JUKEBOX_EFFECTS = 18
+Dim jukeboxSongName$(#JUKEBOX_SONGS - 1)
+Dim jukeboxSongEvent.w(#JUKEBOX_SONGS - 1)
+Dim jukeboxSongBit.w(#JUKEBOX_SONGS - 1)
+Dim jukeboxEffectName$(#JUKEBOX_EFFECTS - 1)
+Dim jukeboxEffectGroup.w(#JUKEBOX_EFFECTS - 1)
+Dim jukeboxEffectBit.w(#JUKEBOX_EFFECTS - 1)
+jukeboxSongName$(0) = "GROUND"
+jukeboxSongBit(0) = #MUSIC_GROUND
+jukeboxSongName$(1) = "UNDERGROUND"
+jukeboxSongBit(1) = #MUSIC_UNDERGROUND
+jukeboxSongName$(2) = "WATER"
+jukeboxSongBit(2) = #MUSIC_WATER
+jukeboxSongName$(3) = "CASTLE"
+jukeboxSongBit(3) = #MUSIC_CASTLE
+jukeboxSongName$(4) = "CLOUD"
+jukeboxSongBit(4) = #MUSIC_CLOUD
+jukeboxSongName$(5) = "PIPE INTRO"
+jukeboxSongBit(5) = #MUSIC_PIPE_INTRO
+jukeboxSongName$(6) = "STAR POWER"
+jukeboxSongBit(6) = #MUSIC_STAR_POWER
+jukeboxSongName$(7) = "DEATH"
+jukeboxSongEvent(7) = True
+jukeboxSongBit(7) = #MUSIC_DEATH
+jukeboxSongName$(8) = "GAME OVER"
+jukeboxSongEvent(8) = True
+jukeboxSongBit(8) = #MUSIC_GAME_OVER
+jukeboxSongName$(9) = "VICTORY"
+jukeboxSongEvent(9) = True
+jukeboxSongBit(9) = #MUSIC_VICTORY
+jukeboxSongName$(10) = "END OF CASTLE"
+jukeboxSongEvent(10) = True
+jukeboxSongBit(10) = #MUSIC_END_OF_CASTLE
+jukeboxSongName$(11) = "ALT GAME OVER"
+jukeboxSongEvent(11) = True
+jukeboxSongBit(11) = #MUSIC_ALT_GAME_OVER
+jukeboxSongName$(12) = "END OF LEVEL"
+jukeboxSongEvent(12) = True
+jukeboxSongBit(12) = #MUSIC_END_OF_LEVEL
+jukeboxSongName$(13) = "TIME RUNNING OUT"
+jukeboxSongEvent(13) = True
+jukeboxSongBit(13) = #MUSIC_TIME_RUNNING_OUT
+jukeboxEffectName$(0) = "SMALL JUMP"
+jukeboxEffectBit(0) = #SFX_SMALL_JUMP
+jukeboxEffectName$(1) = "BIG JUMP"
+jukeboxEffectBit(1) = #SFX_BIG_JUMP
+jukeboxEffectName$(2) = "BUMP"
+jukeboxEffectBit(2) = #SFX_BUMP
+jukeboxEffectName$(3) = "STOMP"
+jukeboxEffectBit(3) = #SFX_ENEMY_STOMP
+jukeboxEffectName$(4) = "SMACK"
+jukeboxEffectBit(4) = #SFX_ENEMY_SMACK
+jukeboxEffectName$(5) = "PIPE INJURY"
+jukeboxEffectBit(5) = #SFX_PIPE_DOWN_INJURY
+jukeboxEffectName$(6) = "FIREBALL"
+jukeboxEffectBit(6) = #SFX_FIREBALL
+jukeboxEffectName$(7) = "FLAGPOLE"
+jukeboxEffectBit(7) = #SFX_FLAGPOLE
+jukeboxEffectName$(8) = "COIN"
+jukeboxEffectGroup(8) = 1
+jukeboxEffectBit(8) = #SFX_COIN_GRAB
+jukeboxEffectName$(9) = "GROW POWER UP"
+jukeboxEffectGroup(9) = 1
+jukeboxEffectBit(9) = #SFX_GROW_POWER_UP
+jukeboxEffectName$(10) = "GROW VINE"
+jukeboxEffectGroup(10) = 1
+jukeboxEffectBit(10) = #SFX_GROW_VINE
+jukeboxEffectName$(11) = "FIREWORK BLAST"
+jukeboxEffectGroup(11) = 1
+jukeboxEffectBit(11) = #SFX_BLAST
+jukeboxEffectName$(12) = "TIMER TICK"
+jukeboxEffectGroup(12) = 1
+jukeboxEffectBit(12) = #SFX_TIMER_TICK
+jukeboxEffectName$(13) = "POWER UP GRAB"
+jukeboxEffectGroup(13) = 1
+jukeboxEffectBit(13) = #SFX_POWER_UP_GRAB
+jukeboxEffectName$(14) = "ONE UP"
+jukeboxEffectGroup(14) = 1
+jukeboxEffectBit(14) = #SFX_EXTRA_LIFE
+jukeboxEffectName$(15) = "BOWSER FALL"
+jukeboxEffectGroup(15) = 1
+jukeboxEffectBit(15) = #SFX_BOWSER_FALL
+jukeboxEffectName$(16) = "BRICK SHATTER"
+jukeboxEffectGroup(16) = 2
+jukeboxEffectBit(16) = #SFX_BRICK_SHATTER
+jukeboxEffectName$(17) = "BOWSER FLAME"
+jukeboxEffectGroup(17) = 2
+jukeboxEffectBit(17) = #SFX_BOWSER_FLAME
+
+; The engine's own length table (the cartridge's APU length counter values).
+Dim apuLengthTable.w(31)
+apuLengthTable(0) = 10
+apuLengthTable(1) = 254
+apuLengthTable(2) = 20
+apuLengthTable(3) = 2
+apuLengthTable(4) = 40
+apuLengthTable(5) = 4
+apuLengthTable(6) = 80
+apuLengthTable(7) = 6
+apuLengthTable(8) = 160
+apuLengthTable(9) = 8
+apuLengthTable(10) = 60
+apuLengthTable(11) = 10
+apuLengthTable(12) = 14
+apuLengthTable(13) = 12
+apuLengthTable(14) = 26
+apuLengthTable(15) = 14
+apuLengthTable(16) = 12
+apuLengthTable(17) = 16
+apuLengthTable(18) = 24
+apuLengthTable(19) = 18
+apuLengthTable(20) = 48
+apuLengthTable(21) = 20
+apuLengthTable(22) = 96
+apuLengthTable(23) = 22
+apuLengthTable(24) = 192
+apuLengthTable(25) = 24
+apuLengthTable(26) = 72
+apuLengthTable(27) = 26
+apuLengthTable(28) = 16
+apuLengthTable(29) = 28
+apuLengthTable(30) = 32
+apuLengthTable(31) = 30
+
+Dim apuPowerOfTwo.w(7)
+apuPowerOfTwo(0) = 1
+apuPowerOfTwo(1) = 2
+apuPowerOfTwo(2) = 4
+apuPowerOfTwo(3) = 8
+apuPowerOfTwo(4) = 16
+apuPowerOfTwo(5) = 32
+apuPowerOfTwo(6) = 64
+apuPowerOfTwo(7) = 128
+
+; The noise channel's 16 periods, in CPU cycles per shift of its register.
+Dim apuNoisePeriod.w(15)
+apuNoisePeriod(0) = 4
+apuNoisePeriod(1) = 8
+apuNoisePeriod(2) = 16
+apuNoisePeriod(3) = 32
+apuNoisePeriod(4) = 64
+apuNoisePeriod(5) = 96
+apuNoisePeriod(6) = 128
+apuNoisePeriod(7) = 160
+apuNoisePeriod(8) = 202
+apuNoisePeriod(9) = 254
+apuNoisePeriod(10) = 380
+apuNoisePeriod(11) = 508
+apuNoisePeriod(12) = 762
+apuNoisePeriod(13) = 1016
+apuNoisePeriod(14) = 2034
+apuNoisePeriod(15) = 4068
+
+; Cycle lengths of the pulse and triangle waves: index 0 is 32 bytes, 1 is 16, 2 is 8.
+Dim soundCycleLength.w(2)
+soundCycleLength(0) = 32
+soundCycleLength(1) = 16
+soundCycleLength(2) = 8
+
+; Byte offsets of the waves inside the wave block.
+Dim soundPulseWaveOffset.l(11)
+Dim soundTriangleWaveOffset.l(2)
+
+;; Which Paula channel each APU channel plays on, from the pan layout in use (soundPanLayout(),
+;; below; set from #SOUND_PAN_DEFAULT once the layouts are filled in). Paula's channels 0 and 3
+;; are the left speaker and 1 and 2 the right.
+Dim soundPaulaChannel.w(3)
+
+;; What each Paula channel was last given, so an unchanged channel is not rewritten.
+;; The tuning (the main project's SOUND note, "The sound settings"): the layouts, the layout in use, the volume per
+;; step of the 4-bit level for the pulses, the triangle and the noise (Paula's range is 0 to 64),
+;; which of the three the keypad changes, whether the readout needs drawing, and the keys' edges.
+Dim soundPanLayout.w(#SOUND_PAN_LAYOUTS*4 - 1)
+soundPanLayout(0) = 0
+soundPanLayout(1) = 3
+soundPanLayout(2) = 1
+soundPanLayout(3) = 2
+soundPanLayout(4) = 0
+soundPanLayout(5) = 1
+soundPanLayout(6) = 3
+soundPanLayout(7) = 2
+soundPanLayout(8) = 1
+soundPanLayout(9) = 2
+soundPanLayout(10) = 0
+soundPanLayout(11) = 3
+soundPanLayout(12) = 0
+soundPanLayout(13) = 1
+soundPanLayout(14) = 2
+soundPanLayout(15) = 3
+soundPanLayout(16) = 1
+soundPanLayout(17) = 0
+soundPanLayout(18) = 3
+soundPanLayout(19) = 2
+soundPanNow.w = 0
+Dim soundVolumeScale.w(2)
+;; The low-pass filter as chosen (True on), put on the hardware by SoundApplySettings{} and the
+;; options page; the settings file can replace it, as it can the layout and the volume steps.
+soundFilterChosen.w = False
+
+;; The sound's settings as the game comes: at the start, and for the options page's DEFAULTS. The
+;; variables only; the hardware gets them in SoundApplySettings{}.
+Statement SetSoundDefaults{}
+  SHARED soundPanNow, soundPaulaChannel(), soundPanLayout(), soundFilterChosen, soundVolumeScale()
+  soundPanNow = #SOUND_PAN_DEFAULT
+  For panIndex.w = 0 To 3
+    soundPaulaChannel(panIndex) = soundPanLayout(soundPanNow*4 + panIndex)
+  Next
+  soundVolumeScale(0) = #SOUND_PULSE_VOLUME
+  soundVolumeScale(1) = #SOUND_TRIANGLE_VOLUME
+  soundVolumeScale(2) = #SOUND_NOISE_VOLUME
+  soundFilterChosen = False
+  If #SOUND_FILTER_DEFAULT = 1 Then soundFilterChosen = True
+End Statement
+SetSoundDefaults{}
+
+Dim soundPaulaKey.l(3)
+Dim soundPaulaWave.l(3)
+Dim soundPaulaWords.l(3)
+Dim soundPaulaPeriod.l(3)
+Dim soundPaulaVolume.l(3)
+
+soundWaveBlock.l = 0
+soundNoiseLongOffset.l = 0
+soundNoiseShortOffset.l = 0
+soundPlanSize.l = 0
+soundPlanPeriod.l = 0
+
+;; True once the hardware is running (the tests leave it off: the registers are not
+;; written and nothing is heard).
+soundHardwareOn.w = False
+
+;; The frame time report's split of the sound (the main project's TIMING note, "The sound
+;; split"): soundPartLines() adds up the raster lines of each part of the frame's sound ticks
+;; (#SOUND_PART_*), soundTicksLast is how many ticks the frame ran. Kept here, not in globals.ab3,
+;; because the standalone sound program (proofs/sound-engine.ab3) includes the sound files and nothing else. Only when soundTimingOn
+;; (the game's debug mode, sparkydave.init.ab3); soundFrameLines is the frame's raster lines,
+;; for a beam that wraps.
+#SOUND_PART_CLOCKS = 0
+#SOUND_PART_SFX    = 1
+#SOUND_PART_MUSIC  = 2
+#SOUND_PART_PAULA  = 3
+soundTimingOn.w = False
+soundFrameLines.l = 312
+soundMarkLine.l = 0
+soundTicksLast.w = 0
+Dim soundPartLines.l(3)
+
+;; The waves, built once at start-up into Chip RAM (signed bytes). Returns False if
+;; the allocation failed.
+Function.w BuildSoundWaves{}
+  SHARED soundWaveBlock, soundPulseWaveOffset(), soundTriangleWaveOffset(), soundCycleLength()
+  SHARED soundNoiseLongOffset, soundNoiseShortOffset
+  soundWaveBlock = AllocMem(#SOUND_WAVE_BLOCK_BYTES, 2 + 65536)
+  If soundWaveBlock = 0 Then Function Return False
+
+  waveOffset.l = 0
+  For dutyIndex.w = 0 To 3
+    If dutyIndex = 0 Then eighthsHigh.w = 1
+    If dutyIndex = 1 Then eighthsHigh.w = 2
+    If dutyIndex = 2 Then eighthsHigh.w = 4
+    If dutyIndex = 3 Then eighthsHigh.w = 6
+    For sizeIndex.w = 0 To 2
+      cycleBytes.w = soundCycleLength(sizeIndex)
+      highCount.w = (cycleBytes*eighthsHigh)/8
+      soundPulseWaveOffset(dutyIndex*3 + sizeIndex) = waveOffset
+      For sampleIndex.w = 0 To cycleBytes - 1
+        If sampleIndex < highCount
+          Poke.b soundWaveBlock + waveOffset + sampleIndex, #SOUND_WAVE_LEVEL
+        Else
+          Poke.b soundWaveBlock + waveOffset + sampleIndex, -#SOUND_WAVE_LEVEL
+        EndIf
+      Next
+      waveOffset = waveOffset + cycleBytes
+    Next
+  Next
+
+  For sizeIndex.w = 0 To 2
+    cycleBytes.w = soundCycleLength(sizeIndex)
+    halfBytes.w = cycleBytes/2
+    soundTriangleWaveOffset(sizeIndex) = waveOffset
+    For sampleIndex.w = 0 To cycleBytes - 1
+      If sampleIndex < halfBytes
+        stepLevel.w = halfBytes - 1 - sampleIndex
+      Else
+        stepLevel.w = sampleIndex - halfBytes
+      EndIf
+      Poke.b soundWaveBlock + waveOffset + sampleIndex, (stepLevel*240)/(halfBytes - 1) - 120
+    Next
+    waveOffset = waveOffset + cycleBytes
+  Next
+
+  ;; The cartridge's noise: a 15-bit shift register from 1, feedback bit 0 xor bit 1
+  ;; (long mode) or bit 0 xor bit 6 (short mode), the output high while bit 0 is clear.
+  ;; The long mode repeats after 32767 steps; the 32768th byte repeats the first, a
+  ;; one-sample hiccup every 32768 samples.
+  soundNoiseLongOffset = waveOffset
+  shiftRegister.l = 1
+  noiseIndex.l = 0
+  While noiseIndex < #SOUND_NOISE_LONG_BYTES - 1
+    lowBit.l = shiftRegister AND 1
+    tapBit.l = (shiftRegister/2) AND 1
+    feedback.l = Xor(lowBit, tapBit)
+    shiftRegister = (shiftRegister/2) OR (feedback*16384)
+    If lowBit = 0
+      Poke.b soundWaveBlock + waveOffset + noiseIndex, #SOUND_WAVE_LEVEL
+    Else
+      Poke.b soundWaveBlock + waveOffset + noiseIndex, -#SOUND_WAVE_LEVEL
+    EndIf
+    noiseIndex = noiseIndex + 1
+  Wend
+  Poke.b soundWaveBlock + waveOffset + noiseIndex, Peek.b(soundWaveBlock + waveOffset)
+  waveOffset = waveOffset + #SOUND_NOISE_LONG_BYTES
+
+  soundNoiseShortOffset = waveOffset
+  shiftRegister = 1
+  noiseIndex = 0
+  While noiseIndex < #SOUND_NOISE_SHORT_BYTES
+    lowBit.l = shiftRegister AND 1
+    tapBit.l = (shiftRegister/64) AND 1
+    feedback.l = Xor(lowBit, tapBit)
+    shiftRegister = (shiftRegister/2) OR (feedback*16384)
+    If lowBit = 0
+      Poke.b soundWaveBlock + waveOffset + noiseIndex, #SOUND_WAVE_LEVEL
+    Else
+      Poke.b soundWaveBlock + waveOffset + noiseIndex, -#SOUND_WAVE_LEVEL
+    EndIf
+    noiseIndex = noiseIndex + 1
+  Wend
+  Function Return True
+End Function
+
+;; END OF SOUND (AMIGA MODE)

@@ -1,0 +1,664 @@
+;; =======================================================
+;; COLLISION (BLITZ MODE)
+;; =======================================================
+;; Player tile collision, ported from the NTSC cartridge. The ROM has no
+;; box: it probes fixed points selected by player size and crouch, read out
+;; of Block_Buffer_1/2, and decides what to do from the metatile number it
+;; finds there. Those two ideas -- probe points, and a metatile class that
+;; carries behaviour -- are what this file implements.
+;;
+;; GEOMETRY. The box is 12x14, inset 2 px on the left, right and top and
+;; flush at the bottom, sampled at five points: the top edge at its centre,
+;; the bottom edge at both ends, and each side edge at its own extreme.
+;; The ROM reaches these numbers through a 32-px OAM envelope that small
+;; Mario's art sits at the bottom of, so head Y+18 and foot Y+32 are really
+;; Y+2 and Y+16 in this game's 16 px sprite: the geometry is identical, only the arithmetic is rebased.
+;; See the main project's PLAYER_HITBOX note section 4.2 and the constants block in
+;; sparkydave.constants.ab3.
+;;
+;; GROUND SUPPORT. There is no separate ground pass. CheckPlayerFeet runs
+;; every frame and re-derives grounded-ness from the foot probes, which are
+;; an OR: one foot is enough. The ROM forces the player into the falling
+;; state at the top of PlayerBGCollision and lets InitSteP put him back on
+;; the ground, so he is briefly airborne by construction. Because that
+;; re-derivation happens after the vertical move, a player standing still
+;; never dips -- matching the ROM, which also applies gravity against the
+;; previous frame's state. The old separate CheckPlayerGround pass required
+;; both feet and held the player up for up to 16 px of travel after he walked
+;; off a ledge. That was this engine's own construction, not a simplification
+;; of anything in the ROM.
+;;
+;; SNAPPING. Only the foot test snaps, to the tile row it landed on. A
+;; ceiling hit does not move the player at all: the ROM only changes the
+;; vertical speed, and 1 px/tick downward is enough to leave the tile. A
+;; wall hit pushes exactly 1 px rather than snapping to the tile face, so
+;; ImpedePlayerMove's argument is signed and a wall is where his 12-px box
+;; finally rests, flush against the face. Because nothing divides a
+;; possibly-negative playerX by #TILE any more, the left-edge signed
+;; truncation hazard is gone.
+;;
+;; METATILE CLASSES come from the generated metatileBuffer and are the only
+;; thing this file knows about level content. The #MT_* codes are generated
+;; by tools/build_assets.py alongside the buffer, so there is exactly one
+;; place they are defined.
+;;
+;; NOT YET PORTED. Per-direction solidity: the ROM lets the upper of a pipe top's two side probes pass.
+;; The exception is not in the code yet.
+;;
+;; The blocked-input mask (the main project's PLAYER_HITBOX note section 4.8). ImpedePlayerMove{} writes playerCollisionBits and
+;; ApplyCollisionButtonMask{} ANDs it into the button read. The mapping is checked only for the side-hit path: the foot-hit path
+;; reuses this routine with the opposite push sign, which the cartridge passes as Player_MovingDir (ChkFootMTile, 12012-12014), and
+;; it is not known whether that is intended or a bug in the cartridge; this code copies it as it is.
+;;
+;; See the main project's LEVEL_FORMAT note for the level data and
+;; the main project's PLAYER_HITBOX note for the full audit with ROM line numbers.
+
+;; Past the area's own last column (areaColumns) is solid ground, as before its first; mapWidth is the map buffer's row stride
+;; (#MAP_W, the widest area's), not this area's width.
+Function.w MetatileAt{pixelX.w, pixelY.w}
+  SHARED metatileBuffer(), mapWidth, areaColumns
+  If pixelY < 0 Then Function Return #MT_EMPTY
+  tileColumn.w = pixelX/#TILE
+  tileRow.w = pixelY/#TILE
+  If tileRow >= #MAP_H Then Function Return #MT_EMPTY
+  If tileColumn < 0 Then Function Return #MT_GROUND
+  If tileColumn >= areaColumns Then Function Return #MT_GROUND
+  Function Return metatileBuffer(tileRow*mapWidth + tileColumn)
+End Function
+
+;; The map as the enemies and the items meet it: the same, and a jumpspring's two tile rows (16 across, 32 down from its y) are solid. In
+;; the cartridge the spring is two solid metatiles ($67 over $68, drawn over by its sprites), so a Goomba or a Koopa walking into it
+;; turns round and one falling onto it stands on it. Ours is an object, so its box is looked up in the area's spring table (a level
+;; has none or one: the loop is empty everywhere else). Mario does not use this: he has UpdateSpring{}.
+Function.w EnemyMetatileAt{pixelX.w, pixelY.w}
+  SHARED springSpawnCount, springSpawnX(), springSpawnY()
+  For springIndex = 0 To springSpawnCount - 1
+    If pixelX >= springSpawnX(springIndex) AND pixelX < springSpawnX(springIndex) + #TILE
+      If pixelY >= springSpawnY(springIndex) AND pixelY < springSpawnY(springIndex) + #TILE*2 Then Function Return #MT_BLOCK
+    EndIf
+  Next
+  Function Return MetatileAt{pixelX, pixelY}
+End Function
+
+Statement ImpedePlayerMove{pushPixels.w}
+  SHARED playerX, playerSpeedX, sideCollisionTimer, playerCollisionBits
+  ;; ExIPM bail (smbdis 12327/12331->12347): the ROM skips the position
+  ;; push, the speed zero and the timer when the push would not reverse the
+  ;; current motion -- i.e. when the push goes the same direction the player
+  ;; is already moving. That is the "player overlapping a wall while moving
+  ;; away from it" case, which the NES treats as a separation that should not
+  ;; drag the player backward. On bail the bit mask still runs, matching the
+  ;; ExIPM fall-through that always executes the EOR/AND on $00.
+  pushBails.w = False
+  If pushPixels > 0
+    If playerSpeedX > 0 Then pushBails = True
+  Else
+    If playerSpeedX < 0 Then pushBails = True
+  EndIf
+  If pushBails = False
+    ;; A blocked direction zeroes the whole-pixel speed and leaves the subpixel
+    ;; alone, like ImpedePlayerMove, which writes Player_X_Speed only.
+    playerX = playerX + pushPixels
+    If playerX < 0 Then playerX = 0
+    playerSpeedX = 0
+    sideCollisionTimer = #MARIO_SIDECOLLIDE
+  EndIf
+  ;; Mask the blocked direction out of the NEXT frame's input. pushPixels < 0 is
+  ;; a right-wall stop -- pushed left -- and clears RIGHT; the other way round
+  ;; clears LEFT. That is the ROM's side-hit mapping: DoPlayerSideCheck passes $02
+  ;; as the side selector (12031), ImpedePlayerMove eor #$ffs it and ANDs the
+  ;; result into Player_CollisionBits (12345-12349), and $fd clears d1, the right
+  ;; button. That $02 is the ROM's selector -- #MARIO_BTN_RIGHT is $01 here -- so
+  ;; this engine writes $fe for the same event. See the main project's PLAYER_HITBOX note
+  ;; section 4.8.
+  ;;
+  ;; This runs on both the push path and the ExIPM bail path: the ROM's
+  ;; ExIPM label falls through to the same EOR/AND pair (12347-12350), so a
+  ;; bailed wall still blocks the direction that led the player into it.
+  ;;
+  ;; Assigned, not ANDed in: the byte is then a function of this collision alone, not of last frame's byte.
+  ;;
+  ;; $ff and not $ffff: only the low byte is read. Xor() is the bitwise form (Amiblitz3.guide 3.1.4); NOT is
+  ;; avoided because the guide calls it logic NOT (3.1.3).
+  If pushPixels < 0
+    playerCollisionBits = Xor($ff, #MARIO_BTN_RIGHT)
+  Else
+    playerCollisionBits = Xor($ff, #MARIO_BTN_LEFT)
+  EndIf
+End Statement
+
+;; A big Mario who is not crouching: the one case with the big head probe and the two upper side
+;; probes (ChkCollSize, smbdis 11929); a small or a crouching Mario has the small set. One
+;; place for the rule, used by the head probe, the side probes and the box.
+Function.w BigStanding{}
+  SHARED playerIsBig, playerCrouching
+  standingBig.w = False
+  If playerIsBig = True
+    If playerCrouching = False Then standingBig = True
+  EndIf
+  Function Return standingBig
+End Function
+
+Statement CheckPlayerFeet{}
+  SHARED stompChain, playerOnGround, playerX, playerY, playerSpeedY
+  SHARED playerMoveForceY, playerFractionY, playerMovingDirection
+  If playerSpeedY < 0 Then Statement Return
+  ;; Either foot is enough. The ROM checks the left probe, and only if it is
+  ;; clear does it read the right one (DoFootCheck, 11988-11990).
+  If MetatileAt{playerX + #PROBE_FOOT_X1, playerY + #PROBE_FOOT_Y} = #MT_EMPTY
+    If MetatileAt{playerX + #PROBE_FOOT_X2, playerY + #PROBE_FOOT_Y} = #MT_EMPTY
+      playerOnGround = False
+      Statement Return
+    EndIf
+  EndIf
+  ;; More than 4 px into the tile row is not a landing, it is an obstruction
+  ;; in the way of a moving player, and the ROM impedes horizontal motion
+  ;; instead (cpy #$05 / bcc LandPlyr, 12009-12011). This cannot happen on flat
+  ;; ground: the worst fall step is #MARIO_FALL_MAX + 1 pixels, and a landing is allowed at the
+  ;; #MT_FEET_MIN_SUBTILE residues 0 up to that number minus one, so as long as the step is no
+  ;; more than #MT_FEET_MIN_SUBTILE a fall cannot skip all of them (NTSC 5 and 5, PAL 6 and 6).
+  ;; tools/check_source_split.py checks it for both variants.
+  If (playerY AND $0f) >= #MT_FEET_MIN_SUBTILE
+    If playerMovingDirection = #MARIO_BTN_RIGHT
+      ImpedePlayerMove{-1}
+    Else
+      ImpedePlayerMove{1}
+    EndIf
+    Statement Return
+  EndIf
+  footRow.w = (playerY + #PROBE_FOOT_Y)/#TILE
+  playerY = footRow*#TILE - #TILE
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  playerOnGround = True
+  stompChain = 0
+End Statement
+
+Statement CheckPlayerSides{}
+  SHARED playerX, playerY, playerSpeedX
+  If playerX < 0 Then playerX = 0
+  rightSideBlocked.w = False
+  leftSideBlocked.w = False
+  If MetatileAt{playerX + #PROBE_SIDE_X2, playerY + #PROBE_SIDE_Y} <> #MT_EMPTY
+    rightSideBlocked = True
+  EndIf
+  If MetatileAt{playerX + #PROBE_SIDE_X1, playerY + #PROBE_SIDE_Y} <> #MT_EMPTY
+    leftSideBlocked = True
+  EndIf
+  ;; A big Mario standing has two more probes, 16 px higher (the ROM's four side probes, smbdis
+  ;; 12012 and the main project's PLAYER_HITBOX note 4.2); a small or crouching one has the lower pair only.
+  ;; Standing up under a ceiling puts these in it, and the answer below shoves him out.
+  If BigStanding{} = True
+    If MetatileAt{playerX + #PROBE_SIDE_X2, playerY + #PROBE_SIDE_Y_UPPER} <> #MT_EMPTY
+      rightSideBlocked = True
+    EndIf
+    If MetatileAt{playerX + #PROBE_SIDE_X1, playerY + #PROBE_SIDE_Y_UPPER} <> #MT_EMPTY
+      leftSideBlocked = True
+    EndIf
+  EndIf
+  ;; Resolve from the probe that is actually blocked. This prevents an
+  ;; opposite-facing jump from applying the correction toward the block.
+  If rightSideBlocked = True
+    If leftSideBlocked = False
+      ImpedePlayerMove{-1}
+      Statement Return
+    EndIf
+  EndIf
+  If leftSideBlocked = True
+    If rightSideBlocked = False
+      ImpedePlayerMove{1}
+      Statement Return
+    EndIf
+  EndIf
+  ;; If both probes are blocked there is no unique separating side. Retain the
+  ;; movement-direction fallback; with zero speed this intentionally chooses
+  ;; the rightward correction so the result is deterministic and documented.
+  If rightSideBlocked = False Then Statement Return
+  If playerSpeedX > 0
+    ImpedePlayerMove{-1}
+  Else
+    ImpedePlayerMove{1}
+  EndIf
+End Statement
+
+;; The block the head hit. Small Mario cannot break bricks: for him the only block that changes is a
+;; question block, which becomes the used block (the hard-block tile, so it lands in the hard-block class).
+;; Big Mario breaks a brick instead: CheckPlayerHead{} hands that to BreakBrick{} (sparkydave.debris.blitz.ab3).
+;; The ROM searches the nearest metatile; the one probe at the box's centre is enough here.
+;;
+;; A bump runs clear -> bob -> restore over #MARIO_BLOCKBOUNCE frames: the ROM's animation length and its
+;; re-bump lockout. StartBlockBump{} records the cell, its class and GID, clears mapBuffer to sky and queues
+;; the cell. DrawBlockBump{} (sparkydave.draw.ab3) draws the block tile as a moving cookie over the cleared cell.
+;; metatileBuffer is left alone until the finish, so the cell stays solid and collision is unaffected.
+;;
+;; FinishBlockBump{} runs the deferred change at the end of the bob: a `?` becomes MT_BLOCK with #SPENT_BLOCK_GID,
+;; and a brick gets its saved GID back. The deferral keeps Mario clear of an item rising out of the block.
+;; mapBuffer is the source of truth, but nothing re-reads it after StampPlayfield{}, so each change is queued
+;; through RedrawMetatileCells{} to be repainted.
+;;
+;; A `?` releases its item from the generated block-item table (a linear scan is fine: the table is tiny).
+;; Several coins can be in flight at once. Only one power-up is out at a time; a new one replaces the old
+;; (ClearPowerUps{}). A full pool drops the item.
+;;
+;; A coin is released on the HIT and pays at once (CoinBlock -> SetupJumpCoin -> GiveOneCoin, smbdis 7307):
+;; the arc is only the picture. CheckPlayerHead{} releases the coin kinds; FinishBlockBump{} releases the
+;; mushroom, which waits for Mario to clear the cell. A full pool still pays the coin.
+;; A brick with something in it (the Starman): listed in the block-item table.
+Function.w BrickHoldsItem{bumpCell.w}
+  SHARED blockItemCount
+  SHARED blockItemCell()
+  For itemIndex = 0 To blockItemCount - 1
+    If blockItemCell(itemIndex) = bumpCell Then Function Return True
+  Next
+  Function Return False
+End Function
+
+Function.w BlockHoldsCoin{bumpCell.w}
+  SHARED blockItemCount
+  SHARED blockItemCell(), blockItemSprite()
+  For itemIndex = 0 To blockItemCount - 1
+    If blockItemCell(itemIndex) = bumpCell
+      If blockItemSprite(itemIndex) = #COIN_SPRITE_BASE Then Function Return True
+    EndIf
+  Next
+  Function Return False
+End Function
+
+; The coin and its points, now; then the arc if there is a pool slot for it.
+Statement PopBlockCoin{coinX.w, coinY.w}
+  AddCoin{}
+  popSlot.w = PoolAlloc{}
+  If popSlot <> -1 Then PoolInitCoin{popSlot, coinX, coinY, coinY}
+End Statement
+
+;; The cartridge has a single power-up slot, so a new power-up REPLACES the one that
+;; is out (SetupPowerUp rebuilds the object in the same slot, smbdis 7127): the
+;; mushroom, flower or star (the 1-UP is a mushroom) still out is simply gone.
+Statement ClearPowerUps{}
+  SHARED objActive(), objType()
+  For clearIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(clearIndex) = True
+      If objType(clearIndex) = #OBJ_MUSHROOM OR objType(clearIndex) = #OBJ_FLOWER OR objType(clearIndex) = #OBJ_STAR
+        PoolFree{clearIndex}
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; THE VINE, grown from the top of a block at baseY in the column at columnX up to targetHeight (the cartridge's Setup_Vine and
+;; VineObjectHandler, without the sprites: DrawVine{} draws it). One vine at a time.
+Statement StartVine{columnX.w, baseY.w, targetHeight.w}
+  SHARED vineColumnX, vineBaseY, vineHeight, vineTarget
+  vineColumnX = columnX
+  vineBaseY = baseY
+  vineHeight = 0
+  vineTarget = targetHeight
+  SoundSquare2{#SFX_GROW_VINE}
+End Statement
+
+Statement SpawnBlockItem{bumpCell.w}
+  SHARED blockItemCount
+  SHARED blockItemCell(), blockItemSprite()
+  SHARED simStepNumerator
+  SHARED playerX, playerIsBig
+  SHARED objDir(), objType(), objSprite()
+  For itemIndex = 0 To blockItemCount - 1
+    If blockItemCell(itemIndex) = bumpCell
+      itemSprite.w = blockItemSprite(itemIndex)
+      bumpX.w = (bumpCell MOD #MAP_W)*#TILE
+      bumpY.w = (bumpCell/#MAP_W)*#TILE
+      ; Mushroom uses sprite 29/30/31; coin uses #COIN_SPRITE_BASE (42)
+      If itemSprite = #COIN_SPRITE_BASE
+        PopBlockCoin{bumpX, bumpY - #COIN_H}
+        Statement Return
+      EndIf
+      ; A brick with a vine grows one from its top (Setup_Vine, smbdis 6677): not a power-up, so none is cleared.
+      If itemSprite = #VINE_SPRITE
+        StartVine{bumpX, bumpY, #VINE_HEIGHT_FULL}
+        Statement Return
+      EndIf
+      ClearPowerUps{}
+      slot.w = PoolAlloc{}
+      If slot = -1 Then Statement Return
+      SoundSquare2{#SFX_GROW_POWER_UP}
+      PoolInitBlockItem{slot, bumpX, bumpY, itemSprite, bumpCell, simStepNumerator}
+      ;; The cartridge's power-up block gives a big Mario a flower, not a mushroom
+      ;; (SetupPowerUp, smbdis 7143). Only the ordinary red mushroom is a power-up;
+      ;; the 1-UP is not.
+      If itemSprite = #MUSHROOM_SPRITE AND playerIsBig = True
+        objType(slot) = #OBJ_FLOWER
+        objSprite(slot) = #FLOWER_SPRITE_BASE
+      EndIf
+      If itemSprite = #STAR_SPRITE_BASE Then objType(slot) = #OBJ_STAR
+      ; In SMB 1 the mushroom always moves to the right initially.
+      If #ITEM_FIXED_DIRECTION = 1
+        objDir(slot) = #MARIO_BTN_RIGHT
+      Else
+        If playerX < bumpX
+          objDir(slot) = #MARIO_BTN_RIGHT
+        Else
+          objDir(slot) = #MARIO_BTN_LEFT
+        EndIf
+      EndIf
+      Statement Return
+    EndIf
+  Next
+End Statement
+
+;; Floating coins are tile #COIN_TILE_GID in mapBuffer (authored in the
+;; Interactive Layer), not objects, and not solid: only the art is there. Two
+;; ways to collect one, both clearing the cell to sky:
+;;   - from below: a block bumped or broken with a coin directly above it pops
+;;     that coin out as if the block had released it (CheckTopOfBlock, smbdis
+;;     7396, then SetupJumpCoin). The same coin object as a block coin, and like
+;;     one it pays at once: PopBlockCoin{} adds the coin and 200 points and the arc
+;;     is only the picture.
+;;   - by touch: any of the player's five tile probes lying in a coin cell.
+;;     The ROM reaches coins through those same probes (CheckForCoinMTiles), so a
+;;     coin is collected when a probe, not the whole sprite, reaches it. The
+;;     coin and 200 points land at once.
+;; The cleared cell becomes plain sky: map art behind a coin is not restored. The
+;; back playfield's scenery (the strip) is not in the map, so it shows through.
+Statement ClearTileCoin{coinCell.w}
+  SHARED mapBuffer()
+  mapBuffer(coinCell) = 0
+  QueueMetatileRedraw{coinCell}
+End Statement
+
+Statement CollectCoinAbove{blockCellIndex.w}
+  SHARED mapBuffer(), mapWidth
+  If blockCellIndex < mapWidth Then Statement Return
+  coinCell.w = blockCellIndex - mapWidth
+  If mapBuffer(coinCell) <> #COIN_TILE_GID Then Statement Return
+  ClearTileCoin{coinCell}
+  PopBlockCoin{(coinCell MOD mapWidth)*#TILE, (coinCell/mapWidth)*#TILE}
+End Statement
+
+Statement CollectCoinAt{pixelX.w, pixelY.w}
+  SHARED mapBuffer(), mapWidth, areaColumns
+  If pixelX < 0 Then Statement Return
+  If pixelY < 0 Then Statement Return
+  tileColumn.w = pixelX/#TILE
+  tileRow.w = pixelY/#TILE
+  If tileColumn >= areaColumns Then Statement Return
+  If tileRow >= #MAP_H Then Statement Return
+  coinCell.w = tileRow*mapWidth + tileColumn
+  If mapBuffer(coinCell) <> #COIN_TILE_GID Then Statement Return
+  ClearTileCoin{coinCell}
+  AddCoin{}
+End Statement
+
+Statement CheckPlayerCoins{}
+  SHARED playerX, playerY, playerIsBig
+  headY.w = #PROBE_TOP_Y
+  If playerIsBig = True Then headY = #PROBE_TOP_Y_BIG
+  CollectCoinAt{playerX + #PROBE_TOP_X, playerY + headY}
+  CollectCoinAt{playerX + #PROBE_FOOT_X1, playerY + #PROBE_FOOT_Y}
+  CollectCoinAt{playerX + #PROBE_FOOT_X2, playerY + #PROBE_FOOT_Y}
+  CollectCoinAt{playerX + #PROBE_SIDE_X1, playerY + #PROBE_SIDE_Y}
+  CollectCoinAt{playerX + #PROBE_SIDE_X2, playerY + #PROBE_SIDE_Y}
+End Statement
+
+;; The brick with coins (the cartridge's $58 and $5d, smbdis 7226-7262, brought in
+;; by a `multicoin` BlockItem in the level, which becomes multiCoinCell()). It
+;; bumps for BOTH sizes, so big Mario cannot break it, and every hit pays a coin
+;; and keeps the brick, until the timer runs out. The first hit starts the timer
+;; at #MULTI_COIN_INTERVALS; it counts down one interval every #INTERVAL_PERIOD
+;; ticks of a free-running phase counter, as the cartridge's interval timers do
+;; (IntervalTimerControl, smbdis 790-793), so the brick lasts from 10 * #INTERVAL_PERIOD + 1 to 11 * #INTERVAL_PERIOD ticks
+;; from the first hit (211 to 231 on NTSC), depending on where in the phase it landed. The hit
+;; after the timer has reached 0 still pays its coin, but that bump settles as
+;; the used block instead of the brick.
+Function.w MultiCoinIndex{cellIndex.w}
+  SHARED multiCoinCount
+  SHARED multiCoinCell()
+  For multiIndex = 0 To multiCoinCount - 1
+    If multiCoinCell(multiIndex) = cellIndex Then Function Return multiIndex
+  Next
+  Function Return -1
+End Function
+
+; Called on the hit, after StartBlockBump{}.
+Statement HitMultiCoinBrick{multiIndex.w, cellIndex.w}
+  SHARED multiCoinStarted(), multiCoinIntervals(), blockBumpExhausts
+  If multiCoinStarted(multiIndex) = False
+    multiCoinStarted(multiIndex) = True
+    multiCoinIntervals(multiIndex) = #MULTI_COIN_INTERVALS
+  EndIf
+  blockBumpExhausts = False
+  If multiCoinIntervals(multiIndex) = 0 Then blockBumpExhausts = True
+  PopBlockCoin{(cellIndex MOD #MAP_W)*#TILE, (cellIndex/#MAP_W)*#TILE - #COIN_H}
+End Statement
+
+; Once per sim tick, from timing.ab3.
+Statement UpdateIntervalTimers{}
+  SHARED multiCoinStarted(), multiCoinIntervals(), intervalPhase, playerInjuryIntervals, playerState
+  SHARED objActive(), objType(), objState(), objAux(), playerStarIntervals, worldFreezeTicks, objPopTimer(), castleEndTask
+  intervalPhase = intervalPhase - 1
+  If intervalPhase >= 0 Then Statement Return
+  intervalPhase = #INTERVAL_PERIOD - 1
+  ; Not during a grow, a hit or a flower: the cartridge halts its timers for the freeze (TimerControl).
+  If worldFreezeTicks = 0
+    If playerInjuryIntervals > 0 Then playerInjuryIntervals = playerInjuryIntervals - 1
+    If playerStarIntervals > 0 Then playerStarIntervals = playerStarIntervals - 1
+    ;; The star's music ends a little before the star does (smbdis 5333: at 4 left),
+    ;; and the area's own music comes back. Not from the axe on: that check is in the
+    ;; cartridge's GameCoreRoutine, which its victory mode does not run, so a star running
+    ;; out on the bridge or the walk does not bring the castle's music back.
+    If playerStarIntervals = 4 AND playerState <> #PLAYER_ST_AXE AND castleEndTask = 0 Then QueueAreaMusic{}
+    ;; What waits in intervals: a stomped Koopa's shell (its revive) and a squashed Goomba (its
+    ;; removal, ChkKillGoomba). Each keeps its count in objAux.
+    For poolIndex = 0 To #MAX_OBJECTS - 1
+      If objActive(poolIndex) = True AND ((objType(poolIndex) = #OBJ_KOOPA AND objState(poolIndex) = #KOOPA_ST_SHELL) OR (objType(poolIndex) = #OBJ_GOOMBA AND objState(poolIndex) = #GOOMBA_ST_SQUASHED))
+        If objAux(poolIndex) > 0 Then objAux(poolIndex) = objAux(poolIndex) - 1
+      EndIf
+      ; A Bloober's float down and a Podoboo's wait (their EnemyIntervalTimer).
+      If objActive(poolIndex) = True AND (objType(poolIndex) = #OBJ_BLOOBER OR objType(poolIndex) = #OBJ_PODOBOO)
+        If objPopTimer(poolIndex) > 0 Then objPopTimer(poolIndex) = objPopTimer(poolIndex) - 1
+      EndIf
+    Next
+  EndIf
+  For multiIndex = 0 To #MAX_MULTI_COINS - 1
+    If multiCoinStarted(multiIndex) = True
+      If multiCoinIntervals(multiIndex) > 0 Then multiCoinIntervals(multiIndex) = multiCoinIntervals(multiIndex) - 1
+    EndIf
+  Next
+End Statement
+
+Statement StartBlockBump{blockCell.w, blockClass.w, blockGid.w}
+  SHARED mapBuffer(), blockBumpActive, blockBumpCell, blockBumpClass, blockBumpGid
+  SHARED blockBumpExhausts, bumpObjectCell
+  bumpObjectCell = blockCell
+  blockBumpExhausts = False
+  blockBumpCell = blockCell
+  blockBumpClass = blockClass
+  blockBumpGid = blockGid
+  blockBumpActive = True
+  SoundSquare1{#SFX_BUMP}
+  ;; Clear the cell to sky and queue it once: by the time the bob draws it,
+  ;; the 2-frame drain has made it sky in both bitmaps, so the bob always
+  ;; covers a cleared cell and never a double image.
+  mapBuffer(blockCell) = 0
+  QueueMetatileRedraw{blockCell}
+End Statement
+
+Statement FinishBlockBump{}
+  SHARED metatileBuffer(), mapBuffer(), blockBumpCell, blockBumpClass, blockBumpGid
+  SHARED blockBumpActive, blockBumpExhausts
+  If blockBumpClass = #MT_QUESTION OR blockBumpExhausts = True
+    metatileBuffer(blockBumpCell) = #MT_BLOCK
+    mapBuffer(blockBumpCell) = #SPENT_BLOCK_GID
+    QueueMetatileRedraw{blockBumpCell}
+    ;; Coins were released on the hit; only a mushroom, flower or star waits for the
+    ;; settle. A brick that is not in the table releases nothing.
+    If BlockHoldsCoin{blockBumpCell} = False Then SpawnBlockItem{blockBumpCell}
+  Else
+    ;; Brick: the class never changes; restore the original art that
+    ;; StartBlockBump{} saved. A big Mario never gets here for a plain brick: he
+    ;; breaks it in CheckPlayerHead{} through BreakBrick{}. A multi-coin brick
+    ;; does, and restores here until its timer has run out.
+    mapBuffer(blockBumpCell) = blockBumpGid
+    QueueMetatileRedraw{blockBumpCell}
+  EndIf
+  blockBumpActive = False
+End Statement
+
+Statement UpdateBlockBump{}
+  SHARED blockBumpActive, blockBounceTimer
+  If blockBumpActive = False Then Statement Return
+  ;; The caller decremented blockBounceTimer just before calling: it reaches
+  ;; 0 exactly once, so the finalize fires exactly once.
+  If blockBounceTimer = 0 Then FinishBlockBump{}
+End Statement
+
+;; The hidden 1-UP block (the cartridge's Hidden1UpBlock, smbdis 4172, and metatile
+;; $60, which every probe treats as empty, ChkInvisibleMTiles 12238). The cell is
+;; sky in the map, drawn as nothing and not solid, so Mario passes through it and
+;; lands on nothing; only a head hit from below finds it. That makes it the used
+;; block and releases the item, exactly as a `?` block does, so CheckPlayerHead{}
+;; turns the cell into MT_QUESTION for the hit and the rest is the `?` path.
+;;
+;; The block is only there if Hidden1UpFlag was set when the level decoder built
+;; it, and building it clears the flag: ActivateHiddenBlocks{} does that when the
+;; screen reaches the cell, and a block already behind the screen is not built, so
+;; a restart at the halfway point leaves the flag for a block still ahead.
+;; #HIDDEN_ONEUP_ONCE = 0 sets the flag again on every restart.
+Function.w HiddenBlockIndex{cellIndex.w}
+  SHARED hiddenBlockCount
+  SHARED hiddenBlockCell()
+  For hiddenIndex = 0 To hiddenBlockCount - 1
+    If hiddenBlockCell(hiddenIndex) = cellIndex Then Function Return hiddenIndex
+  Next
+  Function Return -1
+End Function
+
+;; Once per sim tick, with the Goomba wake.
+;; A hidden COIN block (2-1's two; the cartridge's metatile $5f, a coin from a block nothing shows) is the same cell without the flag: it is
+;; always built, as the level decoder has no flag for it, and pays its coin on the hit through the `?` path (BlockHoldsCoin{}).
+Statement ActivateHiddenBlocks{}
+  SHARED hiddenBlockCount
+  SHARED hiddenBlockCell(), hiddenBlockLive(), hiddenOneUpFlag, cameraX
+  For hiddenIndex = 0 To hiddenBlockCount - 1
+    If hiddenBlockLive(hiddenIndex) = False
+      ; In the view first: the lookup for the coin block is only made for the one the screen has reached.
+      hiddenX.w = (hiddenBlockCell(hiddenIndex) MOD #MAP_W)*#TILE
+      If hiddenX + #TILE > cameraX AND hiddenX <= cameraX + #VIEW_W
+        isCoinBlock.w = BlockHoldsCoin{hiddenBlockCell(hiddenIndex)}
+        If hiddenOneUpFlag = True OR isCoinBlock = True
+          hiddenBlockLive(hiddenIndex) = True
+          If #HIDDEN_ONEUP_ONCE = 1 AND isCoinBlock = False Then hiddenOneUpFlag = False
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+Statement CheckPlayerHead{}
+  SHARED playerX, playerY, playerSpeedY, blockBounceTimer, metatileBuffer(), mapBuffer(), mapWidth
+  SHARED playerIsBig, headProbeY, hiddenBlockLive(), blockBumpExhausts, currentAreaType
+  If playerSpeedY >= 0 Then Statement Return
+  ;; The head gate: nothing happens in the top 16 px of the world (#MT_HEAD_MIN_Y), and no hit until Mario
+  ;; has risen past the first 4 px of the tile (#MT_HEAD_MIN_SUBTILE), so he clips into a ceiling first.
+  If playerY < #MT_HEAD_MIN_Y Then Statement Return
+  If (playerY AND $0f) < #MT_HEAD_MIN_SUBTILE Then Statement Return
+  ;; The one size-dependent probe. Big Mario's head is 14 px higher; his feet
+  ;; and his 12-px width are the same as small, so nothing else moves. That is
+  ;; what makes a grown Mario able to stand where a small one cannot. A crouching big Mario has
+  ;; the small head probe (ChkCollSize, smbdis 11931).
+  If BigStanding{} = True
+    headProbeY.w = #PROBE_TOP_Y_BIG
+    If currentAreaType = #AREA_TYPE_WATER Then headProbeY = #PROBE_TOP_Y_BIG_SWIM
+  Else
+    headProbeY.w = #PROBE_TOP_Y
+  EndIf
+  blockClass.w = MetatileAt{playerX + #PROBE_TOP_X, playerY + headProbeY}
+  ;; In water (PlayerBGCollision, 11950 to 11973) no block is bumped or broken: a solid metatile plays the bump, and either
+  ;; way the rise stops. The NTSC cartridge sets speed 1 (down) here; both builds take the PAL listing's fix, 0 in water
+  ;; (its NYSpd, 11959).
+  If currentAreaType = #AREA_TYPE_WATER
+    If blockClass = #MT_EMPTY Then Statement Return
+    If blockClass <> #MT_BRICK AND blockClass <> #MT_QUESTION Then SoundSquare1{#SFX_BUMP}
+    playerSpeedY = 0
+    Statement Return
+  EndIf
+  headCell.w = (playerY + headProbeY)/#TILE*mapWidth + (playerX + #PROBE_TOP_X)/#TILE
+  bumpGid.w = -1
+  If blockClass = #MT_EMPTY
+    ;; Nothing there, unless it is a hidden block that has been built and not yet
+    ;; hit. It becomes solid for the hit and bobs as the used block.
+    If blockBounceTimer <> 0 Then Statement Return
+    hiddenIndex.w = HiddenBlockIndex{headCell}
+    If hiddenIndex < 0 Then Statement Return
+    If hiddenBlockLive(hiddenIndex) = False Then Statement Return
+    metatileBuffer(headCell) = #MT_QUESTION
+    blockClass = #MT_QUESTION
+    bumpGid = #SPENT_BLOCK_GID
+  EndIf
+  If blockClass = #MT_BRICK OR blockClass = #MT_QUESTION
+    ;; Not a solid metatile, so the ROM takes the block-object path rather
+    ;; than the hard bump, and BumpBlock clears the vertical speed outright
+    ;; (7314). The block keeps its own 16-frame bounce lockout so a held
+    ;; button cannot re-trigger it (BlockBounceTimer, 11962-11963 and 7264);
+    ;; the same counter clocks the bump animation, so one bump at a time.
+    playerSpeedY = 0
+    If blockBounceTimer = 0
+      bumpCell.w = headCell
+      ; Bump or break, a coin sitting on the block is collected (CheckTopOfBlock).
+      CollectCoinAbove{bumpCell}
+      multiIndex.w = -1
+      If blockClass = #MT_BRICK Then multiIndex = MultiCoinIndex{bumpCell}
+      itemBrick.w = False
+      If blockClass = #MT_BRICK Then itemBrick = BrickHoldsItem{bumpCell}
+      If blockClass = #MT_BRICK AND playerIsBig = True AND multiIndex < 0 AND itemBrick = False
+        ;; Big Mario breaks it (BrickShatter, smbdis 7379): no bob, the cell
+        ;; empties at once, and his vertical speed becomes -2 rather than 0 so he
+        ;; keeps rising through the gap, and the lockout is armed. A break never
+        ;; refuses: see the two chunk sets in sparkydave.debris.blitz.ab3.
+        BreakBrick{bumpCell}
+        playerSpeedY = #BRICK_BREAK_SPEED_Y
+        blockBounceTimer = #MARIO_BLOCKBOUNCE
+      Else
+        If bumpGid < 0 Then bumpGid = mapBuffer(bumpCell)
+        StartBlockBump{bumpCell, blockClass, bumpGid}
+        blockBounceTimer = #MARIO_BLOCKBOUNCE
+        If multiIndex >= 0 Then HitMultiCoinBrick{multiIndex, bumpCell}
+        ; A brick with an item bumps for either size, and is the used block after.
+        If itemBrick = True Then blockBumpExhausts = True
+        ; A `?` block's coin pays on the hit; its mushroom waits for the settle.
+        If blockClass = #MT_QUESTION
+          If BlockHoldsCoin{bumpCell} = True Then SpawnBlockItem{bumpCell}
+        EndIf
+      EndIf
+    EndIf
+  Else
+    ;; Hard terrain, the solid-metatile path: downward speed 1, subpixel
+    ;; untouched (NYSpd, 11972-11973). No position change, like the ROM.
+    playerSpeedY = 1
+  EndIf
+End Statement
+
+;; The player's box, for object collision: moving items, Goombas and Koopas read it. Small Mario is 10x12 at
+;; (+3, +4) in the 16-px sprite; big is 12x24 at (+2, +8) of the 32-px one, and crouching is 12x12 at (+2, +20).
+;; The two size states differ only in the numbers fed in, so this is the size branch rather than a second box.
+;;
+;; Crouching has big's width and the small box's height.
+Statement UpdatePlayerBoundBox{}
+  SHARED playerX, playerY, playerIsBig
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  If playerIsBig = True
+    boundBoxLeft = playerX + #BOUND_LEFT_BIG
+    boundBoxTop = playerY + #BOUND_TOP_BIG
+    boundBoxRight = playerX + #BOUND_RIGHT_BIG
+    boundBoxBottom = playerY + #BOUND_BOTTOM_BIG
+    ; Crouching: big's 12 px width and small's height (12 x 12 at (+2, +20) of the 32 px sprite).
+    If BigStanding{} = False Then boundBoxTop = playerY + #BOUND_TOP
+  Else
+    boundBoxLeft = playerX + #BOUND_LEFT
+    boundBoxTop = playerY + #BOUND_TOP
+    boundBoxRight = playerX + #BOUND_RIGHT
+    boundBoxBottom = playerY + #BOUND_BOTTOM
+  EndIf
+End Statement
+
+;; END OF COLLISION (BLITZ MODE)

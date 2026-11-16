@@ -1,0 +1,415 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "PaletteSelectProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: a choice of NES palette (the palettes plan, step 2). The game's colours are four RGB tables (atlasPalette(), areaPalette(),
+;; marioColour(), cycleColour(); the main project's PALETTE note), 52 slots in all, and every slot has the colour number of its role in the
+;; cartridge's palettes (tools/build_palettes.py). A palette fills the slots by looking each number up in its 64 colours; choice 0,
+;; "as drawn", is the art's own tables. The 16 pens are then composed from the slots as the game's palette model does (pens 0 to 2 the
+;; area look's, 12 the `?` glint's step, 13 to 15 Mario's set, the rest the atlas's).
+;;
+;; The scene: the end of 1-1 as the camera stops there (the flagpole, the castle, a bush, a hill, clouds) with a row of bricks and
+;; `?` blocks, a coin and a pipe added, stamped from the tile atlas (map rows 2 to 14), small and big Mario, a Goomba and a Koopa.
+;;
+;; Keys: Left and Right step through the choices (as drawn, then the 31 palettes); Up and Down the area look (ground, underground,
+;; water, castle: pens 0 to 2); F1 Mario's colours (normal, Fire, the Starman's cycle); ESC quits and writes the results. The `?`
+;; glint runs all the time. The choice's number and name, the look and Mario's colours are written in the sky.
+;;
+;; Questions: does every palette look right, the `?` glint, Fire Mario and the Starman with it; and the underground, the water and the
+;; castle; and what a switch costs (it should fit a frame: the slots filled and the 16 pens written, DisplayPalette included).
+;;
+;; The results file (proofs/palette-select-results.txt), to check with python tools/build_palettes.py --check: the switches' cost in
+;; raster lines, and every choice's 16 pens (the ground look, normal Mario, the glint's first step) as red, green and blue.
+
+OPTIMIZE 1
+
+WBStartup
+
+;; The proof's own display: one playfield of 16 pens, 208 lines (the map's rows 2 to 14), from the standard window's top line; the
+;; same height fits an NTSC frame.
+#PS_COP_FLAGS  = $10004
+#PS_COP_COLORS = 16
+#PS_COP_YPOS   = 44
+#PS_VIEW_H     = 208
+
+#PS_SCREEN_BM  = 0
+#PS_FIRST_ROW  = 2
+#PS_SCENE_ROWS = 15
+#PS_LOOKS      = 4
+#PS_MARIO_MODES = 3
+#PS_SMALL_SHAPE = 100
+#PS_BIG_SHAPE   = 101
+#PS_GOOMBA_SHAPE = 102
+#PS_KOOPA_SHAPE = 103
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.palettes.data.ab3"
+
+;; The slots as the choice fills them (red, green, blue each).
+Dim slotRGB.w(#NES_SLOT_COUNT*3 - 1)
+Dim sceneTiles$(#PS_SCENE_ROWS - 1)
+Dim lookName$(#PS_LOOKS - 1)
+Dim marioModeName$(#PS_MARIO_MODES - 1)
+
+;; The scene's tiles, a row a string, three digits a cell (the atlas's GIDs, 0 empty): 1-1's columns from 195 (the camera's stop at
+;; 3120), the back strip's hills and clouds in, the bricks and `?` blocks, the coin and the pipe added (by tools, 2026-10-25).
+sceneTiles$(0) = "000000000000000000000000000000000000000000000000000000000000"
+sceneTiles$(1) = "000000000000000000000000000000000000000000000000000000000000"
+sceneTiles$(2) = "000000000075000000000000000000000000000000000000117118119000"
+sceneTiles$(3) = "000000000104000117118119000000000000000000000000146147148000"
+sceneTiles$(4) = "000000000104000146147148000000000000000000000000000000000000"
+sceneTiles$(5) = "000000000104000000000000000000000000000000000053000000000000"
+sceneTiles$(6) = "000000000104000000000000000000000000000000000000000000000000"
+sceneTiles$(7) = "000000000104000000000000000000000000000002024002024002000000"
+sceneTiles$(8) = "000000000104000000000000012012012000000000000000000000000000"
+sceneTiles$(9) = "000000000104000000000000013014015000000000000000000000000000"
+sceneTiles$(10) = "000000000104000000000012041041041012000000000000000000000000"
+sceneTiles$(11) = "069000000104000000000014014042014014000000068000000000059060"
+sceneTiles$(12) = "098069000030000000000014014051014014101067096069000000088089"
+sceneTiles$(13) = "001001001001001001001001001001001001001001001001001001001001"
+sceneTiles$(14) = "001001001001001001001001001001001001001001001001001001001001"
+lookName$(0) = "GROUND"
+lookName$(1) = "UNDERGROUND"
+lookName$(2) = "WATER"
+lookName$(3) = "CASTLE"
+marioModeName$(0) = "MARIO"
+marioModeName$(1) = "FIRE MARIO"
+marioModeName$(2) = "STARMAN"
+
+choiceNow.w = 0
+lookNow.w = 0
+marioMode.w = 0
+tickCount.l = 0
+quitFlag.w = False
+lastLeft.w = False
+lastRight.w = False
+lastUp.w = False
+lastDown.w = False
+lastF1.w = False
+switchCount.l = 0
+switchLineSum.l = 0
+switchLineWorst.l = 0
+videoIsNtsc.w = NTSC
+frameLines.l = #PERF_LINES_PAL
+If videoIsNtsc = True Then frameLines = #PERF_LINES_NTSC
+
+BitMap #PS_SCREEN_BM, #VIEW_W, #PS_VIEW_H, #PLAYFIELD_PLANES
+BitMap #ATLAS_BM, #ATLAS_W, #ATLAS_H, #PLAYFIELD_PLANES
+BitMap #MARIO_BM, #MARIO_SHEET_W, #TILE, #PLAYFIELD_PLANES
+BitMap #MARIO_BIG_BM, #MARIO_BIG_W, #MARIO_BIG_H, #PLAYFIELD_PLANES
+BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+BitMap #HUD_BM, #HUD_SHEET_W, 8, #PLAYFIELD_PLANES
+LoadBitMap #ATLAS_BM, "sparky-dave:game/assets/tiles-all.iff"
+LoadBitMap #MARIO_BM, "sparky-dave:game/assets/mario-small.iff"
+LoadBitMap #MARIO_BIG_BM, "sparky-dave:game/assets/mario-big.iff"
+LoadBitMap #ENEMIES_BM, "sparky-dave:game/assets/enemies.iff"
+LoadBitMap #HUD_BM, "sparky-dave:game/assets/hud-objects.iff"
+InitShape #TILE_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+For hudGlyph.w = 0 To #HUD_GLYPHS - 1
+  InitShape #HUD_SHAPE_BASE + hudGlyph, 8, 8, #PLAYFIELD_PLANES
+Next
+InitShape #PS_SMALL_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PS_BIG_SHAPE, #TILE, #MARIO_BIG_H, #PLAYFIELD_PLANES
+InitShape #PS_GOOMBA_SHAPE, #GOOMBA_W, #GOOMBA_H, #PLAYFIELD_PLANES
+InitShape #PS_KOOPA_SHAPE, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+InitPalette 0, #PS_COP_COLORS
+
+BLITZ
+InitCopList 0, #PS_COP_YPOS, #PS_VIEW_H, #PS_COP_FLAGS, 0, #PS_COP_COLORS, 0
+CreateDisplay 0
+BlitzKeys On
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+
+;; ---------------------------------------------------------------
+;; The palette
+;; ---------------------------------------------------------------
+
+;; Fill the slots for a choice: 0 the art's own tables, n the nth palette's colour for each slot's number.
+Statement ApplyChoice{choice.w}
+  SHARED slotRGB(), nesDrawnRGB(), nesSlotUse(), nesPaletteRGB()
+  For slot.w = 0 To #NES_SLOT_COUNT - 1
+    If choice = 0
+      sourceIndex.w = slot*3
+      slotRGB(slot*3) = nesDrawnRGB(sourceIndex)
+      slotRGB(slot*3 + 1) = nesDrawnRGB(sourceIndex + 1)
+      slotRGB(slot*3 + 2) = nesDrawnRGB(sourceIndex + 2)
+    Else
+      sourceIndex = ((choice - 1)*#NES_USED_COLOURS + nesSlotUse(slot))*3
+      slotRGB(slot*3) = nesPaletteRGB(sourceIndex)
+      slotRGB(slot*3 + 1) = nesPaletteRGB(sourceIndex + 1)
+      slotRGB(slot*3 + 2) = nesPaletteRGB(sourceIndex + 2)
+    EndIf
+  Next
+End Statement
+
+;; The slot a pen takes, as PaletteComponent{} composes it: pens 0 to 2 the look's, 12 the glint's step, 13 Mario's skin, 14 his
+;; brown, 15 his red (marioColour()'s red, skin, brown order), the rest the atlas's.
+Function.w PenSlot{pen.w, look.w, marioSet.w, cycleStep.w}
+  If pen <= 2 Then Function Return #NES_SLOTS_AREA + look*3 + pen
+  If pen = #PEN_CYCLE Then Function Return #NES_SLOTS_CYCLE + cycleStep
+  If pen = #PEN_MARIO_SKIN Then Function Return #NES_SLOTS_MARIO + marioSet*3 + 1
+  If pen = #PEN_MARIO_BROWN Then Function Return #NES_SLOTS_MARIO + marioSet*3 + 2
+  If pen = #PEN_MARIO_RED Then Function Return #NES_SLOTS_MARIO + marioSet*3
+  Function Return #NES_SLOTS_ATLAS + pen
+End Function
+
+;; Mario's set now: 0 normal, 1 Fire, the Starman's four (2 to 5) a set every 2 ticks.
+Function.w MarioSetNow{}
+  SHARED marioMode, tickCount
+  If marioMode = 0 Then Function Return 0
+  If marioMode = 1 Then Function Return 1
+  Function Return (tickCount/2) MOD 4 + 2
+End Function
+
+Statement WritePens{}
+  SHARED slotRGB(), lookNow, tickCount
+  cycleStep.w = (tickCount/#CYCLE_TICKS) MOD #CYCLE_STEPS
+  marioSet.w = MarioSetNow{}
+  For pen.w = 0 To 15
+    slot.w = PenSlot{pen, lookNow, marioSet, cycleStep}
+    AGAPalRGB 0, pen, slotRGB(slot*3), slotRGB(slot*3 + 1), slotRGB(slot*3 + 2)
+  Next
+  DisplayPalette 0, 0
+End Statement
+
+;; ---------------------------------------------------------------
+;; The screen
+;; ---------------------------------------------------------------
+
+; The HUD font: digits, capitals, the dash and the exclamation mark; anything else (a space) is left as it is.
+Function.w HudGlyphFor{code.w}
+  If code >= 48
+    If code <= 57 Then Function Return code - 48
+  EndIf
+  If code >= 65
+    If code <= 90 Then Function Return code - 55
+  EndIf
+  If code = 45 Then Function Return #HUD_G_DASH
+  If code = 33 Then Function Return #HUD_G_EXCLAIM
+  Function Return -1
+End Function
+
+; Text centred across the view, each glyph's cell cleared to pen 0 first.
+Statement DrawTextCentred{glyphText$, textY.w}
+  textX.w = (#VIEW_W - Len(glyphText$)*8)/2
+  Use BitMap #PS_SCREEN_BM
+  For charIndex.w = 1 To Len(glyphText$)
+    glyphIndex.w = HudGlyphFor{Asc(Mid$(glyphText$, charIndex, 1))}
+    If glyphIndex >= 0
+      glyphX.w = textX + (charIndex - 1)*8
+      Boxf glyphX, textY, glyphX + 7, textY + 7, 0
+      Blit #HUD_SHAPE_BASE + glyphIndex, glyphX, textY
+    EndIf
+  Next
+End Statement
+
+Statement CutShapes{}
+  Use BitMap #HUD_BM
+  For hudGlyph.w = 0 To #HUD_GLYPHS - 1
+    GetaShape #HUD_SHAPE_BASE + hudGlyph, hudGlyph*8, 0, 8, 8
+  Next
+  Use BitMap #MARIO_BM
+  GetaShape #PS_SMALL_SHAPE, #MARIO_F_IDLE*#TILE, 0, #TILE, #TILE
+  Use BitMap #MARIO_BIG_BM
+  GetaShape #PS_BIG_SHAPE, #MARIO_F_IDLE*#TILE, 0, #TILE, #MARIO_BIG_H
+  Use BitMap #ENEMIES_BM
+  GetaShape #PS_GOOMBA_SHAPE, 0, 16, #GOOMBA_W, #GOOMBA_H
+  GetaShape #PS_KOOPA_SHAPE, #KOOPA_SHEET_CELL*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+End Statement
+
+;; The scene: the tiles of map rows 2 to 14 from the atlas (each cell's GID from its row's string), then the four characters on the
+;; ground, then the status in the sky.
+Statement DrawScene{}
+  SHARED sceneTiles$(), choiceNow, lookNow, marioMode, nesPaletteName$(), lookName$(), marioModeName$()
+  Use BitMap #PS_SCREEN_BM
+  Cls 0
+  For sceneRowIndex.w = #PS_FIRST_ROW To #PS_SCENE_ROWS - 1
+    For sceneColumn.w = 0 To #VIEW_W/#TILE - 1
+      gidNow.w = Val(Mid$(sceneTiles$(sceneRowIndex), sceneColumn*3 + 1, 3))
+      If gidNow > 0
+        tileNow.w = gidNow - 1
+        Use BitMap #ATLAS_BM
+        GetaShape #TILE_SHAPE, (tileNow MOD #ATLAS_COLS)*#TILE, (tileNow/#ATLAS_COLS)*#TILE, #TILE, #TILE
+        Use BitMap #PS_SCREEN_BM
+        Block #TILE_SHAPE, sceneColumn*#TILE, (sceneRowIndex - #PS_FIRST_ROW)*#TILE
+      EndIf
+    Next
+  Next
+  Blit #PS_BIG_SHAPE, 72, 144
+  Blit #PS_SMALL_SHAPE, 200, 160
+  Blit #PS_GOOMBA_SHAPE, 232, 160
+  Blit #PS_KOOPA_SHAPE, 264, 152
+  choiceText$ = "AS DRAWN"
+  If choiceNow > 0 Then choiceText$ = nesPaletteName$(choiceNow - 1)
+  numberText$ = Chr$(48 + choiceNow/10) + Chr$(48 + choiceNow MOD 10)
+  DrawTextCentred{numberText$ + " " + choiceText$, 2}
+  DrawTextCentred{lookName$(lookNow) + " - " + marioModeName$(marioMode), 14}
+End Statement
+
+;; A new choice: the slots filled and the pens written, the cost measured from the beam (the redraw of the scene is not counted).
+Statement SwitchTo{choice.w}
+  SHARED choiceNow, switchCount, switchLineSum, switchLineWorst, frameLines
+  choiceNow = choice
+  lineBefore.l = RasterLine{}
+  ApplyChoice{choiceNow}
+  WritePens{}
+  lineAfter.l = RasterLine{}
+  switchLines.l = SegmentLines{lineBefore, lineAfter, frameLines}
+  switchCount = switchCount + 1
+  switchLineSum = switchLineSum + switchLines
+  If switchLines > switchLineWorst Then switchLineWorst = switchLines
+  DrawScene{}
+End Statement
+
+;; ---------------------------------------------------------------
+;; Run
+;; ---------------------------------------------------------------
+
+CutShapes{}
+ApplyChoice{0}
+WritePens{}
+DrawScene{}
+DisplayBitMap 0, #PS_SCREEN_BM
+While quitFlag = False
+  VWait
+  tickCount = tickCount + 1
+  keyNow.w = RawStatus(#RAW_KEY_RIGHT)
+  If keyNow <> False AND lastRight = False
+    nextChoice.w = choiceNow + 1
+    If nextChoice > #NES_PALETTE_COUNT Then nextChoice = 0
+    SwitchTo{nextChoice}
+  EndIf
+  lastRight = keyNow
+  keyNow = RawStatus(#RAW_KEY_LEFT)
+  If keyNow <> False AND lastLeft = False
+    nextChoice = choiceNow - 1
+    If nextChoice < 0 Then nextChoice = #NES_PALETTE_COUNT
+    SwitchTo{nextChoice}
+  EndIf
+  lastLeft = keyNow
+  keyNow = RawStatus(#RAW_KEY_DOWN)
+  If keyNow <> False AND lastDown = False
+    lookNow = lookNow + 1
+    If lookNow >= #PS_LOOKS Then lookNow = 0
+    DrawScene{}
+  EndIf
+  lastDown = keyNow
+  keyNow = RawStatus(#RAW_KEY_UP)
+  If keyNow <> False AND lastUp = False
+    lookNow = lookNow - 1
+    If lookNow < 0 Then lookNow = #PS_LOOKS - 1
+    DrawScene{}
+  EndIf
+  lastUp = keyNow
+  keyNow = RawStatus(#RAW_KEY_F1)
+  If keyNow <> False AND lastF1 = False
+    marioMode = marioMode + 1
+    If marioMode >= #PS_MARIO_MODES Then marioMode = 0
+    DrawScene{}
+  EndIf
+  lastF1 = keyNow
+  ; The glint and the Starman move every frame.
+  WritePens{}
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/palette-select-results.txt")
+  FileOutput 0
+  NPrint "Palette select proof results"
+  NPrint "Physics variant: ", #SIM_HZ, " ticks a second"
+  averageLines.l = 0
+  If switchCount > 0 Then averageLines = switchLineSum/switchCount
+  NPrint "switches ", switchCount, ", average lines ", averageLines, ", worst lines ", switchLineWorst
+  For choiceReport.w = 0 To #NES_PALETTE_COUNT
+    ApplyChoice{choiceReport}
+    Print "  choice ", choiceReport, ":"
+    For penReport.w = 0 To 15
+      slotReport.w = PenSlot{penReport, 0, 0, 0}
+      Print " ", slotRGB(slotReport*3), " ", slotRGB(slotReport*3 + 1), " ", slotRGB(slotReport*3 + 2)
+    Next
+    NPrint ""
+  Next
+  CloseFile 0
+EndIf
+End

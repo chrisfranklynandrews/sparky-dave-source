@@ -1,0 +1,450 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 20
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 20
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; sprite-width.ab3 -- does a narrower display give fetch mode 3 more sprite channels?
+;; Compile in UAE (S/run-proof sprite-width). Not part of the game. The all-stars branch
+;; (the all-stars plan). proofs/sprite-channels.ab3 found that the number of hardware sprite
+;; channels depends on the fetch mode alone: fetch mode 3 (the fast one for the blitter) leaves 1
+;; of 8, fetch mode 1 and 2 leave 5, fetch mode 0 leaves 7, whatever the planes or the scroll.
+;; The cause is the early fetch of the bitplanes, which takes the sprite channels' DMA slots. The
+;; Blitz guide (InitCopList) says 8 planes with 8 sprites needs a display of about 256 pixels, and
+;; displaylib.ab3's mode table starts the fetch at $38 (DDFSTRT) in every lores fetch mode. If the
+;; fetch starts later, more channels might get their slots. 256 pixels is also the width of the
+;; NES and SNES screens, so a 256 wide All-Stars build would be authentic, and the sprite route
+;; would stay open at fetch mode 3.
+;;
+;; DisplayAdjust CopList#, fetchwid, ddfstrt, ddfstop, diwstrt, diwstop adds to the mode table's
+;; values (displaylib.ab3, _doadjust): fetchwid in bytes a line (40 for 320 pixels), ddfstrt and
+;; ddfstop in colour clocks (2 lores pixels each), diwstrt and diwstop in lores pixels. The
+;; game's own call is 0, 0, 0, -1, -1. A narrower window needs all five to agree: the fetch
+;; starts later (ddfstrt up), ends earlier (ddfstop down), the window starts later (diwstrt up by
+;; 2 pixels a clock) and ends earlier, and fewer bytes are fetched (fetchwid down by 1 for 4
+;; clocks or 8 pixels). Both lists (HUD and world) get the same.
+;;
+;; The test figures are proofs/sprite-channels.ab3's: eight 16 pixel wide sprites, channel k drawn
+;; as k + 1 bars, across the world list; a channel that gets its slots shows its figure, the rest
+;; show nothing. The world is a dark ground with edge markers (bitmap column 0 red, 255 green, 287
+;; blue, 319 tan) and a ruler line every 32 pixels, so what is on screen can be told.
+;;
+;; Configs (planes, fetch mode, window, scroll; the window is lores pixels wide):
+;;   0  6 planes  fetch 3  320 as the game        moving   control: expect 1 channel
+;;   1  6 planes  fetch 3  288 centred            moving
+;;   2  6 planes  fetch 3  256 centred            moving
+;;   3  6 planes  fetch 3  256 at the right       moving   only the fetch start moves later
+;;   4  6 planes  fetch 3  288 at the right       moving
+;;   5  8 planes  fetch 3  256 centred            moving   the guide's own case
+;;   6  6 planes  fetch 1  256 centred            moving   does narrowing add to fetch mode 1's 5?
+;;   7  6 planes  fetch 1  288 centred            moving
+;;   8  6 planes  fetch 3  256 centred            still
+;; "At the right" narrows from the left only: the fetch starts 32 clocks later (64 pixels), nothing
+;; else changes at the right, so the picture keeps its right edge.
+;; The HUD shows the config without text: white boxes for the planes, orange boxes for the fetch
+;; mode, cyan boxes one for each 32 pixels of window, a green box if the scroll moves, a white box
+;; at the far end if the window is centred, and yellow ticks for the figures you recorded.
+;;
+;; Keys: Space next config, Backspace the one before, 0 to 8 record how many figures you can see
+;; for this config, Esc quits and writes sprite-width-results.txt. Go through all nine. Also say,
+;; for each: the width of the picture (is it narrower, where are the edges, which edge markers can
+;; you see), whether the picture is right (no shifted columns, garbage, stray lines, tearing, or a
+;; broken HUD), and the figures, as before.
+;;
+;; What the results answer
+;; 1. Does any window width give fetch mode 3 more channels, and how many at 256 and 288?
+;; 2. Does it matter whether the window is centred or narrowed from the left only?
+;; 3. At 8 planes (the guide's case), do all 8 channels come back at 256?
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE     = $40
+#RAW_KEY_BACKSPACE = $41
+#RAW_KEY_ESC       = $45
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#HUD_W      = 384
+#WORLD_W    = 384
+#WORLD_H    = 256
+
+#SPRITE_FLAG = $400
+#BANK_XOR    = $33
+
+#CONFIGS  = 9
+#DEPTHS   = 2
+#CHANNELS = 8
+#SPRITE_W = 16
+#SPRITE_H = 24
+#SPRITE_Y = 100
+#SCROLL_MAX = 60
+
+;; Bitmaps per depth d (0 for 6 planes, 1 for 8): d*2 the world, d*2 + 1 the HUD band. Bitmap 4 is
+;; the 2 plane sprite source.
+#BM_SPRITE = 4
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+config.w = 0
+scrollX.q = 0
+scrollDir.q = 0.25
+keyWasDown.w = False
+chipBefore.l = 0
+chipAfter.l = 0
+
+Dim depthPlanes.w(#DEPTHS - 1)
+depthPlanes(0) = 6
+depthPlanes(1) = 8
+
+Dim configFlags.l(#CONFIGS - 1)
+Dim configDepth.w(#CONFIGS - 1)
+Dim configFetch.w(#CONFIGS - 1)
+Dim configWidth.w(#CONFIGS - 1)
+Dim configCentred.w(#CONFIGS - 1)
+Dim configMoves.w(#CONFIGS - 1)
+Dim configSeen.w(#CONFIGS - 1)
+
+;; The five DisplayAdjust numbers a config adds: ddfstrt, ddfstop (colour clocks), diwstrt, diwstop
+;; (pixels, on top of the game's -1 and -1) and fetchwid (bytes).
+Dim adjustDdfStart.w(#CONFIGS - 1)
+Dim adjustDdfStop.w(#CONFIGS - 1)
+Dim adjustDiwStart.w(#CONFIGS - 1)
+Dim adjustDiwStop.w(#CONFIGS - 1)
+Dim adjustFetchWid.w(#CONFIGS - 1)
+
+;; flags, depth, fetch mode, window width, centred, scroll moves
+configFlags(0) = $13016 : configDepth(0) = 0 : configFetch(0) = 3 : configWidth(0) = 320 : configCentred(0) = 0 : configMoves(0) = 1
+configFlags(1) = $13016 : configDepth(1) = 0 : configFetch(1) = 3 : configWidth(1) = 288 : configCentred(1) = 1 : configMoves(1) = 1
+configFlags(2) = $13016 : configDepth(2) = 0 : configFetch(2) = 3 : configWidth(2) = 256 : configCentred(2) = 1 : configMoves(2) = 1
+configFlags(3) = $13016 : configDepth(3) = 0 : configFetch(3) = 3 : configWidth(3) = 256 : configCentred(3) = 0 : configMoves(3) = 1
+configFlags(4) = $13016 : configDepth(4) = 0 : configFetch(4) = 3 : configWidth(4) = 288 : configCentred(4) = 0 : configMoves(4) = 1
+configFlags(5) = $13018 : configDepth(5) = 1 : configFetch(5) = 3 : configWidth(5) = 256 : configCentred(5) = 1 : configMoves(5) = 1
+configFlags(6) = $11016 : configDepth(6) = 0 : configFetch(6) = 1 : configWidth(6) = 256 : configCentred(6) = 1 : configMoves(6) = 1
+configFlags(7) = $11016 : configDepth(7) = 0 : configFetch(7) = 1 : configWidth(7) = 288 : configCentred(7) = 1 : configMoves(7) = 1
+configFlags(8) = $13016 : configDepth(8) = 0 : configFetch(8) = 3 : configWidth(8) = 256 : configCentred(8) = 1 : configMoves(8) = 0
+
+;; ddfstrt, ddfstop, diwstrt, diwstop, fetchwid. The game: 0, 0, -1, -1, 0.
+;; 288 centred: 8 clocks (16 pixels) off each side: 4 bytes less.
+;; 256 centred: 16 clocks (32 pixels) off each side: 8 bytes less.
+;; at the right: the whole narrowing from the left: 288 is 16 clocks later, 256 is 32 clocks later.
+adjustDdfStart(0) = 0 : adjustDdfStop(0) = 0 : adjustDiwStart(0) = -1 : adjustDiwStop(0) = -1 : adjustFetchWid(0) = 0
+adjustDdfStart(1) = 8 : adjustDdfStop(1) = -8 : adjustDiwStart(1) = 15 : adjustDiwStop(1) = -17 : adjustFetchWid(1) = -4
+adjustDdfStart(2) = 16 : adjustDdfStop(2) = -16 : adjustDiwStart(2) = 31 : adjustDiwStop(2) = -33 : adjustFetchWid(2) = -8
+adjustDdfStart(3) = 32 : adjustDdfStop(3) = 0 : adjustDiwStart(3) = 63 : adjustDiwStop(3) = -1 : adjustFetchWid(3) = -8
+adjustDdfStart(4) = 16 : adjustDdfStop(4) = 0 : adjustDiwStart(4) = 31 : adjustDiwStop(4) = -1 : adjustFetchWid(4) = -4
+adjustDdfStart(5) = 16 : adjustDdfStop(5) = -16 : adjustDiwStart(5) = 31 : adjustDiwStop(5) = -33 : adjustFetchWid(5) = -8
+adjustDdfStart(6) = 16 : adjustDdfStop(6) = -16 : adjustDiwStart(6) = 31 : adjustDiwStop(6) = -33 : adjustFetchWid(6) = -8
+adjustDdfStart(7) = 8 : adjustDdfStop(7) = -8 : adjustDiwStart(7) = 15 : adjustDiwStop(7) = -17 : adjustFetchWid(7) = -4
+adjustDdfStart(8) = 16 : adjustDdfStop(8) = -16 : adjustDiwStart(8) = 31 : adjustDiwStop(8) = -33 : adjustFetchWid(8) = -8
+
+For configIndex.w = 0 To #CONFIGS - 1
+  configSeen(configIndex) = -1
+Next
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+chipBefore = AvailMem_(2)
+
+For depthIndex.w = 0 To #DEPTHS - 1
+  BitMap depthIndex*2, #WORLD_W, #WORLD_H, depthPlanes(depthIndex)
+  BitMap depthIndex*2 + 1, #HUD_W, #HUD_H, depthPlanes(depthIndex)
+Next
+BitMap #BM_SPRITE, 64, #SPRITE_H, 2
+
+chipAfter = AvailMem_(2)
+
+;; One palette of 256: the game's 16 pens, a ramp above, the eight sprite colour sets at 33 to 35,
+;; 37 to 39, 41 to 43 and 45 to 47 (sprite bank 2).
+InitPalette 0, 256
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 0, 0, 0
+For pen.w = 16 To 255
+  AGAPalRGB 0, pen, (pen*5) MOD 256, (pen*3 + 85) MOD 256, 255 - (pen MOD 256)
+Next
+AGAPalRGB 0, 33, 255, 0, 0
+AGAPalRGB 0, 34, 255, 255, 0
+AGAPalRGB 0, 35, 255, 255, 255
+AGAPalRGB 0, 37, 0, 200, 0
+AGAPalRGB 0, 38, 0, 255, 255
+AGAPalRGB 0, 39, 255, 255, 255
+AGAPalRGB 0, 41, 255, 0, 255
+AGAPalRGB 0, 42, 255, 140, 0
+AGAPalRGB 0, 43, 255, 255, 255
+AGAPalRGB 0, 45, 60, 60, 255
+AGAPalRGB 0, 46, 255, 120, 200
+AGAPalRGB 0, 47, 255, 255, 255
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+;; Config c uses CopList 2c for the HUD and 2c + 1 for the world. Both get the config's
+;; DisplayAdjust; the HUD list loads the palette, the world list holds the sprites.
+Statement BuildLists{}
+  SHARED configFlags(), configDepth()
+  SHARED adjustDdfStart(), adjustDdfStop(), adjustDiwStart(), adjustDiwStop(), adjustFetchWid()
+  For configIndex.w = 0 To #CONFIGS - 1
+    hudList.w = configIndex*2
+    worldList.w = hudList + 1
+    flags.l = configFlags(configIndex) + #SPRITE_FLAG
+    colourCount.w = 64
+    If configDepth(configIndex) = 1 Then colourCount = 256
+    InitCopList hudList, #HUD_YPOS, #HUD_H, flags, 0, colourCount, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, flags, #CHANNELS, 0, 0
+    DisplayControls hudList, 0, 0, #BANK_XOR
+    DisplayControls worldList, 0, 0, #BANK_XOR
+    DisplayAdjust hudList, adjustFetchWid(configIndex), adjustDdfStart(configIndex), adjustDdfStop(configIndex), adjustDiwStart(configIndex), adjustDiwStop(configIndex)
+    DisplayAdjust worldList, adjustFetchWid(configIndex), adjustDdfStart(configIndex), adjustDdfStop(configIndex), adjustDiwStart(configIndex), adjustDiwStop(configIndex)
+  Next
+End Statement
+
+Statement ShowConfig{configIndex.w}
+  SHARED configDepth()
+  hudList.w = configIndex*2
+  depthIndex.w = configDepth(configIndex)
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, depthIndex*2 + 1, 0, 0
+  DisplayBitMap hudList + 1, depthIndex*2, 0, #VIEW_TOP
+End Statement
+
+;; The config as boxes (see the header), then a yellow tick for each figure recorded.
+Statement DrawHud{configIndex.w}
+  SHARED configDepth(), configFetch(), configWidth(), configCentred(), configMoves(), configSeen(), depthPlanes()
+  depthIndex.w = configDepth(configIndex)
+  Use BitMap depthIndex*2 + 1
+  Cls 0
+  For planeIndex.w = 0 To depthPlanes(depthIndex) - 1
+    Boxf 4 + planeIndex*9, 4, 9 + planeIndex*9, 11, 8
+  Next
+  For fetchIndex.w = 1 To configFetch(configIndex)
+    Boxf 86 + fetchIndex*10, 4, 93 + fetchIndex*10, 11, 4
+  Next
+  For widthIndex.w = 1 To configWidth(configIndex)/32
+    Boxf 120 + widthIndex*10, 4, 127 + widthIndex*10, 11, 9
+  Next
+  If configMoves(configIndex) = 1 Then Boxf 220, 4, 227, 11, 12
+  If configCentred(configIndex) = 1 Then Boxf 232, 4, 239, 11, 8
+  If configSeen(configIndex) > 0
+    For tickIndex.w = 1 To configSeen(configIndex)
+      Boxf 244 + tickIndex*10, 2, 250 + tickIndex*10, 13, 3
+    Next
+  EndIf
+End Statement
+
+;; Ground; a pen 3 line every 32 pixels; edge markers: column 0 red (pen 11), 255 green (12), 287
+;; blue (13), 319 tan (14), each 2 pixels wide and the full height of the world.
+Statement DrawWorld{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    pen.w = 6
+    If columnIndex MOD 2 = 1 Then pen = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, pen
+  Next
+  For rulerX.w = 32 To #WORLD_W - 32 Step 32
+    Boxf rulerX, #VIEW_TOP, rulerX, 207, 3
+  Next
+  Boxf 0, #VIEW_TOP, 1, 239, 11
+  Boxf 254, #VIEW_TOP, 255, 239, 12
+  Boxf 286, #VIEW_TOP, 287, 239, 13
+  Boxf 318, #VIEW_TOP, 319, 239, 14
+End Statement
+
+;; Sprite k: k + 1 bars of 2 lines, 1 line apart, in pens 1 to 3 (the pair's three colours).
+Statement MakeSprites{}
+  For channelIndex.w = 0 To #CHANNELS - 1
+    Use BitMap #BM_SPRITE
+    Cls 0
+    For barIndex.w = 0 To channelIndex
+      Boxf 0, barIndex*3, #SPRITE_W - 1, barIndex*3 + 1, 1 + (barIndex MOD 3)
+    Next
+    GetaShape channelIndex, 0, 0, #SPRITE_W, #SPRITE_H
+    GetaSprite channelIndex, channelIndex
+  Next
+End Statement
+
+For depthIndex.w = 0 To #DEPTHS - 1
+  DrawWorld{depthIndex*2}
+Next
+MakeSprites{}
+BuildLists{}
+DrawHud{0}
+ShowConfig{0}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If configMoves(config) = 1
+    scrollX = scrollX + scrollDir
+    If scrollX >= #SCROLL_MAX Then scrollDir = -0.25
+    If scrollX <= 0
+      scrollX = 0
+      scrollDir = 0.25
+    EndIf
+  Else
+    scrollX = 0
+  EndIf
+
+  VWait
+  DisplayBitMap config*2 + 1, configDepth(config)*2, scrollX, #VIEW_TOP
+  For channelIndex.w = 0 To #CHANNELS - 1
+    DisplaySprite config*2 + 1, channelIndex, 12 + channelIndex*28, #SPRITE_Y, channelIndex
+  Next
+
+  ;; One key at a time: Space, Backspace and the digits act when pressed, not while held.
+  pressedKey.w = -1
+  If RawStatus(#RAW_KEY_SPACE) Then pressedKey = 20
+  If RawStatus(#RAW_KEY_BACKSPACE) Then pressedKey = 21
+  For digitIndex.w = 0 To 8
+    rawCode.w = digitIndex
+    If digitIndex = 0 Then rawCode = $0a
+    If RawStatus(rawCode) Then pressedKey = digitIndex
+  Next
+  If pressedKey >= 0
+    If keyWasDown = False
+      If pressedKey <= 8
+        configSeen(config) = pressedKey
+        DrawHud{config}
+      EndIf
+      If pressedKey = 20 AND config < #CONFIGS - 1
+        config = config + 1
+        scrollX = 0
+        DrawHud{config}
+        VWait
+        ShowConfig{config}
+      EndIf
+      If pressedKey = 21 AND config > 0
+        config = config - 1
+        scrollX = 0
+        DrawHud{config}
+        VWait
+        ShowConfig{config}
+      EndIf
+    EndIf
+    keyWasDown = True
+  Else
+    keyWasDown = False
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/sprite-width-results.txt")
+  FileOutput 0
+  NPrint "sprite-width: how many of the 8 sprite channels showed a figure, as recorded by the user"
+  NPrint "(-1 means that config was not recorded). Config 0 is the game's own display (6 planes)."
+  NPrint ""
+  NPrint "config  planes  fetch  window  centred  scroll   flags      figures seen"
+  For configIndex.w = 0 To #CONFIGS - 1
+    scrollWord$ = "still "
+    If configMoves(configIndex) = 1 Then scrollWord$ = "moving"
+    Print configIndex, "  ", depthPlanes(configDepth(configIndex)), "  ", configFetch(configIndex), "  ", configWidth(configIndex), "  ", configCentred(configIndex), "  ", scrollWord$, "  $", Hex$(configFlags(configIndex)), "  "
+    NPrint configSeen(configIndex)
+  Next
+  NPrint ""
+  NPrint "Chip RAM of the proof's bitmaps: ", chipBefore - chipAfter, " bytes"
+  CloseFile 0
+EndIf
+End

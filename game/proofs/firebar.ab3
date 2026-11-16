@@ -1,0 +1,525 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "FirebarProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: the firebars (the level-2-4 plan, step 2). The cartridge's firebars, as the routines they will become in the engine, on
+;; the cartridge's own terms: the spin (FirebarSpin 10639, ProcFirebar 9701: the speed onto a 16-bit spin state, the high byte's five
+;; bits the angle, 32 steps a turn from straight up; the long bar steps over the level states 8 and 24), each ball's offset
+;; (GetFirebarPosition: the angle folded into one quadrant, FirebarPosLookupTbl 9678 by part, FirebarMirrorData for the signs) and the
+;; hit test (FirebarCollision 9797: each ball against one point of small Mario, 24 below the top of his 32 px, or three of big Mario,
+;; at 0, 12 and 24; within 8 px both ways, his x + 4 against the ball's). The kinds by id: $1b slow and $1c fast clockwise, $1d slow
+;; and $1e fast counter-clockwise, $1f long and slow. A short bar is the centre's ball and 5 parts 8 to 40 px out; a long one 11, to 88.
+;;
+;; One set of numbers: the NTSC cartridge's speeds ($28, $38) at 60 ticks, and at 50 the PAL listing's ($30, $43), which are ours
+;; scaled x1.2 as well; a turn takes 3.41 s (slow) or 2.44 s (fast) in both.
+;;
+;; Keys: the arrows move Mario's box anywhere (no physics); F2 makes him small or big; ESC quits and writes the results. The five bars
+;; turn about their blocks; Mario's box goes white while a ball touches him, and the bar at the top left grows with the ticks touched.
+;;
+;; The results file (proofs/firebar-results.txt), to check with python tools/record/firebar_model.py --check: each kind's spin state over 240
+;; ticks from 0, every part's offset at all 32 states, and four runs of 240 ticks of a bar against a Mario standing still beside it
+;; (touching or not, every tick).
+
+OPTIMIZE 1
+
+WBStartup
+
+;; The proof's own display: names of its own, since constants.ab3 has the game's #COPPER_FLAGS (smooth scrolling and fetch mode 3). As
+;; tall as the bitmaps, from the standard window's top line (an NTSC screen's 200 lines fit too).
+#FB_COP_FLAGS = $10004
+#FB_COP_COLORS = 16
+#FB_COP_YPOS = 44
+#WORLD_ROWS = 256
+
+#FB_KINDS = 5
+#FB_LONG = 4
+#FB_BALL = 8
+#FB_TRACE_TICKS = 240
+#FB_HIT_RUNS = 4
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+
+;; The cartridge's tables: the offsets by part (9 a part: the quadrant's 0 to 8), the mirroring by quarter, and each kind's speed
+;; and way (0 clockwise, $10 counter-clockwise).
+Dim fbTable.w(98)
+Dim fbMirror.w(3)
+Dim fbSpeed.w(#FB_KINDS - 1)
+Dim fbWay.w(#FB_KINDS - 1)
+;; Each kind's bar on the screen: its spin state (low and high bytes) and its centre (the ball's top left: its block's + 4).
+Dim fbLow.w(#FB_KINDS - 1)
+Dim fbHigh.w(#FB_KINDS - 1)
+Dim fbCentreX.w(#FB_KINDS - 1)
+Dim fbCentreY.w(#FB_KINDS - 1)
+Dim spinTrace.w(#FB_KINDS*#FB_TRACE_TICKS - 1)
+Dim hitTrace.w(#FB_HIT_RUNS*#FB_TRACE_TICKS - 1)
+;; The four hit runs (tools/record/firebar_model.py's HIT_RUNS): the kind, small, and Mario's x and cartridge y from the centre.
+Dim runKind.w(#FB_HIT_RUNS - 1)
+Dim runSmall.w(#FB_HIT_RUNS - 1)
+Dim runDX.w(#FB_HIT_RUNS - 1)
+Dim runDY.w(#FB_HIT_RUNS - 1)
+
+fbTable(0) = 0
+fbTable(1) = 1
+fbTable(2) = 3
+fbTable(3) = 4
+fbTable(4) = 5
+fbTable(5) = 6
+fbTable(6) = 7
+fbTable(7) = 7
+fbTable(8) = 8
+fbTable(9) = 0
+fbTable(10) = 3
+fbTable(11) = 6
+fbTable(12) = 9
+fbTable(13) = 11
+fbTable(14) = 13
+fbTable(15) = 14
+fbTable(16) = 15
+fbTable(17) = 16
+fbTable(18) = 0
+fbTable(19) = 4
+fbTable(20) = 9
+fbTable(21) = 13
+fbTable(22) = 16
+fbTable(23) = 19
+fbTable(24) = 22
+fbTable(25) = 23
+fbTable(26) = 24
+fbTable(27) = 0
+fbTable(28) = 6
+fbTable(29) = 12
+fbTable(30) = 18
+fbTable(31) = 22
+fbTable(32) = 26
+fbTable(33) = 29
+fbTable(34) = 31
+fbTable(35) = 32
+fbTable(36) = 0
+fbTable(37) = 7
+fbTable(38) = 15
+fbTable(39) = 22
+fbTable(40) = 28
+fbTable(41) = 33
+fbTable(42) = 37
+fbTable(43) = 39
+fbTable(44) = 40
+fbTable(45) = 0
+fbTable(46) = 9
+fbTable(47) = 18
+fbTable(48) = 27
+fbTable(49) = 33
+fbTable(50) = 39
+fbTable(51) = 44
+fbTable(52) = 47
+fbTable(53) = 48
+fbTable(54) = 0
+fbTable(55) = 11
+fbTable(56) = 21
+fbTable(57) = 31
+fbTable(58) = 39
+fbTable(59) = 46
+fbTable(60) = 51
+fbTable(61) = 55
+fbTable(62) = 56
+fbTable(63) = 0
+fbTable(64) = 12
+fbTable(65) = 24
+fbTable(66) = 36
+fbTable(67) = 45
+fbTable(68) = 53
+fbTable(69) = 59
+fbTable(70) = 62
+fbTable(71) = 64
+fbTable(72) = 0
+fbTable(73) = 14
+fbTable(74) = 27
+fbTable(75) = 40
+fbTable(76) = 50
+fbTable(77) = 59
+fbTable(78) = 66
+fbTable(79) = 70
+fbTable(80) = 72
+fbTable(81) = 0
+fbTable(82) = 15
+fbTable(83) = 31
+fbTable(84) = 45
+fbTable(85) = 56
+fbTable(86) = 66
+fbTable(87) = 74
+fbTable(88) = 78
+fbTable(89) = 80
+fbTable(90) = 0
+fbTable(91) = 17
+fbTable(92) = 34
+fbTable(93) = 49
+fbTable(94) = 62
+fbTable(95) = 73
+fbTable(96) = 81
+fbTable(97) = 86
+fbTable(98) = 88
+fbMirror(0) = $01
+fbMirror(1) = $03
+fbMirror(2) = $02
+fbMirror(3) = $00
+fbWay(0) = 0
+fbWay(1) = 0
+fbWay(2) = $10
+fbWay(3) = $10
+fbWay(4) = 0
+If #SIM_HZ = 50
+  fbSpeed(0) = $30
+  fbSpeed(1) = $43
+  fbSpeed(2) = $30
+  fbSpeed(3) = $43
+  fbSpeed(4) = $30
+Else
+  fbSpeed(0) = $28
+  fbSpeed(1) = $38
+  fbSpeed(2) = $28
+  fbSpeed(3) = $38
+  fbSpeed(4) = $28
+EndIf
+runKind(0) = 0
+runSmall(0) = False
+runDX(0) = -8
+runDY(0) = -40
+runKind(1) = 1
+runSmall(1) = True
+runDX(1) = 12
+runDY(1) = -30
+runKind(2) = 4
+runSmall(2) = False
+runDX(2) = 40
+runDY(2) = -60
+runKind(3) = 2
+runSmall(3) = False
+runDX(3) = -30
+runDY(3) = 4
+fbCentreX(0) = 60
+fbCentreY(0) = 84
+fbCentreX(1) = 252
+fbCentreY(1) = 84
+fbCentreX(2) = 60
+fbCentreY(2) = 196
+fbCentreX(3) = 252
+fbCentreY(3) = 196
+fbCentreX(4) = 156
+fbCentreY(4) = 140
+
+ballX.w = 0
+ballY.w = 0
+marioX.w = 120
+marioTop.w = 160
+marioSmall.w = True
+touchedTicks.w = 0
+quitFlag.w = False
+screenHeight.w = DispHeight
+drawBitmap.w = 0
+lastF2.w = False
+
+InitPalette 0, #FB_COP_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 120, 120, 120
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 252, 252, 252
+AGAPalRGB 0, 4, 30, 30, 120
+AGAPalRGB 0, 5, 252, 152, 56
+AGAPalRGB 0, 6, 200, 0, 200
+AGAPalRGB 0, 7, 0, 0, 0
+BitMap 0, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+BLITZ
+InitCopList 0, #FB_COP_YPOS, screenHeight, #FB_COP_FLAGS, 0, #FB_COP_COLORS, 0
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+;; ---------------------------------------------------------------
+;; The firebar
+;; ---------------------------------------------------------------
+
+;; One tick of a bar's spin (FirebarSpin, then ProcFirebar's mask and the long bar's step over the level states).
+Statement SpinFirebar{kind.w}
+  SHARED fbLow(), fbHigh(), fbSpeed(), fbWay()
+  If fbWay(kind) = 0
+    spinTotal.w = fbLow(kind) + fbSpeed(kind)
+    fbLow(kind) = spinTotal AND 255
+    fbHigh(kind) = fbHigh(kind) + spinTotal/256
+  Else
+    spinTotal = fbLow(kind) - fbSpeed(kind)
+    If spinTotal < 0
+      fbLow(kind) = spinTotal + 256
+      fbHigh(kind) = fbHigh(kind) - 1
+    Else
+      fbLow(kind) = spinTotal
+    EndIf
+  EndIf
+  fbHigh(kind) = fbHigh(kind) AND 31
+  If kind = #FB_LONG
+    If fbHigh(kind) = 8 OR fbHigh(kind) = 24 Then fbHigh(kind) = fbHigh(kind) + 1
+  EndIf
+End Statement
+
+;; A part's offset from the centre at a spin state, into ballX and ballY (GetFirebarPosition, DrawFirebar_Collision): the state's low
+;; four bits folded into one quadrant (9 and up count back down) for x, the same eight on for y, each looked up in the part's row,
+;; and the quarter's mirroring for their signs.
+Statement BallOffset{spinHigh.w, part.w}
+  SHARED fbTable(), fbMirror(), ballX, ballY
+  foldX.w = spinHigh AND 15
+  If foldX >= 9 Then foldX = 16 - foldX
+  foldY.w = (spinHigh + 8) AND 15
+  If foldY >= 9 Then foldY = 16 - foldY
+  ballX = fbTable(part*9 + foldX)
+  ballY = fbTable(part*9 + foldY)
+  quarterMirror.w = fbMirror((spinHigh AND 31)/8)
+  If (quarterMirror AND 1) = 0 Then ballX = -ballX
+  If (quarterMirror AND 2) = 0 Then ballY = -ballY
+End Statement
+
+;; Does any ball of a bar touch Mario (FirebarCollision)? His x (his left) and cartridge y (the top of his 32 px) relative to the
+;; centre; small (or crouching), the one point 24 below; big, 0, 12 and 24 below. A ball within 8 px both ways of (his x + 4, a point).
+Function.w FirebarTouches{kind.w, spinHigh.w, small.w, marioDX.w, marioDY.w}
+  SHARED ballX, ballY
+  partCount.w = 5
+  If kind = #FB_LONG Then partCount = 11
+  firstPoint.w = 0
+  If small = True Then firstPoint = 2
+  For partIndex.w = -1 To partCount - 1
+    ballX = 0
+    ballY = 0
+    If partIndex >= 0 Then BallOffset{spinHigh, partIndex}
+    gapX.w = marioDX + 4 - ballX
+    If gapX < 0 Then gapX = -gapX
+    If gapX < 8
+      For pointIndex.w = firstPoint To 2
+        gapY.w = marioDY + pointIndex*12 - ballY
+        If gapY < 0 Then gapY = -gapY
+        If gapY < 8 Then Function Return True
+      Next
+    EndIf
+  Next
+  Function Return False
+End Function
+
+;; ---------------------------------------------------------------
+;; The traces
+;; ---------------------------------------------------------------
+
+Statement RunTraces{}
+  SHARED fbLow(), fbHigh(), spinTrace(), hitTrace(), runKind(), runSmall(), runDX(), runDY()
+  For kind.w = 0 To #FB_KINDS - 1
+    fbLow(kind) = 0
+    fbHigh(kind) = 0
+    For traceTick.w = 0 To #FB_TRACE_TICKS - 1
+      SpinFirebar{kind}
+      spinTrace(kind*#FB_TRACE_TICKS + traceTick) = fbHigh(kind)
+    Next
+  Next
+  For hitRun.w = 0 To #FB_HIT_RUNS - 1
+    kind = runKind(hitRun)
+    fbLow(kind) = 0
+    fbHigh(kind) = 0
+    For traceTick = 0 To #FB_TRACE_TICKS - 1
+      SpinFirebar{kind}
+      touching.w = 0
+      If FirebarTouches{kind, fbHigh(kind), runSmall(hitRun), runDX(hitRun), runDY(hitRun)} = True Then touching = 1
+      hitTrace(hitRun*#FB_TRACE_TICKS + traceTick) = touching
+    Next
+  Next
+  For kind = 0 To #FB_KINDS - 1
+    fbLow(kind) = 0
+    fbHigh(kind) = 0
+  Next
+End Statement
+
+;; ---------------------------------------------------------------
+;; The screen
+;; ---------------------------------------------------------------
+
+;; A box in world rows, squeezed to the screen's height and cut to it.
+Statement WorldBox{boxX.w, boxY.w, boxW.w, boxH.w, colour.w}
+  SHARED screenHeight
+  boxLeft.w = boxX
+  boxRight.w = boxX + boxW - 1
+  If boxLeft < 0 Then boxLeft = 0
+  If boxRight > #VIEW_W - 1 Then boxRight = #VIEW_W - 1
+  If boxRight < boxLeft Then Statement Return
+  ; In longs: a y of 300 times 256 lines is past a word.
+  scaledTop.l = boxY
+  scaledTop = (scaledTop*screenHeight)/#WORLD_ROWS
+  scaledBottom.l = boxY + boxH
+  scaledBottom = (scaledBottom*screenHeight)/#WORLD_ROWS - 1
+  boxTop.w = scaledTop
+  boxBottom.w = scaledBottom
+  If boxTop < 0 Then boxTop = 0
+  If boxBottom > screenHeight - 1 Then boxBottom = screenHeight - 1
+  If boxBottom < boxTop Then Statement Return
+  Boxf boxLeft, boxTop, boxRight, boxBottom, colour
+End Statement
+
+Statement DrawFirebarFrame{touchingNow.w}
+  SHARED drawBitmap, fbHigh(), fbCentreX(), fbCentreY(), ballX, ballY, marioX, marioTop, marioSmall, touchedTicks
+  Use BitMap drawBitmap
+  Cls 0
+  For kind.w = 0 To #FB_KINDS - 1
+    WorldBox{fbCentreX(kind) - 4, fbCentreY(kind) - 4, 16, 16, 1}
+    partCount.w = 5
+    If kind = #FB_LONG Then partCount = 11
+    WorldBox{fbCentreX(kind), fbCentreY(kind), #FB_BALL, #FB_BALL, 5}
+    For partIndex.w = 0 To partCount - 1
+      BallOffset{fbHigh(kind), partIndex}
+      WorldBox{fbCentreX(kind) + ballX, fbCentreY(kind) + ballY, #FB_BALL, #FB_BALL, 5}
+    Next
+  Next
+  marioColour.w = 2
+  If touchingNow = True Then marioColour = 3
+  If marioSmall = True
+    WorldBox{marioX, marioTop + 16, 16, 16, marioColour}
+  Else
+    WorldBox{marioX, marioTop, 16, 32, marioColour}
+  EndIf
+  WorldBox{4, 4, 4 + touchedTicks/8, 6, 3}
+End Statement
+
+;; ---------------------------------------------------------------
+;; Run
+;; ---------------------------------------------------------------
+
+RunTraces{}
+While quitFlag = False
+  If RawStatus(#RAW_KEY_LEFT) Then marioX = marioX - 2
+  If RawStatus(#RAW_KEY_RIGHT) Then marioX = marioX + 2
+  If RawStatus(#RAW_KEY_UP) Then marioTop = marioTop - 2
+  If RawStatus(#RAW_KEY_DOWN) Then marioTop = marioTop + 2
+  keyNow.w = RawStatus(#RAW_KEY_F2)
+  If keyNow <> False AND lastF2 = False
+    If marioSmall = True
+      marioSmall = False
+    Else
+      marioSmall = True
+    EndIf
+  EndIf
+  lastF2 = keyNow
+  touchingNow.w = False
+  For kind.w = 0 To #FB_KINDS - 1
+    SpinFirebar{kind}
+    If FirebarTouches{kind, fbHigh(kind), marioSmall, marioX - fbCentreX(kind), marioTop - fbCentreY(kind)} = True Then touchingNow = True
+  Next
+  If touchingNow = True AND touchedTicks < 2000 Then touchedTicks = touchedTicks + 1
+  DrawFirebarFrame{touchingNow}
+  VWait
+  DisplayBitMap 0, drawBitmap
+  drawBitmap = 1 - drawBitmap
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/firebar-results.txt")
+  FileOutput 0
+  NPrint "Firebar proof results"
+  NPrint "Physics variant: ", #SIM_HZ, " ticks a second"
+  For kindReport.w = 0 To #FB_KINDS - 1
+    Print "  kind ", kindReport, " spin:"
+    For tickReport.w = 0 To #FB_TRACE_TICKS - 1
+      Print " ", spinTrace(kindReport*#FB_TRACE_TICKS + tickReport)
+    Next
+    NPrint ""
+  Next
+  For stateReport.w = 0 To 31
+    Print "  state ", stateReport, ":"
+    For partReport.w = 0 To 10
+      BallOffset{stateReport, partReport}
+      Print " ", ballX, " ", ballY
+    Next
+    NPrint ""
+  Next
+  For runReport.w = 0 To #FB_HIT_RUNS - 1
+    Print "  hits ", runReport, ":"
+    For tickReport = 0 To #FB_TRACE_TICKS - 1
+      Print " ", hitTrace(runReport*#FB_TRACE_TICKS + tickReport)
+    Next
+    NPrint ""
+  Next
+  CloseFile 0
+EndIf
+End

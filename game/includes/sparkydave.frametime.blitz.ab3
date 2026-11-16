@@ -1,0 +1,390 @@
+;; =======================================================
+;; FRAME TIME REPORT (BLITZ MODE)
+;; =======================================================
+
+;; Measures how much of each display frame the game uses, from the raster beam
+;; position. VWait returns at the vertical blank, so the beam is at a small line
+;; number, the start line, when a frame's work begins. One raster line is about
+;; 63.5 microseconds; a PAL frame is 312 lines (20 ms), NTSC 262.
+;; The beam wraps every frame, so end minus start cannot show a frame that took
+;; longer than a frame. Instead the work is measured in two segments, input and
+;; sim and then draw and HUD, each corrected for one wrap, and added up. The frame
+;; is over budget when the start line plus that work reaches a whole frame: the
+;; next VWait then waits for the vertical blank after the next.
+;; Marks, from the main loop: FrameTimeStart{} after VWait, FrameTimeAfterSim{} after
+;; input and the sim ticks, FrameTimeAfterWorld{} after DrawFrame{}, FrameTimeAfterHud{}
+;; after UpdateHud{}, FrameTimeAfterDraw{} after the palette. The sim segment has
+;; FrameTimeBeforeTicks{} and FrameTimeAfterTicks{} around RunSimTicks{}, and the objects'
+;; marks inside it (sparkydave.timing-marks.blitz.ab3), and is reported whole and in four
+;; parts: input and events, the player and the rest of the tick, the objects and enemies,
+;; and the sound. The draw segment is reported
+;; whole and in its three parts: the world, the HUD, and the palette and the rest.
+;; The report written at exit is in sparkydave.reports.ab3. Only in debug mode (the parameter debug).
+;; RasterLine{} and SegmentLines{} are in sparkydave.beam.blitz.ab3, FrameLines{} in
+;; sparkydave.timing-marks.blitz.ab3; both are included before the player code and this file.
+;; Do not use the CIA-B time-of-day counter as a line clock: in UAE it moves about one tick per frame, not 312, and can return
+;; values going backwards. CIA-A's counts the display frames: each mark also keeps its low byte (frameTimeTod*), so a frame that ran
+;; into the next is caught even when a part longer than a frame wrapped the beam and read short (otherwise a frame can be over budget
+;; while every part's lines look in budget). The parts, for the report: 1 input and events, 2 the sim's ticks (the player and the
+;; objects), 3 the sound, 4 the world, 5 the HUD, 6 the palette and the rest.
+
+;; The display stretch: what the main loop does right after the VWait, before FrameTimeStart{} (the lists, the sky, Mario's sprite).
+;; It is not in the frame's work above: it is in the start line, which a stretch longer than a frame wraps, so it is timed on its own,
+;; the lines corrected by CIA-A's count of the frames begun meanwhile. Coming up a pipe, Mario's clip sprite is cut every frame
+;; (CutMarioClipSprite{}, a Point and a Plot a pixel), which this measures. The mark right after the VWait:
+Statement FrameTimeAfterVWait{}
+  SHARED frameTimeVWaitLine, frameTimeTodVWait, clipCutsNow, debugMode
+  If debugMode = False Then Statement Return
+  frameTimeVWaitLine = RasterLine{}
+  frameTimeTodVWait = Peek.b($bfe801) AND 255
+  clipCutsNow = 0
+End Statement
+
+; And the end of the stretch, before the debug watch: its lines into the sums and, if among the slowest, the log.
+Statement FrameTimeAfterDisplay{}
+  SHARED frameTimeVWaitLine, frameTimeTodVWait, frameTimeDisplayPasses, frameTimeDisplaySum, frameTimeDisplayMax
+  SHARED frameTimeClipCuts, clipCutsNow, displayLogCount, displayLogLines(), displayLogLevel(), displayLogArea()
+  SHARED displayLogCamera(), displayLogState(), displayLogClip(), displayLogPass()
+  SHARED currentLevel, currentArea, cameraX, playerState, debugMode
+  If debugMode = False Then Statement Return
+  If frameTimeVWaitLine < 0 Then Statement Return
+  frameLines.l = FrameLines{}
+  endLine.l = RasterLine{}
+  framesBegun.l = ((Peek.b($bfe801) AND 255) - frameTimeTodVWait) AND 255
+  ;; CIA-A's count of the frame just begun ticks a moment after VWait returns, so nearly every pass sees one frame begun that began
+  ;; before the mark: that one is not counted.
+  If framesBegun > 0 Then framesBegun = framesBegun - 1
+  displayLines.l = endLine - frameTimeVWaitLine + framesBegun*frameLines
+  If displayLines < 0 Then displayLines = displayLines + frameLines
+  frameTimeDisplayPasses = frameTimeDisplayPasses + 1
+  frameTimeDisplaySum = frameTimeDisplaySum + displayLines
+  If displayLines > frameTimeDisplayMax Then frameTimeDisplayMax = displayLines
+  frameTimeClipCuts = frameTimeClipCuts + clipCutsNow
+  ; Kept if the log has room, else in place of its lightest entry when heavier.
+  logIndex.w = displayLogCount
+  If displayLogCount >= #DISPLAY_LOG_MAX
+    logIndex = 0
+    For scanIndex.w = 1 To #DISPLAY_LOG_MAX - 1
+      If displayLogLines(scanIndex) < displayLogLines(logIndex) Then logIndex = scanIndex
+    Next
+    If displayLines <= displayLogLines(logIndex) Then Statement Return
+  Else
+    displayLogCount = displayLogCount + 1
+  EndIf
+  displayLogLines(logIndex) = displayLines
+  displayLogLevel(logIndex) = currentLevel
+  displayLogArea(logIndex) = currentArea
+  displayLogCamera(logIndex) = cameraX
+  displayLogState(logIndex) = playerState
+  displayLogClip(logIndex) = clipCutsNow
+  displayLogPass(logIndex) = frameTimeDisplayPasses
+End Statement
+
+Statement FrameTimeStart{}
+  SHARED frameTimeStartLine, frameTimePrimed, frameTimeObjectsLines, soundPartLines(), frameTimeTodStart
+  SHARED frameTimeTodLastStart, frameTimeLoopFrames, frameTimeLongLoops, frameTimeLongLoopsFit, frameTimeLoopTotal
+  SHARED frameTimeVblanksNow
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeStartLine = RasterLine{}
+  frameTimeTodStart = Peek.b($bfe801) AND 255
+  ;; The last pass, start to start. Only after a measured pass (frameTimePrimed): a reload or a cover is left out, as its lines are,
+  ;; and frameTimeVblanksNow is still that pass's.
+  frameTimeLoopFrames = 0
+  If frameTimeTodLastStart >= 0 AND frameTimePrimed = True
+    frameTimeLoopFrames = (frameTimeTodStart - frameTimeTodLastStart) AND 255
+    frameTimeLoopTotal = frameTimeLoopTotal + frameTimeLoopFrames
+    If frameTimeLoopFrames >= 2
+      frameTimeLongLoops = frameTimeLongLoops + 1
+      If frameTimeVblanksNow = 0 Then frameTimeLongLoopsFit = frameTimeLongLoopsFit + 1
+    EndIf
+  EndIf
+  frameTimeTodLastStart = frameTimeTodStart
+  frameTimePrimed = True
+  frameTimeObjectsLines = 0
+  For soundPart.w = 0 To 3
+    soundPartLines(soundPart) = 0
+  Next
+End Statement
+
+Statement FrameTimeBeforeTicks{}
+  SHARED frameTimeTicksLine, frameTimeTodTicks
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeTicksLine = RasterLine{}
+  frameTimeTodTicks = Peek.b($bfe801) AND 255
+End Statement
+
+Statement FrameTimeAfterTicks{}
+  SHARED frameTimeSoundLine, frameTimeTodSound
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeSoundLine = RasterLine{}
+  frameTimeTodSound = Peek.b($bfe801) AND 255
+End Statement
+
+Statement FrameTimeAfterSim{}
+  SHARED frameTimeSimLine, frameTimeTodSim
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeSimLine = RasterLine{}
+  frameTimeTodSim = Peek.b($bfe801) AND 255
+End Statement
+
+Statement FrameTimeAfterWorld{}
+  SHARED frameTimeWorldLine, frameTimeTodWorld
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeWorldLine = RasterLine{}
+  frameTimeTodWorld = Peek.b($bfe801) AND 255
+End Statement
+
+Statement FrameTimeAfterHud{}
+  SHARED frameTimeHudLine
+  SHARED frameTimeTodHud
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeHudLine = RasterLine{}
+  frameTimeTodHud = Peek.b($bfe801) AND 255
+End Statement
+
+;; Keeps the heaviest frames: a new entry, or in place of the lightest when the log is
+;; full and this frame is heavier. Only called for a frame of at least #SLOW_LOG_LINES.
+;; It also keeps the draw's world and HUD parts, and where the game was: the area
+;; (currentArea, #AREA_MAIN or #AREA_BONUS), the player state (#PLAYER_ST_*), the
+;; level, the camera's x and whether the Starman was on.
+Statement LogSlowFrame{simLines.l, drawLines.l, startLine.l, workLines.l, worldLines.l, hudLines.l}
+  SHARED slowLogCount, slowLogFrame(), slowLogSim(), slowLogDraw(), slowLogStart(), slowLogWork()
+  SHARED slowLogTicks(), slowLogObjects(), slowLogFloaters(), frameTimeFrames, simTicksLast
+  SHARED slowLogWorld(), slowLogHud(), slowLogArea(), slowLogState(), currentArea, playerState
+  SHARED slowLogEvents(), slowLogObjectLines(), slowLogSound()
+  SHARED frameTimeEventsNow, frameTimeObjectsLines, frameTimeSoundNow
+  SHARED slowLogSoundTicks(), slowLogMusic(), slowLogSfx(), soundTicksLast, soundPartLines()
+  SHARED objActive(), floaterActive()
+  SHARED slowLogLevel(), slowLogCamera(), slowLogStar(), currentLevel, cameraX, playerStarIntervals
+  SHARED slowLogVblank(), slowLogCrossAt(), frameTimeVblanksNow, frameTimeCrossNow, slowLogLoop(), frameTimeLoopFrames
+  SHARED slowLogLightest, slowLogLightestWork
+  logIndex.w = slowLogCount
+  ; Full: the frame takes the lightest entry's place only if it is heavier, which is one comparison, not a scan.
+  If slowLogCount >= #SLOW_LOG_MAX
+    If workLines <= slowLogLightestWork Then Statement Return
+    logIndex = slowLogLightest
+  Else
+    slowLogCount = slowLogCount + 1
+  EndIf
+  objectCount.w = 0
+  For poolIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(poolIndex) = True Then objectCount = objectCount + 1
+  Next
+  floaterCount.w = 0
+  For floaterIndex = 0 To #FLOATER_SLOTS - 1
+    If floaterActive(floaterIndex) = True Then floaterCount = floaterCount + 1
+  Next
+  slowLogFrame(logIndex) = frameTimeFrames
+  slowLogSim(logIndex) = simLines
+  slowLogDraw(logIndex) = drawLines
+  slowLogStart(logIndex) = startLine
+  slowLogWork(logIndex) = workLines
+  slowLogTicks(logIndex) = simTicksLast
+  slowLogObjects(logIndex) = objectCount
+  slowLogFloaters(logIndex) = floaterCount
+  slowLogWorld(logIndex) = worldLines
+  slowLogHud(logIndex) = hudLines
+  slowLogArea(logIndex) = currentArea
+  slowLogState(logIndex) = playerState
+  slowLogEvents(logIndex) = frameTimeEventsNow
+  slowLogObjectLines(logIndex) = frameTimeObjectsLines
+  slowLogSound(logIndex) = frameTimeSoundNow
+  slowLogSoundTicks(logIndex) = soundTicksLast
+  slowLogMusic(logIndex) = soundPartLines(#SOUND_PART_MUSIC)
+  slowLogSfx(logIndex) = soundPartLines(#SOUND_PART_SFX)
+  slowLogLevel(logIndex) = currentLevel
+  slowLogCamera(logIndex) = cameraX
+  slowLogStar(logIndex) = 0
+  If playerStarIntervals > 0 Then slowLogStar(logIndex) = 1
+  slowLogVblank(logIndex) = frameTimeVblanksNow
+  slowLogCrossAt(logIndex) = frameTimeCrossNow
+  slowLogLoop(logIndex) = frameTimeLoopFrames
+  ; The new lightest, once the list is full: the only scan, and only when an entry has just been filled or replaced.
+  If slowLogCount >= #SLOW_LOG_MAX
+    slowLogLightest = 0
+    For scanIndex.w = 1 To #SLOW_LOG_MAX - 1
+      If slowLogWork(scanIndex) < slowLogWork(slowLogLightest) Then slowLogLightest = scanIndex
+    Next
+    slowLogLightestWork = slowLogWork(slowLogLightest)
+  EndIf
+End Statement
+
+; Worst first, for the report (a bubble sort: forty entries, once, at exit).
+Statement SortSlowLog{}
+  SHARED slowLogCount, slowLogFrame(), slowLogSim(), slowLogDraw(), slowLogStart(), slowLogWork()
+  SHARED slowLogTicks(), slowLogObjects(), slowLogFloaters()
+  SHARED slowLogWorld(), slowLogHud(), slowLogArea(), slowLogState()
+  SHARED slowLogEvents(), slowLogObjectLines(), slowLogSound()
+  SHARED slowLogSoundTicks(), slowLogMusic(), slowLogSfx()
+  SHARED slowLogLevel(), slowLogCamera(), slowLogStar(), slowLogVblank(), slowLogCrossAt(), slowLogLoop()
+  For passIndex = 1 To slowLogCount - 1
+    For scanIndex = 0 To slowLogCount - 2
+      If slowLogWork(scanIndex) < slowLogWork(scanIndex + 1)
+        swapIndex.w = scanIndex + 1
+        swapValue.l = slowLogFrame(scanIndex)
+        slowLogFrame(scanIndex) = slowLogFrame(swapIndex)
+        slowLogFrame(swapIndex) = swapValue
+        swapValue = slowLogSim(scanIndex)
+        slowLogSim(scanIndex) = slowLogSim(swapIndex)
+        slowLogSim(swapIndex) = swapValue
+        swapValue = slowLogDraw(scanIndex)
+        slowLogDraw(scanIndex) = slowLogDraw(swapIndex)
+        slowLogDraw(swapIndex) = swapValue
+        swapValue = slowLogStart(scanIndex)
+        slowLogStart(scanIndex) = slowLogStart(swapIndex)
+        slowLogStart(swapIndex) = swapValue
+        swapValue = slowLogWork(scanIndex)
+        slowLogWork(scanIndex) = slowLogWork(swapIndex)
+        slowLogWork(swapIndex) = swapValue
+        swapValue = slowLogTicks(scanIndex)
+        slowLogTicks(scanIndex) = slowLogTicks(swapIndex)
+        slowLogTicks(swapIndex) = swapValue
+        swapValue = slowLogObjects(scanIndex)
+        slowLogObjects(scanIndex) = slowLogObjects(swapIndex)
+        slowLogObjects(swapIndex) = swapValue
+        swapValue = slowLogFloaters(scanIndex)
+        slowLogFloaters(scanIndex) = slowLogFloaters(swapIndex)
+        slowLogFloaters(swapIndex) = swapValue
+        swapValue = slowLogWorld(scanIndex)
+        slowLogWorld(scanIndex) = slowLogWorld(swapIndex)
+        slowLogWorld(swapIndex) = swapValue
+        swapValue = slowLogHud(scanIndex)
+        slowLogHud(scanIndex) = slowLogHud(swapIndex)
+        slowLogHud(swapIndex) = swapValue
+        swapValue = slowLogArea(scanIndex)
+        slowLogArea(scanIndex) = slowLogArea(swapIndex)
+        slowLogArea(swapIndex) = swapValue
+        swapValue = slowLogState(scanIndex)
+        slowLogState(scanIndex) = slowLogState(swapIndex)
+        slowLogState(swapIndex) = swapValue
+        swapValue = slowLogEvents(scanIndex)
+        slowLogEvents(scanIndex) = slowLogEvents(swapIndex)
+        slowLogEvents(swapIndex) = swapValue
+        swapValue = slowLogObjectLines(scanIndex)
+        slowLogObjectLines(scanIndex) = slowLogObjectLines(swapIndex)
+        slowLogObjectLines(swapIndex) = swapValue
+        swapValue = slowLogSound(scanIndex)
+        slowLogSound(scanIndex) = slowLogSound(swapIndex)
+        slowLogSound(swapIndex) = swapValue
+        swapValue = slowLogSoundTicks(scanIndex)
+        slowLogSoundTicks(scanIndex) = slowLogSoundTicks(swapIndex)
+        slowLogSoundTicks(swapIndex) = swapValue
+        swapValue = slowLogMusic(scanIndex)
+        slowLogMusic(scanIndex) = slowLogMusic(swapIndex)
+        slowLogMusic(swapIndex) = swapValue
+        swapValue = slowLogSfx(scanIndex)
+        slowLogSfx(scanIndex) = slowLogSfx(swapIndex)
+        slowLogSfx(swapIndex) = swapValue
+        swapValue = slowLogLevel(scanIndex)
+        slowLogLevel(scanIndex) = slowLogLevel(swapIndex)
+        slowLogLevel(swapIndex) = swapValue
+        swapValue = slowLogCamera(scanIndex)
+        slowLogCamera(scanIndex) = slowLogCamera(swapIndex)
+        slowLogCamera(swapIndex) = swapValue
+        swapValue = slowLogStar(scanIndex)
+        slowLogStar(scanIndex) = slowLogStar(swapIndex)
+        slowLogStar(swapIndex) = swapValue
+        swapValue = slowLogVblank(scanIndex)
+        slowLogVblank(scanIndex) = slowLogVblank(swapIndex)
+        slowLogVblank(swapIndex) = swapValue
+        swapValue = slowLogCrossAt(scanIndex)
+        slowLogCrossAt(scanIndex) = slowLogCrossAt(swapIndex)
+        slowLogCrossAt(swapIndex) = swapValue
+        swapValue = slowLogLoop(scanIndex)
+        slowLogLoop(scanIndex) = slowLogLoop(swapIndex)
+        slowLogLoop(swapIndex) = swapValue
+      EndIf
+    Next
+  Next
+End Statement
+
+Statement FrameTimeAfterDraw{}
+  SHARED frameTimeStartLine, frameTimeSimLine, frameTimePrimed, videoIsNtsc
+  SHARED frameTimeFrames, frameTimeSimSum, frameTimeDrawSum, frameTimeWorkSum, frameTimeStartSum
+  SHARED frameTimeSimMax, frameTimeDrawMax, frameTimeWorkMax, frameTimeDeadlineMax, frameTimeOverruns
+  SHARED frameTimeWorldLine, frameTimeHudLine, frameTimeWorldSum, frameTimeHudSum, frameTimeRestSum
+  SHARED frameTimeWorldMax, frameTimeHudMax, frameTimeRestMax
+  SHARED frameTimeTicksLine, frameTimeSoundLine, frameTimeObjectsLines, frameTimeEventsNow, frameTimeSoundNow
+  SHARED frameTimeEventsSum, frameTimePlayerSum, frameTimeObjectsSum, frameTimeSoundSum
+  SHARED frameTimeEventsMax, frameTimePlayerMax, frameTimeObjectsMax, frameTimeSoundMax
+  SHARED frameTimeSoundPartSum(), frameTimeSoundPartMax(), soundPartLines()
+  SHARED frameTimeTodStart, frameTimeTodTicks, frameTimeTodSound, frameTimeTodSim, frameTimeTodWorld, frameTimeTodHud
+  SHARED frameTimeCrossings, frameTimeHidden, frameTimeVblanksNow, frameTimeCrossNow, frameTimeLoopFrames
+  SHARED frameTimeOwnSum, frameTimeOwnMax
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  If frameTimePrimed = False Then Statement Return
+  endLine.l = RasterLine{}
+  todEnd.l = Peek.b($bfe801) AND 255
+  ; Display frames begun during the work, and the first part one began in (the count's low byte wraps at 256: AND 255).
+  frameTimeVblanksNow = (todEnd - frameTimeTodStart) AND 255
+  frameTimeCrossNow = 0
+  If frameTimeVblanksNow > 0
+    frameTimeCrossNow = 6
+    If ((frameTimeTodHud - frameTimeTodWorld) AND 255) > 0 Then frameTimeCrossNow = 5
+    If ((frameTimeTodWorld - frameTimeTodSim) AND 255) > 0 Then frameTimeCrossNow = 4
+    If ((frameTimeTodSim - frameTimeTodSound) AND 255) > 0 Then frameTimeCrossNow = 3
+    If ((frameTimeTodSound - frameTimeTodTicks) AND 255) > 0 Then frameTimeCrossNow = 2
+    If ((frameTimeTodTicks - frameTimeTodStart) AND 255) > 0 Then frameTimeCrossNow = 1
+  EndIf
+  frameLines.l = FrameLines{}
+  eventLines.l = SegmentLines{frameTimeStartLine, frameTimeTicksLine, frameLines}
+  tickLines.l = SegmentLines{frameTimeTicksLine, frameTimeSoundLine, frameLines}
+  soundLines.l = SegmentLines{frameTimeSoundLine, frameTimeSimLine, frameLines}
+  playerLines.l = tickLines - frameTimeObjectsLines
+  simLines.l = eventLines + tickLines + soundLines
+  frameTimeEventsNow = eventLines
+  frameTimeSoundNow = soundLines
+  worldLines.l = SegmentLines{frameTimeSimLine, frameTimeWorldLine, frameLines}
+  hudLines.l = SegmentLines{frameTimeWorldLine, frameTimeHudLine, frameLines}
+  restLines.l = SegmentLines{frameTimeHudLine, endLine, frameLines}
+  drawLines.l = worldLines + hudLines + restLines
+  workLines.l = simLines + drawLines
+  deadlineLines.l = frameTimeStartLine + workLines
+  frameTimeFrames = frameTimeFrames + 1
+  frameTimeSimSum = frameTimeSimSum + simLines
+  frameTimeDrawSum = frameTimeDrawSum + drawLines
+  frameTimeWorkSum = frameTimeWorkSum + workLines
+  frameTimeStartSum = frameTimeStartSum + frameTimeStartLine
+  If simLines > frameTimeSimMax Then frameTimeSimMax = simLines
+  If drawLines > frameTimeDrawMax Then frameTimeDrawMax = drawLines
+  frameTimeEventsSum = frameTimeEventsSum + eventLines
+  frameTimePlayerSum = frameTimePlayerSum + playerLines
+  frameTimeObjectsSum = frameTimeObjectsSum + frameTimeObjectsLines
+  frameTimeSoundSum = frameTimeSoundSum + soundLines
+  If eventLines > frameTimeEventsMax Then frameTimeEventsMax = eventLines
+  If playerLines > frameTimePlayerMax Then frameTimePlayerMax = playerLines
+  If frameTimeObjectsLines > frameTimeObjectsMax Then frameTimeObjectsMax = frameTimeObjectsLines
+  If soundLines > frameTimeSoundMax Then frameTimeSoundMax = soundLines
+  For soundPart.w = 0 To 3
+    frameTimeSoundPartSum(soundPart) = frameTimeSoundPartSum(soundPart) + soundPartLines(soundPart)
+    If soundPartLines(soundPart) > frameTimeSoundPartMax(soundPart) Then frameTimeSoundPartMax(soundPart) = soundPartLines(soundPart)
+  Next
+  frameTimeWorldSum = frameTimeWorldSum + worldLines
+  frameTimeHudSum = frameTimeHudSum + hudLines
+  frameTimeRestSum = frameTimeRestSum + restLines
+  If worldLines > frameTimeWorldMax Then frameTimeWorldMax = worldLines
+  If hudLines > frameTimeHudMax Then frameTimeHudMax = hudLines
+  If restLines > frameTimeRestMax Then frameTimeRestMax = restLines
+  If workLines > frameTimeWorkMax Then frameTimeWorkMax = workLines
+  If deadlineLines > frameTimeDeadlineMax Then frameTimeDeadlineMax = deadlineLines
+  If deadlineLines >= frameLines Then frameTimeOverruns = frameTimeOverruns + 1
+  If frameTimeVblanksNow > 0
+    frameTimeCrossings = frameTimeCrossings + 1
+    If deadlineLines < frameLines Then frameTimeHidden = frameTimeHidden + 1
+  EndIf
+  ; A frame that ran into the next is logged whatever its lines: those are the ones the lines can miss.
+  If workLines >= #SLOW_LOG_LINES OR frameTimeVblanksNow > 0 OR frameTimeLoopFrames >= 2 Then LogSlowFrame{simLines, drawLines, frameTimeStartLine, workLines, worldLines, hudLines}
+  ; What all of this cost, after the last mark: in no figure above, so reported on its own.
+  ownLines.l = SegmentLines{endLine, RasterLine{}, frameLines}
+  frameTimeOwnSum = frameTimeOwnSum + ownLines
+  If ownLines > frameTimeOwnMax Then frameTimeOwnMax = ownLines
+End Statement
+
+;; END OF FRAME TIME REPORT (BLITZ MODE)

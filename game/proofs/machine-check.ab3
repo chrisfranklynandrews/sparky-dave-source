@@ -1,0 +1,82 @@
+;; machine-check.ab3 -- can the game tell, before it opens anything, whether the machine is AGA and has
+;; Fast RAM? Compile in UAE. Not part of the game. Proof for the start-up checks (the main project's candidates notes,
+;; "A start-up machine check: AGA and Fast RAM").
+;;
+;; Two reads of the chipset, both from the documentation, to see that they agree:
+;;   the OS's: graphics.library V39 or later (Kickstart 3.0, every A1200) keeps ChipRevBits0 in
+;;     GfxBase, at offset 236 (the AmiBlitz include OS/graphics/gfxbase.ab3, NEWTYPE.GfxBase; the
+;;     AmigaOS gfxbase.h), with GFXF_AA_ALICE (4) and GFXF_AA_LISA (8) set on an AGA machine
+;;     (graphics.doc, SetChipRev). On an older Kickstart the library will not open at V39: not AGA.
+;;   the hardware's: the chip ID register DENISEID ($dff07c), whose low byte is $f8 for AGA's Lisa
+;;     and $fc for ECS Denise; OCS Denise has no such register (the read is whatever was on the bus).
+;; And the RAM: AvailMem_(4) is MEMF_FAST free (0 on a machine without Fast RAM), AvailMem_($20004)
+;; its largest block; AvailMem_(2) and ($20002) the same for Chip RAM, as the game's check reads them.
+;;
+;; Run it in UAE with
+;;   execute sparky-dave:S/run-proof
+;; It writes proofs/machine-check-results.txt (the script types it). On the A1200 set-up both reads
+;; should say AGA and Fast RAM should be there. If you can, run it once more on an ECS or OCS
+;; set-up (an A500 or A600 in FS-UAE) and on one without Fast RAM: both reads should say not AGA,
+;; and Fast RAM 0.
+
+WBStartup
+
+#GFXF_AA_ALICE    = 4
+#GFXF_AA_LISA     = 8
+#GFX_CHIPREVBITS0 = 236
+#DENISEID_LISA    = $f8
+#DENISEID_ECS     = $fc
+
+gfxVersion.l = 0
+chipRevBits.l = -1
+gfxBase.l = OpenLibrary_("graphics.library", 39)
+If gfxBase <> 0
+  gfxVersion = Peek.w(gfxBase + 20) AND $ffff
+  chipRevBits = Peek.b(gfxBase + #GFX_CHIPREVBITS0) AND 255
+  CloseLibrary_ gfxBase
+EndIf
+osSaysAga.w = False
+If chipRevBits >= 0
+  If (chipRevBits AND #GFXF_AA_LISA) <> 0 Then osSaysAga = True
+EndIf
+
+deniseId.l = Peek.w($dff07c) AND 255
+hardwareSaysAga.w = False
+If deniseId = #DENISEID_LISA Then hardwareSaysAga = True
+
+fastFree.l = AvailMem_(4)
+fastLargest.l = AvailMem_($20004)
+chipFree.l = AvailMem_(2)
+chipLargest.l = AvailMem_($20002)
+
+If WriteFile(0, "sparky-dave:game/proofs/results/machine-check-results.txt")
+  FileOutput 0
+  NPrint "machine-check"
+  If gfxBase <> 0
+    NPrint "graphics.library opened at V39 or later: version ", gfxVersion
+    NPrint "ChipRevBits0: ", chipRevBits, " (AA Alice bit 4: ", chipRevBits AND #GFXF_AA_ALICE, ", AA Lisa bit 8: ", chipRevBits AND #GFXF_AA_LISA, ")"
+  Else
+    NPrint "graphics.library would not open at V39 (Kickstart older than 3.0): not AGA"
+  EndIf
+  If osSaysAga = True
+    NPrint "the OS says: AGA"
+  Else
+    NPrint "the OS says: not AGA"
+  EndIf
+  NPrint "DENISEID low byte: ", deniseId, " ($f8 = 248 AGA Lisa, $fc = 252 ECS Denise, anything else OCS)"
+  If hardwareSaysAga = True
+    NPrint "the hardware says: AGA"
+  Else
+    NPrint "the hardware says: not AGA"
+  EndIf
+  If osSaysAga = hardwareSaysAga
+    NPrint "the two reads agree"
+  Else
+    NPrint "THE TWO READS DISAGREE"
+  EndIf
+  NPrint "Fast RAM free: ", fastFree, ", largest block ", fastLargest
+  NPrint "Chip RAM free: ", chipFree, ", largest block ", chipLargest
+  CloseFile 0
+EndIf
+
+End

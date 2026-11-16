@@ -1,0 +1,546 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; hud-in-back.ab3 -- the HUD in the tall list's back playfield: no copy every frame
+;; Compile in UAE. Not part of the game. Follows hud-over-world.ab3, which showed that copying the HUD band into the front
+;; world bitmap works and costs about 31 raster lines a frame while the camera moves, which tips a frame with three plants over
+;; NTSC's 262 lines (the user's play, 2026-10-18: slow with it, not without).
+;;
+;; The idea. The tall list (list 2) is dual playfield. Its back playfield, which carries the clouds, is a bitmap the camera never
+;; draws into. So its first lines can show the HUD instead, with the copper changing its bitmap pointers to the clouds after the
+;; HUD's last line, the way the hills' band split (sparkydave.parallax.blitz.ab3) already changes them at line 80:
+;;   - the HUD is a copy in the back bitmap's rows 0 to 15 (empty in every strip, which starts at tile row 2), made when the
+;;     HUD changes (here the clock's tick, every #HUD_TIME_FRAMES frames), not every frame: the back is not scrolled by the camera;
+;;   - the list's header (DisplayBitMap) gives the back x 0, y 0: lines 0 to 15 show the HUD, lines 16 and 17 its blank rows;
+;;   - two copper strings at lines 16 and 17 point the back's four planes at the clouds' rows (30 and 31, empty) at the clouds' x
+;;     and set BPLCON1 to the front's fine scroll and the clouds', as the band does;
+;;   - Mario is in the front playfield, so he draws in front of the HUD; the front's pen 0 is transparent, so the HUD shows through.
+;; The catch it must answer: in an area with no scenery (1-2, where the warp zone is) the game hides the back by painting its
+;; colour entries 16 to 31 as the sky. So the HUD's lines use the other colour offset: the header's BPLCON3 has the back's colour
+;; offset (PF2OF) 0, which makes back pen p colour entry p, the front's own colours, and the second string sets it to 16 again.
+;;
+;; Keys: arrows move the figure (until you touch one it moves itself, up and down through the band and sideways); Space steps
+;; the HUD list: auto (away while his top is above world row 32), HUD always, HUD never; B hides the back as 1-2 does (its colours
+;; as the sky) and shows it again; Esc quits and writes hud-in-back-results.txt.
+;;
+;; What to look at and report
+;; 1. HUD never (Space twice), the figure up in the band: is the stand-in HUD (blocks, the rule, the clock's cell with its notch
+;;    moving every 20 frames) at the top where the band was, in the right colours, with the figure in front where they cross?
+;; 2. B: with the back hidden (its colours the sky) is the HUD still there? (The offset trick.) And the clouds go and come back?
+;; 3. The clouds and hills below the HUD: any tear, jump, or wrong place at lines 16 to 18, while it scrolls?
+;; 4. The change: when the clock's notch moves, any flash or tear in the HUD?
+;; 5. In auto: does the HUD appear with the list swap?
+;; The results file has the mirror copy's cost (made only when the HUD changes) and the bob load while away.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE  = $40
+#RAW_KEY_ESC    = $45
+#RAW_KEY_UP     = $4C
+#RAW_KEY_DOWN   = $4D
+#RAW_KEY_RIGHT  = $4E
+#RAW_KEY_LEFT   = $4F
+#RAW_KEY_B      = $35
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 32
+
+;; The game's type words: 4 planes, smooth scroll, AGA colours, fetch mode 3; the world adds dual playfield.
+#HUD_FLAGS   = $13014
+#WORLD_FLAGS = $13038
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; DisplayControls XORs BPLCON3 with its current value (the default is $0c00, PF2OF 8). List 1 gets the back's colours at entries 16
+;; to 31 (PF2OF 16, $1000). List 2 starts with PF2OF 0 ($0000: back pen p is entry p) for the HUD lines, and its second string sets
+;; PF2OF 16.
+#PLAYFIELD2_OFFSET_16 = $1c00
+#PLAYFIELD2_OFFSET_0  = $0c00
+#BPLCON3_BACK  = $1000
+
+;; List 2 starts at the HUD's first line, so its first world row is the world list's, less the band and the gap.
+#AWAY_TOP    = #VIEW_TOP - (#HUD_H + #LIST_GAP)
+#AWAY_H      = #HUD_H + #LIST_GAP + #VIEW_H
+;; The line the back is the clouds from: after the HUD's 16 rows and two blank ones. The strings are at the two lines before.
+#HUD_END_LINE = 18
+
+;; Copper registers and the custom area's layout (displaylib.ab3; the strings are made like the game's band strings).
+#BPL2PTH   = $E4
+#BPL4PTH   = $EC
+#BPL6PTH   = $F4
+#BPL8PTH   = $FC
+#BPLCON1   = $102
+#BPLCON3   = $106
+#MYCOP_CUSTOMS = 28
+#HUD_CUSTOMS   = 14
+#POKE_FIRST    = 10
+#POKE_SECOND   = 34
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the figure.
+#BM_A      = 0
+#BM_B      = 1
+#BM_BACK   = 2
+#BM_HUD    = 3
+#BM_ACTOR  = 4
+#FRONT_W   = 1024
+#BACK_W    = 1152
+#WORLD_H   = 256
+#HUD_W     = 384
+
+#ACTOR_SHAPE   = 0
+#ACTOR_W       = 16
+#ACTOR_H       = 32
+#TILE          = 16
+#BOB_BYTES     = 16384
+
+#HUD_TIME_FRAMES = 20
+#WORK_LINE     = 80
+#LINES_PAL     = 312
+#SCROLL_MAX    = 640
+#ACTOR_TOP_MAX = 176
+#WORLD_X_MIN   = 24
+#WORLD_X_MAX   = 980
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+forceMode.w = 0
+spaceWasDown.w = False
+bWasDown.w = False
+backHidden.w = False
+autoPlay.w = True
+worldX.w = #WORLD_X_MIN
+actorTop.w = #ACTOR_TOP_MAX
+autoDirX.w = 1
+autoDirY.w = -1
+wantAway.w = False
+awayMode.w = False
+scrollX.q = 0
+backX.q = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+awayFrames.l = 0
+awayBobSum.l = 0
+awayBobMax.l = 0
+hudTime.w = 0
+lastHudTime.w = -1
+mirrorCount.l = 0
+mirrorSum.l = 0
+mirrorMax.l = 0
+switchCount.l = 0
+hudCustoms.l = 0
+backBytesPerRow.l = 0
+Dim backPlane.l(3)
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_ACTOR, #ACTOR_W, #ACTOR_H, 4
+
+;; 0 the sky; 1 black (the notch); 2 and 3 the ground; 4 the pillars; 7 white (the HUD); 13 skin, 14 brown, 15 red
+;; (the figure); 16 the back's pen 0 (sky), 21 and 22 the clouds and hills (the back's pens 5 and 6).
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 0, 0, 0
+AGAPalRGB 0, 2, 200, 76, 12
+AGAPalRGB 0, 3, 252, 152, 56
+AGAPalRGB 0, 4, 0, 168, 0
+AGAPalRGB 0, 7, 255, 255, 255
+AGAPalRGB 0, 13, 254, 205, 198
+AGAPalRGB 0, 14, 108, 110, 0
+AGAPalRGB 0, 15, 181, 50, 32
+AGAPalRGB 0, 16, 92, 148, 252
+AGAPalRGB 0, 21, 255, 255, 255
+AGAPalRGB 0, 22, 80, 170, 40
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+; A 16 bit value as the signed word Poke.w and Mki$ take (the game's SignedWord{}).
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+;; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels, in the playfield 1 bits (the game's ScrollPart{}).
+;; Playfield 2's part is this times 16.
+Function.l ScrollPart{delay.l}
+  Function Return(delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+;; The front: ground in pens 2 and 3, a pillar in pen 4 every 128 px, a white line in pen 7 every 64 px from row 40, so the
+;; rows where the HUD is have nothing on them.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 2
+    If columnIndex MOD 2 = 1 Then pen = 3
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 120, pillarX + 23, 207, 4
+  Next
+  For lineX.w = 0 To #FRONT_W - 1 Step 64
+    Boxf lineX, 40, lineX, 119, 7
+  Next
+End Statement
+
+;; Clouds and hills in the back's pens 5 and 6, one of each per 192 px, from row 40: rows 0 to 31 are empty, as in every strip.
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+    Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+    Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+    Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+  Next
+End Statement
+
+;; The figure, in Mario's pens: a red outline (pen 15), skin (13) and brown (14) stripes of 2 rows.
+Statement MakeActor{}
+  Use BitMap #BM_ACTOR
+  Cls 0
+  Boxf 0, 0, 15, 31, 15
+  Boxf 1, 1, 14, 30, 14
+  For stripeY.w = 1 To 29 Step 4
+    Boxf 1, stripeY, 14, stripeY + 1, 13
+  Next
+  GetaShape #ACTOR_SHAPE, 0, 0, #ACTOR_W, #ACTOR_H
+End Statement
+
+;; The back's plane addresses and the two copper strings, once, after CreateDisplay. The strings have the shape of the game's band
+;; strings (parallax.blitz.ab3): four pointer moves at line #HUD_END_LINE - 2 (planes 0 and 1) and, a line later, four more
+;; (planes 2 and 3), BPLCON1 and BPLCON3 (the back's colours at entries 16 to 31); every value is poked each frame.
+Statement InitHudBand{}
+  SHARED backPlane(), backBytesPerRow, hudCustoms
+  backBytesPerRow = Peek.w(Addr BitMap(#BM_BACK))
+  For planeIndex.w = 0 To 3
+    backPlane(planeIndex) = Peek.l(Addr BitMap(#BM_BACK) + 8 + planeIndex*4)
+  Next
+  firstString$ = Mki$(#BPL2PTH) + Mki$(0) + Mki$(#BPL2PTH + 2) + Mki$(0)
+  firstString$ = firstString$ + Mki$(#BPL4PTH) + Mki$(0) + Mki$(#BPL4PTH + 2) + Mki$(0)
+  secondString$ = Mki$(#BPL6PTH) + Mki$(0) + Mki$(#BPL6PTH + 2) + Mki$(0)
+  secondString$ = secondString$ + Mki$(#BPL8PTH) + Mki$(0) + Mki$(#BPL8PTH + 2) + Mki$(0)
+  secondString$ = secondString$ + Mki$(#BPLCON1) + Mki$(0) + Mki$(#BPLCON3) + Mki$(SignedWord{#BPLCON3_BACK})
+  CustomString 2, 0, #HUD_END_LINE - 2, firstString$
+  CustomString 2, 6, #HUD_END_LINE - 1, secondString$
+  hudCustoms = Peek.l(Addr CopList(2) + #MYCOP_CUSTOMS)
+End Statement
+
+;; A back plane's pointer for the clouds' x in quarter pixels: planes 0 and 1 for the row of line #HUD_END_LINE - 1, planes 2 and 3 for
+;; the row after it (the same split as the game's band: a line's pointers are set the line before).
+Function.l CloudPlanePointer{planeIndex.w, quarter.l}
+  SHARED backPlane(), backBytesPerRow
+  Function Return backPlane(planeIndex) + (#AWAY_TOP + #HUD_END_LINE - 1 + planeIndex/2)*backBytesPerRow + (quarter/256)*8
+End Function
+
+;; Each frame: the string values for where the camera and the clouds are.
+Statement PokeHudBand{frontQuarter.l, backQuarter.l}
+  SHARED hudCustoms
+  pointer.l = CloudPlanePointer{0, backQuarter}
+  Poke.w hudCustoms + #POKE_FIRST, SignedWord{pointer/65536}
+  Poke.w hudCustoms + #POKE_FIRST + 4, SignedWord{pointer}
+  pointer = CloudPlanePointer{1, backQuarter}
+  Poke.w hudCustoms + #POKE_FIRST + 8, SignedWord{pointer/65536}
+  Poke.w hudCustoms + #POKE_FIRST + 12, SignedWord{pointer}
+  pointer = CloudPlanePointer{2, backQuarter}
+  Poke.w hudCustoms + #POKE_SECOND, SignedWord{pointer/65536}
+  Poke.w hudCustoms + #POKE_SECOND + 4, SignedWord{pointer}
+  pointer = CloudPlanePointer{3, backQuarter}
+  Poke.w hudCustoms + #POKE_SECOND + 8, SignedWord{pointer/65536}
+  Poke.w hudCustoms + #POKE_SECOND + 12, SignedWord{pointer}
+  control.l = ScrollPart{255 - (frontQuarter AND 255)} + ScrollPart{255 - (backQuarter AND 255)}*16
+  Poke.w hudCustoms + #POKE_SECOND + 16, SignedWord{control}
+End Statement
+
+BBlitMode CookieMode
+MakeActor{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+
+;; List 0 the HUD, list 1 the world below it, list 2 the tall world list with the two HUD strings in its custom area.
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, 0
+InitCopList 2, #HUD_YPOS, #AWAY_H, #WORLD_FLAGS, 0, #COPPER_COLORS, #HUD_CUSTOMS
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+DisplayControls 2, 0, #PLAYFIELD2_OFFSET_0, 0
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 2, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+CreateDisplay 0, 1
+InitHudBand{}
+DisplayPalette 0, 0
+DisplayPalette 2, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+DisplayBitMap 2, drawBm, 0, #AWAY_TOP, #BM_BACK, 0, 0
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If spaceWasDown = False
+      forceMode = forceMode + 1
+      If forceMode > 2 Then forceMode = 0
+    EndIf
+    spaceWasDown = True
+  Else
+    spaceWasDown = False
+  EndIf
+
+  ;; B hides the back as an area with no scenery does (its colours the sky) or shows it again.
+  If RawStatus(#RAW_KEY_B)
+    If bWasDown = False
+      backHidden = NOT backHidden
+      For backPen.w = 16 To 31
+        AGAPalRGB 0, backPen, 92, 148, 252
+      Next
+      If backHidden = False
+        AGAPalRGB 0, 21, 255, 255, 255
+        AGAPalRGB 0, 22, 80, 170, 40
+      EndIf
+      DisplayPalette 0, 0
+      DisplayPalette 2, 0
+    EndIf
+    bWasDown = True
+  Else
+    bWasDown = False
+  EndIf
+
+  ;; The figure: moving itself, or by the arrows from the first touch.
+  If RawStatus(#RAW_KEY_UP) OR RawStatus(#RAW_KEY_DOWN) OR RawStatus(#RAW_KEY_LEFT) OR RawStatus(#RAW_KEY_RIGHT)
+    autoPlay = False
+  EndIf
+  If autoPlay = True
+    worldX = worldX + autoDirX
+    If worldX >= #WORLD_X_MAX Then autoDirX = -1
+    If worldX <= #WORLD_X_MIN Then autoDirX = 1
+    actorTop = actorTop + autoDirY
+    If actorTop <= 0 Then autoDirY = 1
+    If actorTop >= #ACTOR_TOP_MAX Then autoDirY = -1
+  Else
+    If RawStatus(#RAW_KEY_UP) Then actorTop = actorTop - 1
+    If RawStatus(#RAW_KEY_DOWN) Then actorTop = actorTop + 1
+    If RawStatus(#RAW_KEY_LEFT) Then worldX = worldX - 1
+    If RawStatus(#RAW_KEY_RIGHT) Then worldX = worldX + 1
+    If actorTop < 0 Then actorTop = 0
+    If actorTop > #ACTOR_TOP_MAX Then actorTop = #ACTOR_TOP_MAX
+    If worldX < #WORLD_X_MIN Then worldX = #WORLD_X_MIN
+    If worldX > #WORLD_X_MAX Then worldX = #WORLD_X_MAX
+  EndIf
+
+  ;; Away while his top is above world row 32 (straight back).
+  wantAway = False
+  If actorTop < #VIEW_TOP Then wantAway = True
+  If forceMode = 1 Then wantAway = False
+  If forceMode = 2 Then wantAway = True
+
+  ;; Whole pixels, as the game scrolls; the clouds at half the front's speed, also whole pixels.
+  scrollX = Int(worldX - 160 + 0.5*Sin(frameCount/20.0))
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+  backX = Int(scrollX/2)
+
+  ;; The stand-in HUD, redrawn when the clock changes, and then copied into the back bitmap's rows 0 to 15 (the only copy: the
+  ;; back does not scroll with the camera). Pen 0 behind (the sky in the HUD band, transparent in the world), a rule across,
+  ;; blocks where the score, coins, world and level are, and the clock's cell with a notch that moves.
+  hudTime = frameCount/#HUD_TIME_FRAMES
+  If hudTime <> lastHudTime
+    lastHudTime = hudTime
+    Use BitMap #BM_HUD
+    Cls 0
+    Boxf 8, 12, 231, 13, 7
+    Boxf 8, 0, 55, 7, 7
+    Boxf 8, 8, 55, 15, 7
+    Boxf 72, 8, 87, 15, 7
+    Boxf 112, 8, 119, 15, 7
+    Boxf 128, 8, 135, 15, 7
+    Boxf 200, 0, 223, 15, 7
+    Boxf 200 + (hudTime MOD 24), 0, 200 + (hudTime MOD 24), 15, 1
+    Use BitMap #BM_BACK
+    copyStart.l = RasterLine{}
+    Scroll 0, 0, #HUD_W, #HUD_H, 0, 0, #BM_HUD
+    While (Peek.w($dff002) AND $4000) <> 0
+    Wend
+    copyLines.l = RasterLine{} - copyStart
+    If copyLines < 0 Then copyLines = copyLines + #LINES_PAL
+    If frameCount > 0
+      mirrorCount = mirrorCount + 1
+      mirrorSum = mirrorSum + copyLines
+      If copyLines > mirrorMax Then mirrorMax = copyLines
+    EndIf
+  EndIf
+
+  ;; The bob, timed as in dual-playfield.ab3.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  BBlit drawBuf, #ACTOR_SHAPE, worldX, actorTop
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+  If awayMode = True AND frameCount >= 10
+    awayBobSum = awayBobSum + bobLines
+    If bobLines > awayBobMax Then awayBobMax = bobLines
+    awayFrames = awayFrames + 1
+  EndIf
+
+  VWait
+  ;; Both lists are given the bitmaps every frame (CreateDisplay takes effect at the next frame). List 2's back is the HUD's rows
+  ;; (x 0, y 0) at its header; its strings, poked here, take it to the clouds.
+  DisplayBitMap 1, drawBm, scrollX, #VIEW_TOP, #BM_BACK, backX, #VIEW_TOP
+  DisplayBitMap 2, drawBm, scrollX, #AWAY_TOP, #BM_BACK, 0, 0
+  PokeHudBand{Int(scrollX*4), Int(backX*4)}
+  If wantAway <> awayMode
+    If wantAway = True
+      CreateDisplay 2
+    Else
+      CreateDisplay 0, 1
+    EndIf
+    switchCount = switchCount + 1
+    awayMode = wantAway
+  EndIf
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/hud-in-back-results.txt")
+  FileOutput 0
+  NPrint "hud-in-back: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", ", frameCount, " frames"
+  NPrint "mode at exit (0 auto, 1 HUD always, 2 HUD never): ", forceMode, "; back hidden at exit: ", backHidden
+  NPrint "display switches: ", switchCount
+  If mirrorCount > 0
+    NPrint "the HUD copied into the back bitmap (only when it changes): ", mirrorCount, " copies, ", mirrorSum/mirrorCount, " lines on average, ", mirrorMax, " at worst (the blitter finishing it included)"
+  EndIf
+  If awayFrames > 0
+    NPrint "bob load while away (UnBuffer and the bob; nothing else, the HUD costs no copy a frame): ", awayFrames, " frames, average ", awayBobSum/awayFrames, ", worst ", awayBobMax
+  EndIf
+  NPrint ""
+  NPrint "The picture is the main result: report the five points at the top of the proof."
+  CloseFile 0
+EndIf
+End

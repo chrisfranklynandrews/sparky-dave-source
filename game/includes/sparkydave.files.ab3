@@ -1,0 +1,83 @@
+;; =======================================================
+;; START-UP CHECK: FILES (AMIGA MODE)
+;; =======================================================
+;; Every file the game loads, checked before the display is opened: the data drawer sits next to
+;; the program (PROGDIR:data/), and a game with a file missing says which one and stops, rather
+;; than failing in the middle of the load. The launcher script makes the same check first, so the
+;; message shows on a Workbench start too.
+
+;; The jukebox page's scenes, the look's file (tools/build_jukebox_scenes.py), read by LoadJukeboxScenes{} below (called from
+;; SparkyDave.ab3 after the start area: game-only, so here and not with the jukebox's lists in sparkydave.sound.ab3).
+jukeboxScenesBin$ = dataDir$ + "jukebox-scenes-nes.bin"
+If #LOOK_ALLSTARS = 1 Then jukeboxScenesBin$ = dataDir$ + "jukebox-scenes-allstars.bin"
+
+;; Read once at start-up, in Amiga mode, with ReadMem straight into the array (as an area file is): False if the file is missing or
+;; shorter than the scenes.
+Function.w LoadJukeboxScenes{}
+  SHARED jukeboxScenesBin$, jukeboxScenePixels()
+  If ReadFile(0, jukeboxScenesBin$) = 0 Then Function Return False
+  fileBytes.l = Lof(0)
+  If fileBytes < #JKB_SCENES*#JKB_SCENE_LONGS*4
+    CloseFile 0
+    Function Return False
+  EndIf
+  ReadMem 0, &jukeboxScenePixels(0), #JKB_SCENES*#JKB_SCENE_LONGS*4
+  CloseFile 0
+  Function Return True
+End Function
+
+Dim requiredFile$(8 + 16 + #LEVEL_MAX_AREAS)
+requiredFile$(0) = atlasIff$
+requiredFile$(1) = objectsIff$
+requiredFile$(2) = itemsIff$
+requiredFile$(3) = enemiesIff$
+requiredFile$(4) = hudIff$
+requiredFile$(5) = digitsIff$
+requiredFile$(6) = logoIff$
+requiredFile$(7) = marioIff$
+requiredFile$(8) = marioBigIff$
+; The jukebox page's scenes (LoadJukeboxScenes{}).
+requiredFile$(9) = jukeboxScenesBin$
+; And the area files of the first level (the generated area table says which).
+requiredFileCount.w = 10
+; The All-Stars look's other sets, which EnsureTileSet{} loads in play (a cover is up, but a missing file would stop the game there).
+If #LOOK_ALLSTARS = 1
+  requiredFile$(requiredFileCount) = atlasIffUnder$
+  requiredFile$(requiredFileCount + 1) = atlasIffWater$
+  requiredFile$(requiredFileCount + 2) = atlasIffCastle$
+  requiredFile$(requiredFileCount + 3) = enemiesIffUnder$
+  requiredFile$(requiredFileCount + 4) = itemsIffUnder$
+  requiredFile$(requiredFileCount + 5) = enemiesIffWater$
+  requiredFile$(requiredFileCount + 6) = itemsIffWater$
+  requiredFile$(requiredFileCount + 7) = enemiesIffCastle$
+  requiredFile$(requiredFileCount + 8) = itemsIffCastle$
+  requiredFileCount = requiredFileCount + 9
+EndIf
+; The All-Stars Mario's sprite sheets (LoadMario{}).
+If #MARIO_SPRITE_COLOURS = 15
+  requiredFile$(requiredFileCount) = marioSpriteIff$
+  requiredFile$(requiredFileCount + 1) = marioSpriteBigIff$
+  requiredFile$(requiredFileCount + 2) = marioSpriteSwimIff$
+  requiredFileCount = requiredFileCount + 3
+EndIf
+For areaSlot.w = 0 To tableLevelAreaCount(0) - 1
+  requiredFile$(requiredFileCount) = AreaFilePath{tableAreaFile$(tableLevelAreas(areaSlot))}
+  requiredFileCount = requiredFileCount + 1
+Next
+
+missingFiles.w = 0
+For fileIndex.w = 0 To requiredFileCount - 1
+  If Exists(requiredFile$(fileIndex)) = 0 Then missingFiles = missingFiles + 1
+Next
+If missingFiles > 0
+  NPrint "Sparky Dave cannot start: ", missingFiles, " of its data files are missing."
+  For fileIndex = 0 To requiredFileCount - 1
+    If Exists(requiredFile$(fileIndex)) = 0 Then NPrint "  missing: ", requiredFile$(fileIndex)
+  Next
+  NPrint "The data drawer must sit next to the program, as it was in the archive."
+  ; Up for a while (about 8 seconds), so a Workbench start's window does not close before it can be read.
+  VWait 400
+  End
+EndIf
+
+;; END OF START-UP CHECK: FILES (AMIGA MODE) (BLITZ MODE)

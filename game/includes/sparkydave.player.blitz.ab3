@@ -1,0 +1,1546 @@
+;; =======================================================
+;; PLAYER (BLITZ MODE)
+;; =======================================================
+;; NES Super Mario Bros ground movement and jump.
+;; Horizontal speed is a signed byte, in sixteenths of a pixel per tick.
+;; The camera uses the whole pixels that tick actually moved.
+
+;; The blocked-direction mask, applied to the read and not to the physics.
+;;
+;; Delta 8 in the main project's PLAYER_HITBOX note. The ROM clears Player_CollisionBits to $ff every frame and ANDs it
+;; into the joypad reads, so a direction a wall blocked last frame is not read as input at all. It is applied
+;; at the read, not inside ApplyHorizontalFriction{}, because PrepareGroundMotion{}, SetupHorizontalLimits{}
+;; and ApplyPlayerFacing{} also read the input and need the masked value.
+;;
+;; A Statement of its own, so the test harness calls the same masking as the live loop.
+;; UpdatePlayer{} resets the byte every frame, including the pole and resize frames that return before the read.
+Statement ApplyCollisionButtonMask{}
+  SHARED playerButtons, playerCollisionBits
+  playerButtons = playerButtons AND playerCollisionBits
+End Statement
+
+;; The run and fire bits for two buttons held. Classic (splitNow False): either button is both,
+;; as the cartridge's B is. Split: the run button is run only, the fire button fire only.
+;; Pure, so the tests can call it.
+Function.w ActionBitsFor{runDown.w, fireDown.w, splitNow.w}
+  actionBits.w = 0
+  If splitNow = False
+    If runDown <> False OR fireDown <> False Then actionBits = #MARIO_BTN_RUN + #MARIO_BTN_FIRE
+  Else
+    If runDown <> False Then actionBits = #MARIO_BTN_RUN
+    If fireDown <> False Then actionBits = actionBits + #MARIO_BTN_FIRE
+  EndIf
+  Function Return actionBits
+End Function
+
+;; The keyboard's: Ctrl is the run key, either Alt the fire key. Split (three keys: jump, run, fire) in the KEYBOARD 3 KEY choice;
+;; classic in 2 KEY.
+Function.w ActionButtonBits{runKeyDown.w, fireKeyDown.w}
+  SHARED keyboardMode
+  splitNow.w = False
+  If keyboardMode = #KEYBOARD_THREE_KEY Then splitNow = True
+  Function Return ActionBitsFor{runKeyDown, fireKeyDown, splitNow}
+End Function
+
+;; What one joystick is doing, as button bits (cartridge-shaped, plus the fire and up bits), for the JOYSTICK choice modeNow. stickX
+;; is -1 left, 0, 1 right and stickY -1 up, 0, 1 down (Joyx{} and Joyy{}); buttonBits is Joyb{}'s (1 button 1, the fire button and a
+;; CD32 pad's red; 2 button 2, a pad's blue). Pure, so the tests can call it.
+;;   2 button  button 1 jumps, button 2 runs and fires (a classic B), as the NES pad's A and B are laid out
+;;   1 button  the stick up jumps, the button runs and fires; button 2 does nothing
+;; The stick gives left, right, down (the pipe, the crouch) and up (the vine) in both; right wins over left.
+Function.w JoystickBitsFor{modeNow.w, stickX.w, stickY.w, buttonBits.w}
+  bitsNow.w = 0
+  If stickX > 0 Then bitsNow = #MARIO_BTN_RIGHT
+  If stickX < 0 Then bitsNow = #MARIO_BTN_LEFT
+  If stickY > 0 Then bitsNow = bitsNow + #MARIO_BTN_DOWN
+  If stickY < 0 Then bitsNow = bitsNow + #MARIO_BTN_UP
+  If modeNow = #JOYSTICK_ONE_BUTTON
+    If stickY < 0 Then bitsNow = bitsNow + #MARIO_BTN_JUMP
+    bitsNow = bitsNow + ActionBitsFor{buttonBits AND 1, False, False}
+  Else
+    If (buttonBits AND 1) <> 0 Then bitsNow = bitsNow + #MARIO_BTN_JUMP
+    bitsNow = bitsNow + ActionBitsFor{buttonBits AND 2, False, False}
+  EndIf
+  Function Return bitsNow
+End Function
+
+;; The joystick, in the joystick port (#JOY_PORT), read from the hardware once a frame (ReadControls{}; GAMEIOLIB's Joyx, Joyy and
+;; Joyb), before anything reads it.
+Statement UpdateJoystick{}
+  SHARED joystickX, joystickY, joystickButtonBits
+  joystickX = Joyx(#JOY_PORT)
+  joystickY = Joyy(#JOY_PORT)
+  joystickButtonBits = Joyb(#JOY_PORT)
+End Statement
+
+;; The joystick as button bits (JoystickBitsFor{}, as this frame's UpdateJoystick{} left it). withStick False reads the buttons only
+;; (the course clear: the 1 button choice's stick up is its jump, and a stick moved is not a press).
+Function.w ReadJoystickBits{withStick.w}
+  SHARED joystickMode, joystickX, joystickY, joystickButtonBits
+  If withStick = False Then Function Return JoystickBitsFor{joystickMode, 0, 0, joystickButtonBits}
+  Function Return JoystickBitsFor{joystickMode, joystickX, joystickY, joystickButtonBits}
+End Function
+
+; The stick's direction on one axis (#MENU_AXIS_*), for the menus: -1, 0 or 1.
+Function.w JoystickAxis{axisIndex.w}
+  SHARED joystickX, joystickY
+  If axisIndex = #MENU_AXIS_VERTICAL Then Function Return joystickY
+  Function Return joystickX
+End Function
+
+; Start for the screens and menus: Return (the pause is PauseDown{}).
+Function.w StartDown{}
+  If RawStatus(#RAW_KEY_START) <> 0 Then Function Return True
+  Function Return False
+End Function
+
+;; Start for the screens (the title, game over, the course clear, the menus): Return, or either joystick button (a CD32 pad's red or
+;; blue), as a joystick has no Return to press. A button held when a screen comes up does not count there (coverStartHeld), so a run
+;; held through a death skips nothing.
+Function.w ScreenStartDown{}
+  SHARED joystickButtonBits
+  If StartDown{} = True Then Function Return True
+  If (joystickButtonBits AND 3) <> 0 Then Function Return True
+  Function Return False
+End Function
+
+;; The pause: the PAUSE key (P unless redefined, keyMap(#KEY_PAUSE)). No joystick button pauses: a stick's buttons are jump and run,
+;; and a CD32 pad's play button is not read (a pad is read as a 2 button stick). A player with no keyboard (on the A500 Mini, say)
+;; can map a pad button to the P key in the machine's own settings (game/release/Readme.txt).
+Function.w PauseDown{}
+  SHARED keyMap()
+  If RawStatus(keyMap(#KEY_PAUSE)) <> 0 Then Function Return True
+  Function Return False
+End Function
+
+; Step the KEYBOARD choice (2 KEY, 3 KEY), direction -1 or 1, round.
+Statement ChangeKeyboardMode{direction.w}
+  SHARED keyboardMode, settingsDirty
+  keyboardMode = (keyboardMode + direction + #KEYBOARD_MODES) MOD #KEYBOARD_MODES
+  settingsDirty = True
+End Statement
+
+; Step the JOYSTICK choice (2 BUTTON, 1 BUTTON), direction -1 or 1, round.
+Statement ChangeJoystickMode{direction.w}
+  SHARED joystickMode, settingsDirty
+  joystickMode = (joystickMode + direction + #JOYSTICK_MODES) MOD #JOYSTICK_MODES
+  settingsDirty = True
+End Statement
+
+;; True if no action has been given the Right Alt key, so it can be a second fire key. Pure on
+;; keyMap(), so the tests can call it.
+Function.w RightAltIsSpare{}
+  SHARED keyMap()
+  spare.w = True
+  For index.w = 0 To #KEY_COUNT - 1
+    If keyMap(index) = #RAW_KEY_RALT Then spare = False
+  Next
+  Function Return spare
+End Function
+
+;; The crouch (PlayerMovementSubs, smbdis 5875, and the pad read at 5575 to 5590). Down held on
+;; the ground clears Left and Right, so he cannot walk while it is held, and for a big Mario
+;; sets the crouch flag. The flag is left as it is in the air (a crouch jump stays crouched until
+;; he lands), cleared for a small Mario, and set again from Down on the ground. After the button
+;; read and before the fireball, as the cartridge's order is.
+Statement UpdateCrouch{}
+  SHARED playerCrouching, playerIsBig, playerOnGround, playerButtons
+  downHeld.w = False
+  If (playerButtons AND #MARIO_BTN_DOWN) <> 0 Then downHeld = True
+  If downHeld <> False AND playerOnGround = True
+    playerButtons = playerButtons AND (255 - #MARIO_BTN_LEFT - #MARIO_BTN_RIGHT)
+  EndIf
+  If playerIsBig = False
+    playerCrouching = False
+  Else
+    If playerOnGround = True Then playerCrouching = downHeld
+  EndIf
+End Statement
+
+;; The keyboard's jump, run and fire keys as button bits (as redefined): the jump key, and the run key and the fire key (Ctrl and
+;; Left Alt as they come; Right Alt is a second fire key while the fire key is still Left Alt and no other action has Right Alt);
+;; classic makes each of the last two both. For the game (ReadPlayerButtons{}) and the course clear (CourseClearContinueDown{}).
+Function.w KeyboardActionBits{}
+  SHARED keyMap()
+  actionBits.w = 0
+  If RawStatus(keyMap(#KEY_JUMP)) Then actionBits = #MARIO_BTN_JUMP
+  fireKeyDown.w = RawStatus(keyMap(#KEY_FIRE))
+  If keyMap(#KEY_FIRE) = #RAW_KEY_ALT
+    If RightAltIsSpare{} <> False Then fireKeyDown = fireKeyDown OR RawStatus(#RAW_KEY_RALT)
+  EndIf
+  Function Return actionBits OR ActionButtonBits{RawStatus(keyMap(#KEY_RUN)), fireKeyDown}
+End Function
+
+Statement ReadPlayerButtons{}
+  SHARED playerButtons, keyMap()
+  playerButtons = 0
+  If RawStatus(keyMap(#KEY_RIGHT)) Then playerButtons = playerButtons OR #MARIO_BTN_RIGHT
+  If RawStatus(keyMap(#KEY_LEFT))
+    If (playerButtons AND #MARIO_BTN_RIGHT) = 0 Then playerButtons = playerButtons OR #MARIO_BTN_LEFT
+  EndIf
+  If RawStatus(keyMap(#KEY_DOWN)) Then playerButtons = playerButtons OR #MARIO_BTN_DOWN
+  If RawStatus(keyMap(#KEY_UP)) Then playerButtons = playerButtons OR #MARIO_BTN_UP
+  playerButtons = playerButtons OR KeyboardActionBits{}
+  ;; The joysticks add to the keyboard; if two give a direction, right wins, as it does
+  ;; between the arrow keys.
+  playerButtons = playerButtons OR ReadJoystickBits{True}
+  If (playerButtons AND #MARIO_BTN_RIGHT) <> 0 Then playerButtons = playerButtons AND (255 - #MARIO_BTN_LEFT)
+  ApplyCollisionButtonMask{}
+End Statement
+
+;; Going on from the course clear ("PRESS FIRE TO CONTINUE"): the screens' start (ScreenStartDown{}: Return, either joystick button),
+;; or any of the player's jump, run and fire buttons, on the keyboard (KeyboardActionBits{}, as the game reads them) or either
+;; joystick, its buttons only (not the 1 button choice's stick up). Read here, not from playerButtons,
+;; which the sim does not update while the course clear holds the world still.
+Function.w CourseClearContinueDown{}
+  If ScreenStartDown{} = True Then Function Return True
+  If KeyboardActionBits{} <> 0 Then Function Return True
+  If ReadJoystickBits{False} <> 0 Then Function Return True
+  Function Return False
+End Function
+
+Statement SetPlayerAbsoluteSpeed{}
+  SHARED playerSpeedX, playerSpeedAbsolute
+  playerSpeedAbsolute = playerSpeedX
+  If playerSpeedAbsolute < 0 Then playerSpeedAbsolute = 0 - playerSpeedAbsolute
+End Statement
+
+Statement PrepareGroundMotion{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerAnimPeriod
+  SHARED playerButtons, playerMovingDirection, playerFacingDirection, playerSpeedX, playerMoveForceX
+  If playerOnGround = False Then Statement Return
+  If playerSpeedAbsolute >= #MARIO_SPD_RUNFLAG
+    playerRunningSpeed = playerSpeedAbsolute
+    playerAnimPeriod = #MARIO_ANIM_FAST
+    Statement Return
+  EndIf
+  playerAnimPeriod = #MARIO_ANIM_SLOW
+  If playerSpeedAbsolute >= #MARIO_SPD_ANIM Then playerAnimPeriod = #MARIO_ANIM_MID
+  ;; Holding no button other than A leaves playerRunningSpeed alone (the fire bit is not one: it
+  ;; is this game's, not the cartridge's), matching
+  ;; GetPlayerAnimSpeed. The latch only drops on a held direction that equals
+  ;; playerMovingDirection under #MARIO_SPD_RUNFLAG.
+  heldBits.w = playerButtons AND ($7f - #MARIO_BTN_FIRE)
+  If heldBits = 0 Then Statement Return
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = playerMovingDirection
+    playerRunningSpeed = 0
+    Statement Return
+  EndIf
+  If playerSpeedAbsolute < #MARIO_SPD_SKIDSTOP
+    playerMovingDirection = playerFacingDirection
+    playerSpeedX = 0
+    playerMoveForceX = 0
+    playerSpeedAbsolute = 0
+  EndIf
+End Statement
+
+Statement ApplyPlayerFacing{}
+  SHARED playerOnGround, playerButtons, playerFacingDirection, playerFacing
+  If playerOnGround = False Then Statement Return
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = 0 Then Statement Return
+  playerFacingDirection = directionBits
+  If playerFacingDirection = #MARIO_BTN_LEFT Then playerFacing = #MARIO_FACE_LEFT
+  If playerFacingDirection = #MARIO_BTN_RIGHT Then playerFacing = #MARIO_FACE_RIGHT
+End Statement
+
+;; The jump starts on a fresh press (held last tick: no) with the ground under him, as the cartridge's
+;; does, plus two things it does not (the main project's PLAYER_PHYSICS note, "Jump forgiveness"; both off
+;; with a window of 0):
+;;   buffering  a fresh press in the air is remembered for jumpBufferWindow ticks and starts the
+;;              jump on the first tick he can jump, held or not by then. A button held since
+;;              before he left the ground is not a fresh press, so it never re-jumps.
+;;   coyote     for coyoteWindow ticks after he leaves the ground without jumping (a ledge), a
+;;              fresh press still jumps. Rising (a jump, a stomp bounce) ends it.
+;; Each timer is set one above its window and counted down at the top of the tick, so the window
+;; is that many ticks exactly.
+Statement TryStartJump{}
+  SHARED playerOnGround, playerButtons, playerButtonsLast, playerSpeedAbsolute
+  SHARED playerY, playerJumpOriginY, playerFractionY, playerMoveForceY, playerSpeedY
+  SHARED playerVerticalForce, playerFallForce, playerIsBig
+  SHARED jumpBufferWindow, coyoteWindow, jumpBufferTimer, coyoteTimer
+  If jumpBufferTimer > 0 Then jumpBufferTimer = jumpBufferTimer - 1
+  If playerOnGround = True
+    coyoteTimer = 0
+    If coyoteWindow > 0 Then coyoteTimer = coyoteWindow + 1
+  Else
+    If coyoteTimer > 0 Then coyoteTimer = coyoteTimer - 1
+    If playerSpeedY < 0 Then coyoteTimer = 0
+  EndIf
+  jumpNow.w = playerButtons AND #MARIO_BTN_JUMP
+  previousJump.w = playerButtonsLast AND #MARIO_BTN_JUMP
+  freshPress.w = False
+  If jumpNow <> 0 AND previousJump = 0 Then freshPress = True
+  canJump.w = playerOnGround
+  If playerOnGround = False AND coyoteTimer > 0 Then canJump = True
+  If canJump = False
+    If freshPress <> False AND jumpBufferWindow > 0 Then jumpBufferTimer = jumpBufferWindow + 1
+    Statement Return
+  EndIf
+  startNow.w = freshPress
+  If jumpBufferTimer > 0 Then startNow = True
+  If startNow = False Then Statement Return
+  jumpBufferTimer = 0
+  coyoteTimer = 0
+  playerOnGround = False
+  ; The cartridge's sizes are backwards in its names: big Mario plays #SFX_BIG_JUMP.
+  If playerIsBig = True
+    SoundSquare1{#SFX_BIG_JUMP}
+  Else
+    SoundSquare1{#SFX_SMALL_JUMP}
+  EndIf
+  playerJumpOriginY = playerY
+  playerFractionY = 0
+  ; The band's speed, rise force, fall force and start force (InitJS, smbdis 6103 to 6121).
+  playerMoveForceY = #MARIO_JUMP_INITFORCE_0
+  playerSpeedY = #MARIO_JUMP_SLOW
+  playerVerticalForce = #MARIO_GRAV_RISE_0
+  playerFallForce = #MARIO_GRAV_FALL_0
+  If playerSpeedAbsolute >= #MARIO_SPD_JUMPWALK
+    playerMoveForceY = #MARIO_JUMP_INITFORCE_1
+    playerVerticalForce = #MARIO_GRAV_RISE_1
+    playerFallForce = #MARIO_GRAV_FALL_1
+  EndIf
+  If playerSpeedAbsolute >= #MARIO_SPD_JUMPFAST
+    playerMoveForceY = #MARIO_JUMP_INITFORCE_2
+    playerSpeedY = #MARIO_JUMP_FAST
+    playerVerticalForce = #MARIO_GRAV_RISE_2
+    playerFallForce = #MARIO_GRAV_FALL_2
+  EndIf
+End Statement
+
+Statement SetupHorizontalLimits{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerButtons, playerMovingDirection
+  SHARED playerRunningTimer, playerMaximumLeft, playerMaximumRight
+  SHARED playerFrictionLow, playerFrictionHigh, playerFacingDirection
+  frictionBand.w = 0
+  speedBand.w = 0
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If playerOnGround = False
+    If playerSpeedAbsolute < #MARIO_SPD_AIR
+      speedBand = 1
+      frictionBand = 1
+      If playerRunningSpeed <> 0 Then frictionBand = 2
+    EndIf
+  Else
+    If directionBits = playerMovingDirection
+      runBits.w = playerButtons AND #MARIO_BTN_RUN
+      If runBits <> 0
+        playerRunningTimer = #MARIO_RUN_TIME
+      Else
+        If playerRunningTimer = 0
+          speedBand = 1
+          frictionBand = 1
+        EndIf
+      EndIf
+    Else
+      speedBand = 1
+      frictionBand = 1
+    EndIf
+    If speedBand = 1
+      If playerRunningSpeed <> 0
+        frictionBand = 2
+      Else
+        If playerSpeedAbsolute >= #MARIO_SPD_FASTFRIC Then frictionBand = 2
+      EndIf
+    EndIf
+  EndIf
+  playerMaximumRight = #MARIO_MAX_RUN
+  playerMaximumLeft = 0 - #MARIO_MAX_RUN
+  If speedBand = 1
+    playerMaximumRight = #MARIO_MAX_WALK
+    playerMaximumLeft = 0 - #MARIO_MAX_WALK
+  EndIf
+  playerFrictionLow = #MARIO_FRIC_FAST
+  playerFrictionHigh = #MARIO_FRIC_HIGH
+  If frictionBand = 1 Then playerFrictionLow = #MARIO_FRIC_WALK
+  If frictionBand = 2 Then playerFrictionLow = #MARIO_FRIC_TURN
+  If playerFacingDirection <> playerMovingDirection
+    ; The pair doubled (asl low, rol high, smbdis 6188 onward).
+    playerFrictionLow = playerFrictionLow*2
+    playerFrictionHigh = playerFrictionHigh*2
+    If playerFrictionLow >= 256
+      playerFrictionLow = playerFrictionLow - 256
+      playerFrictionHigh = playerFrictionHigh + 1
+    EndIf
+  EndIf
+End Statement
+
+Statement ApplyHorizontalFriction{}
+  SHARED playerOnGround, playerButtons, playerSpeedX, playerMoveForceX
+  SHARED playerMaximumLeft, playerMaximumRight, playerFrictionLow, playerFrictionHigh, playerSpeedAbsolute
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If playerOnGround = False
+    If directionBits = 0 Then Statement Return
+  EndIf
+  If directionBits = 0
+    If playerSpeedX = 0
+      playerSpeedAbsolute = 0
+      Statement Return
+    EndIf
+    If playerSpeedX > 0
+      directionBits = #MARIO_BTN_LEFT
+    Else
+      directionBits = #MARIO_BTN_RIGHT
+    EndIf
+  EndIf
+  rightBits.w = directionBits AND #MARIO_BTN_RIGHT
+  frictionCarry.w = 0
+  If rightBits <> 0
+    playerMoveForceX = playerMoveForceX + playerFrictionLow
+    If playerMoveForceX >= 256
+      playerMoveForceX = playerMoveForceX - 256
+      frictionCarry = 1
+    EndIf
+    playerSpeedX = playerSpeedX + playerFrictionHigh + frictionCarry
+    If playerSpeedX > playerMaximumRight Then playerSpeedX = playerMaximumRight
+  Else
+    playerMoveForceX = playerMoveForceX - playerFrictionLow
+    If playerMoveForceX < 0
+      playerMoveForceX = playerMoveForceX + 256
+      frictionCarry = 1
+    EndIf
+    playerSpeedX = playerSpeedX - playerFrictionHigh - frictionCarry
+    If playerSpeedX < playerMaximumLeft Then playerSpeedX = playerMaximumLeft
+  EndIf
+  playerSpeedAbsolute = playerSpeedX
+  If playerSpeedAbsolute < 0 Then playerSpeedAbsolute = 0 - playerSpeedAbsolute
+End Statement
+
+Statement MovePlayerHorizontal{}
+  SHARED playerSpeedX, playerFractionX, playerX
+  speedAbsolute.w = playerSpeedX
+  If speedAbsolute < 0 Then speedAbsolute = 0 - speedAbsolute
+  fractionAdd.w = (speedAbsolute AND $0f)*16
+  pixelAdd.w = speedAbsolute/16
+  If playerSpeedX >= 0
+    playerFractionX = playerFractionX + fractionAdd
+    If playerFractionX >= 256
+      playerFractionX = playerFractionX - 256
+      pixelAdd = pixelAdd + 1
+    EndIf
+  Else
+    If playerFractionX >= fractionAdd
+      playerFractionX = playerFractionX - fractionAdd
+    Else
+      playerFractionX = playerFractionX + 256 - fractionAdd
+      pixelAdd = pixelAdd + 1
+    EndIf
+    pixelAdd = 0 - pixelAdd
+  EndIf
+  playerX = playerX + pixelAdd
+End Statement
+
+Statement SetPlayerMovingDirection{}
+  SHARED playerSpeedX, playerMovingDirection
+  If playerSpeedX > 0 Then playerMovingDirection = #MARIO_BTN_RIGHT
+  If playerSpeedX < 0 Then playerMovingDirection = #MARIO_BTN_LEFT
+End Statement
+
+Statement SelectVerticalForce{}
+  SHARED playerOnGround, playerSpeedY, playerVerticalForce, playerFallForce
+  SHARED playerButtons, playerButtonsLast, playerJumpOriginY, playerY, springLaunch
+  ;; A jumpspring's bounce is in the falling state, not the jumping one (PlayerBGCollision, smbdis 11913, turns the normal state
+  ;; into falling every frame and a rising player is not put back): FallingSub, 5915, dumps the fall force into the vertical force
+  ;; each frame, whether the jump key is held or not. Only the first tick after the spring lets him go has the force it set.
+  If springLaunch <> 0
+    If playerOnGround = True
+      springLaunch = 0
+    Else
+      If springLaunch = 1
+        springLaunch = 2
+      Else
+        playerVerticalForce = playerFallForce
+      EndIf
+      Statement Return
+    EndIf
+  EndIf
+  If playerOnGround = True Then Statement Return
+  If playerSpeedY >= 0
+    playerVerticalForce = playerFallForce
+    Statement Return
+  EndIf
+  jumpNow.w = playerButtons AND #MARIO_BTN_JUMP
+  previousJump.w = playerButtonsLast AND #MARIO_BTN_JUMP
+  If jumpNow <> 0
+    If previousJump <> 0 Then Statement Return
+  EndIf
+  risenPixels.w = playerJumpOriginY - playerY
+  If risenPixels >= #MARIO_JUMP_HALT Then playerVerticalForce = playerFallForce
+End Statement
+
+;; ImposeGravity (smbdis 7704) for the player, with a force and a top speed: the move force carried into the position, then
+;; the force into the speed, capped. MovePlayerVertical{} is it with the vertical force and #MARIO_FALL_MAX; a whirlpool
+;; (ProcessWhirlpools{}) adds a second step with its own pull and a top speed of 1.
+Statement ImposePlayerGravity{gravityForce.w, maxSpeed.w}
+  SHARED playerY, playerSpeedY, playerMoveForceY, playerFractionY
+  playerFractionY = playerFractionY + playerMoveForceY
+  yCarry.w = 0
+  If playerFractionY >= 256
+    playerFractionY = playerFractionY - 256
+    yCarry = 1
+  EndIf
+  playerY = playerY + playerSpeedY + yCarry
+  playerMoveForceY = playerMoveForceY + gravityForce
+  If playerMoveForceY >= 256
+    playerMoveForceY = playerMoveForceY - 256
+    playerSpeedY = playerSpeedY + 1
+  EndIf
+  If playerSpeedY >= maxSpeed
+    If playerMoveForceY >= #MARIO_FALL_FRAC
+      playerSpeedY = maxSpeed
+      playerMoveForceY = 0
+    EndIf
+  EndIf
+End Statement
+
+Statement MovePlayerVertical{}
+  SHARED playerVerticalForce
+  ImposePlayerGravity{playerVerticalForce, #MARIO_FALL_MAX}
+End Statement
+
+;; ---------------------------------------------------------------
+;; Swimming (a water area: the main project's PLAYER_PHYSICS note, "Swimming")
+;; ---------------------------------------------------------------
+
+;; A stroke (ProcJumping and InitJS, smbdis 6066 to 6131, with SwimmingFlag set): a fresh press strokes from the sea floor,
+;; and in the water too unless he is still rising from the last one after the stroke timer has run out. In a whirlpool
+;; (last tick's flag) the weaker stroke. Above the surface he does not rise from it. No jump forgiveness in water.
+Statement TryStartSwim{}
+  SHARED playerOnGround, playerButtons, playerButtonsLast, playerY, playerJumpOriginY, playerFractionY
+  SHARED playerMoveForceY, playerSpeedY, playerVerticalForce, playerFallForce, jumpSwimTimer, whirlpoolFlag
+  jumpNow.w = playerButtons AND #MARIO_BTN_JUMP
+  previousJump.w = playerButtonsLast AND #MARIO_BTN_JUMP
+  If jumpNow = 0 Then Statement Return
+  If previousJump <> 0 Then Statement Return
+  If playerOnGround = False
+    If jumpSwimTimer = 0 AND playerSpeedY < 0 Then Statement Return
+  EndIf
+  jumpSwimTimer = #SWIM_STROKE_TICKS
+  playerFractionY = 0
+  playerJumpOriginY = playerY
+  playerOnGround = False
+  If whirlpoolFlag <> False
+    playerVerticalForce = #WHIRL_RISE_FORCE
+    playerFallForce = #WHIRL_FALL_FORCE
+    playerMoveForceY = #WHIRL_INITFORCE
+    playerSpeedY = #WHIRL_SPEED
+  Else
+    playerVerticalForce = #SWIM_RISE_FORCE
+    playerFallForce = #SWIM_FALL_FORCE
+    playerMoveForceY = #SWIM_INITFORCE
+    playerSpeedY = #SWIM_SPEED
+  EndIf
+  SoundSquare1{#SFX_ENEMY_STOMP}
+  If playerY < #SWIM_SURFACE_Y Then playerSpeedY = 0
+End Statement
+
+;; The horizontal limits in water (X_Physics, 6132): in the water the land's air rows; on the sea floor the third row
+;; (ProcPRun branches past the run for a water area), which only water uses, and no running timer.
+Statement SetupSwimLimits{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerMaximumLeft, playerMaximumRight
+  SHARED playerFrictionLow, playerFrictionHigh, playerFacingDirection, playerMovingDirection
+  If playerOnGround = False
+    SetupHorizontalLimits{}
+    Statement Return
+  EndIf
+  frictionBand.w = 1
+  If playerRunningSpeed <> 0 Then frictionBand = 2
+  If playerSpeedAbsolute >= #MARIO_SPD_FASTFRIC Then frictionBand = 2
+  playerMaximumRight = #MARIO_MAX_SEAFLOOR
+  playerMaximumLeft = 0 - #MARIO_MAX_SEAFLOOR
+  playerFrictionLow = #MARIO_FRIC_WALK
+  If frictionBand = 2 Then playerFrictionLow = #MARIO_FRIC_TURN
+  playerFrictionHigh = #MARIO_FRIC_HIGH
+  If playerFacingDirection <> playerMovingDirection
+    playerFrictionLow = playerFrictionLow*2
+    playerFrictionHigh = playerFrictionHigh*2
+    If playerFrictionLow >= 256
+      playerFrictionLow = playerFrictionLow - 256
+      playerFrictionHigh = playerFrictionHigh + 1
+    EndIf
+  EndIf
+End Statement
+
+;; GetPlayerAnimSpeed runs in the water too (ProcSwim, 5938): the frame timing, the running-speed latch and the turn on the
+;; spot under #MARIO_SPD_SKIDSTOP. PrepareGroundMotion{} is it, gated on the ground; this is the same with no gate.
+Statement SwimAnimSpeed{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerAnimPeriod
+  SHARED playerButtons, playerMovingDirection, playerFacingDirection, playerSpeedX, playerMoveForceX
+  If playerOnGround = True
+    PrepareGroundMotion{}
+    Statement Return
+  EndIf
+  If playerSpeedAbsolute >= #MARIO_SPD_RUNFLAG
+    playerRunningSpeed = playerSpeedAbsolute
+    playerAnimPeriod = #MARIO_ANIM_FAST
+    Statement Return
+  EndIf
+  playerAnimPeriod = #MARIO_ANIM_SLOW
+  If playerSpeedAbsolute >= #MARIO_SPD_ANIM Then playerAnimPeriod = #MARIO_ANIM_MID
+  heldBits.w = playerButtons AND ($7f - #MARIO_BTN_FIRE)
+  If heldBits = 0 Then Statement Return
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = playerMovingDirection
+    playerRunningSpeed = 0
+    Statement Return
+  EndIf
+  If playerSpeedAbsolute < #MARIO_SPD_SKIDSTOP
+    playerMovingDirection = playerFacingDirection
+    playerSpeedX = 0
+    playerMoveForceX = 0
+    playerSpeedAbsolute = 0
+  EndIf
+End Statement
+
+; In the water he turns to face the way pressed (ProcSwim's LRWater, 5945); on land only on the ground.
+Statement ApplySwimFacing{}
+  SHARED playerButtons, playerFacingDirection, playerFacing
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = 0 Then Statement Return
+  playerFacingDirection = directionBits
+  If playerFacingDirection = #MARIO_BTN_LEFT Then playerFacing = #MARIO_FACE_LEFT
+  If playerFacingDirection = #MARIO_BTN_RIGHT Then playerFacing = #MARIO_FACE_RIGHT
+End Statement
+
+;; JumpSwimSub (5922): the stroke's rise force while the button is held or he has not yet risen a pixel, else the fall
+;; force (SelectVerticalForce{}, the land jump's rule); and above the surface the surface force, whatever he is doing
+;; (ProcSwim, 5939). SelectVerticalForce{} runs on the sea floor too, as on land: standing is what clears a jumpspring's
+;; latch (springLaunch), which would otherwise take the rise force from every stroke after it.
+Statement SelectSwimForce{}
+  SHARED playerOnGround, playerY, playerVerticalForce
+  SelectVerticalForce{}
+  If playerOnGround = True Then Statement Return
+  If playerY < #SWIM_SURFACE_Y Then playerVerticalForce = #SWIM_SURFACE_FORCE
+End Statement
+
+;; ProcessWhirlpools and WhirlpoolActivate (6494 to 6567), after the player's move: inside a span (its left edge to its
+;; right edge, both in) every other tick a pixel toward the middle (toward the right only if nothing blocks him there),
+;; and every tick a second vertical step with the pull's force and a top speed of 1. The flag is the next stroke's.
+Statement ProcessWhirlpools{}
+  SHARED playerX, playerCollisionBits, whirlpoolFlag, whirlpoolTick
+  SHARED whirlpoolLeftX(), whirlpoolWidth(), whirlpoolCount
+  whirlpoolFlag = False
+  whirlpoolTick = whirlpoolTick + 1
+  For whirlpoolIndex.w = 0 To whirlpoolCount - 1
+    leftX.w = whirlpoolLeftX(whirlpoolIndex)
+    If playerX >= leftX AND playerX <= leftX + whirlpoolWidth(whirlpoolIndex)
+      centreX.w = leftX + whirlpoolWidth(whirlpoolIndex)/2
+      If (whirlpoolTick AND 1) <> 0
+        If playerX > centreX
+          ;; Unchecked, as the cartridge's (WhirlpoolActivate tests the collision bits only for the pull right): a wall is met by the
+          ;; next tick's side check, as there.
+          playerX = playerX - 1
+        Else
+          If (playerCollisionBits AND 1) <> 0 Then playerX = playerX + 1
+        EndIf
+      EndIf
+      ImposePlayerGravity{#WHIRL_PULL_FORCE, 1}
+      whirlpoolFlag = True
+      Statement Return
+    EndIf
+  Next
+End Statement
+
+;; Dying (PlayerDeath, smbdis 5766). Everything else is already stopped: UpdatePlayer{}
+;; returns before the camera, the collision and UpdateObjects{}, so the world holds
+;; still. A hop death is held for #DEATH_FREEZE_TICKS, then he falls under
+;; #DEATH_FALL_FORCE with no tile collision, from his jump speed. Once he is below
+;; #DEATH_FALL_Y (#PIT_FALL_Y for a pit) the life is lost. After that, only the
+;; game-over countdown runs, here, because the sim is what keeps ticking.
+Statement UpdateDeath{}
+  SHARED playerY, playerVerticalForce, deathKind, deathTimer, lifeEvent
+  If lifeEvent <> #LIFE_NONE Then Statement Return
+  deathTimer = deathTimer + 1
+  If deathKind = #DEATH_HOP
+    If deathTimer <= #DEATH_FREEZE_TICKS Then Statement Return
+  EndIf
+  playerVerticalForce = #DEATH_FALL_FORCE
+  MovePlayerVertical{}
+  fallLimit.w = #DEATH_FALL_Y
+  If deathKind = #DEATH_PIT Then fallLimit = #PIT_FALL_Y
+  If playerY >= fallLimit Then ResolveLifeLost{}
+End Statement
+
+Statement UpdatePlayerAnimation{}
+  SHARED playerOnGround, playerButtons, playerSpeedX, playerSpeedAbsolute, playerMovingDirection, playerFacingDirection
+  SHARED playerFrame, playerAnimTimer, playerAnimPeriod, playerCrouching
+  SHARED playerClimbing, climbSpeedY, climbAnimTimer
+  SHARED currentAreaType, jumpSwimTimer, playerSwimStep, playerIsBig, simTickCounter
+  ;; On a vine: the two climbing pictures, stepping every #CLIMB_ANIM_UP ticks going up and #CLIMB_ANIM_DOWN going down, and still when
+  ;; he is (ActionClimbing, smbdis 14634).
+  If playerClimbing <> False
+    If playerFrame <> #MARIO_F_CLIMB1 AND playerFrame <> #MARIO_F_CLIMB2 Then playerFrame = #MARIO_F_CLIMB1
+    If climbSpeedY <> 0
+      climbAnimTimer = climbAnimTimer - 1
+      If climbAnimTimer <= 0
+        If playerFrame = #MARIO_F_CLIMB1
+          playerFrame = #MARIO_F_CLIMB2
+        Else
+          playerFrame = #MARIO_F_CLIMB1
+        EndIf
+        climbAnimTimer = #CLIMB_ANIM_DOWN
+        If climbSpeedY < 0 Then climbAnimTimer = #CLIMB_ANIM_UP
+      EndIf
+    EndIf
+    Statement Return
+  EndIf
+  ;; Swimming (ActionSwimming, smbdis 14623; the kick, PlayerGfxHandler, 14445): off the sea floor in a water area the three
+  ;; swim pictures, stepping at the walk timing while the stroke timer runs, while the cycle is under way or while the button
+  ;; is held, else resting where they are (on the first, once a cycle ends); and for four ticks in every eight the same
+  ;; picture kicking (SwimKickTileNum over a foot), except small Mario's third, whose foot is already the kick's
+  ;; (SwimTileRepOffset). The sheets hold them in pairs, picture then kick (#MARIO_F_SWIM1 on); small has no sixth.
+  If currentAreaType = #AREA_TYPE_WATER AND playerOnGround = False
+    jumpHeld.w = playerButtons AND #MARIO_BTN_JUMP
+    If jumpSwimTimer <> 0 OR playerSwimStep <> 0 OR jumpHeld <> 0
+      playerAnimTimer = playerAnimTimer + 1
+      If playerAnimTimer >= playerAnimPeriod
+        playerAnimTimer = 0
+        playerSwimStep = playerSwimStep + 1
+        If playerSwimStep > 2 Then playerSwimStep = 0
+      EndIf
+    EndIf
+    playerFrame = #MARIO_F_SWIM1 + playerSwimStep*2
+    If (simTickCounter AND 4) = 0
+      If playerSwimStep < 2 OR playerIsBig = True Then playerFrame = playerFrame + 1
+    EndIf
+    Statement Return
+  EndIf
+  ; Crouched, on the ground or in the air (ProcessPlayerAction, smbdis 14596 and 14603).
+  If playerCrouching = True
+    playerFrame = #MARIO_F_CROUCH
+    Statement Return
+  EndIf
+  If playerOnGround = False
+    playerFrame = #MARIO_F_JUMP
+    Statement Return
+  EndIf
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If playerSpeedX = 0
+    If directionBits = 0
+      playerFrame = #MARIO_F_IDLE
+      Statement Return
+    EndIf
+  EndIf
+  If playerSpeedAbsolute >= #MARIO_SPD_SKIDGFX
+    If directionBits <> 0
+      If directionBits <> playerMovingDirection
+        sameWay.w = playerMovingDirection AND playerFacingDirection
+        If sameWay = 0
+          playerFrame = #MARIO_F_TURN
+          Statement Return
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  playerAnimTimer = playerAnimTimer + 1
+  If playerAnimTimer >= playerAnimPeriod
+    playerAnimTimer = 0
+    playerFrame = playerFrame + 1
+  EndIf
+  If playerFrame < #MARIO_F_WALK1 Then playerFrame = #MARIO_F_WALK1
+  If playerFrame > #MARIO_F_WALK3 Then playerFrame = #MARIO_F_WALK1
+End Statement
+;; Camera, in three steps so the policy, the level clamp and the player's edge
+;; clamp stay separate. UpdatePlayerCamera{} runs them in order every sim tick.
+;; The NES thresholds and the deliberate smooth-scroll deviation are the main project's CAMERA note.
+
+;; Policy: how far the camera moves this tick. cameraX is whole world pixels; cameraFractionX is the 1/256
+;; pixel remainder, which decides when cameraX steps (BuildRenderView{} shows whole pixels).
+Statement CameraFollow{}
+  SHARED playerScreenX, playerSpeedX, platformCarryX
+  SHARED cameraX, cameraFractionX, sideCollisionTimer
+
+  ; What a platform carried him is added to the scroll (taken here, whether or not the camera moves).
+  platformScroll.w = platformCarryX
+  platformCarryX = 0
+  ;; A wall hit holds the camera still for #MARIO_SIDECOLLIDE ticks, like the SideCollisionTimer read in
+  ;; ScrollHandler. The fraction is held too: it is drawn, so it must not run on alone.
+  If sideCollisionTimer > 0 Then Statement Return
+  If playerScreenX < #MARIO_SCREEN_X Then Statement Return
+  targetSpeed.w = playerSpeedX
+  If targetSpeed < 0 Then targetSpeed = 0
+  If targetSpeed = 0 AND platformScroll <= 0 Then Statement Return
+  If playerScreenX < #MARIO_SCROLL_CATCH
+    targetSpeed = targetSpeed/2
+  EndIf
+  fractionAdd.w = (targetSpeed AND $0f)*16
+  pixelAdd.w = targetSpeed/16
+  cameraFractionX = cameraFractionX + fractionAdd
+  carry.w = 0
+  If cameraFractionX >= 256
+    cameraFractionX = cameraFractionX - 256
+    carry = 1
+  EndIf
+  cameraX = cameraX + pixelAdd + carry + platformScroll
+End Statement
+
+;; Generic clamp: the camera shows 0 to world width - #VIEW_W. The fraction is
+;; zeroed at either end so the display origin never goes past the level.
+Statement CameraClamp{}
+  SHARED cameraX, cameraMaxX, cameraFractionX, currentArea, areaColumns
+  SHARED areaWarpZoneX, warpLeftX, warpPipeCount, warpCameraLocked, warpCameraLockX, areaScrollLockX, scrollLockLifted, areaCastleDoorX
+  SHARED areaIntroWalk, areaFlagpoleX
+  cameraMaxX = areaColumns*#TILE - #VIEW_W
+  ;; A flagpole level's end: the view's right edge goes no further than the cartridge's screen's does on the walk to the castle, where
+  ;; Mario stops at the door and the screen trails him by #MARIO_SCREEN_X (tools/render_stops.py). Only 1-1's (and so 1-2's and 2-2's
+  ;; exits) comes before the area's own end; a castle (a scroll lock) has its own rule below.
+  ;; Nor past the pole's cell less a tile: the cartridge's walk in 1-1's end area scrolls the pole off the left edge; held here it
+  ;; stays a tile in, as 2-3's end shows it. Only 1-1's end area (1-1, 1-2, 2-2) stops earlier for it.
+  If areaCastleDoorX <> #AREA_BOX_NONE AND areaScrollLockX = #AREA_BOX_NONE
+    flagEndX.w = areaCastleDoorX - #CASTLE_STOP_DX - #MARIO_SCREEN_X
+    If cameraMaxX > flagEndX Then cameraMaxX = flagEndX
+    If areaFlagpoleX <> #AREA_BOX_NONE
+      flagEndX = (areaFlagpoleX/#TILE)*#TILE - #TILE
+      If cameraMaxX > flagEndX Then cameraMaxX = flagEndX
+    EndIf
+  EndIf
+  ; The bonus room is one screen: the camera stays at 0.
+  If currentArea = #AREA_BONUS Then cameraMaxX = 0
+  ; So is a pipe intro (20 columns, of which the cartridge showed the first 16): the view would scroll as he walks to the pipe.
+  If areaIntroWalk <> False Then cameraMaxX = 0
+  ;; The warp zone stops the scroll (the cartridge's scroll lock): once the view reaches the zone's object the camera goes no
+  ;; further than the warp room's page (256 px, the view's width), so the room is in view with its pipes.
+  If warpCameraLocked = False AND currentArea = #AREA_MAIN AND areaWarpZoneX <> #AREA_BOX_NONE AND warpPipeCount > 0
+    If areaWarpZoneX <= cameraX + #VIEW_W
+      warpCameraLocked = True
+      warpCameraLockX = (warpLeftX/256)*256
+      ; Never back: a view already past the room's page keeps where it is.
+      If warpCameraLockX < cameraX Then warpCameraLockX = cameraX
+    EndIf
+  EndIf
+  If warpCameraLocked = True
+    If cameraMaxX > warpCameraLockX Then cameraMaxX = warpCameraLockX
+  EndIf
+  ;; A castle's scroll lock (ScrollHandler skips the scroll while ScrollLock is set): the view's right edge stops at the start of the
+  ;; lock's page, so the retainer's room (that page) stays out of view, until the walk after the axe lifts it. The cartridge's area parser meets the
+  ;; lock ahead of its screen, and its walk (PlayerVictoryWalk) needs the right edge on the page before the room's.
+  If areaScrollLockX <> #AREA_BOX_NONE AND scrollLockLifted = False
+    lockEdgeX.w = (areaScrollLockX/256)*256
+    If cameraMaxX > lockEdgeX - #VIEW_W Then cameraMaxX = lockEdgeX - #VIEW_W
+  EndIf
+  ; A level narrower than the view anchors left.
+  If cameraMaxX < 0 Then cameraMaxX = 0
+  If cameraX < 0
+    cameraX = 0
+    cameraFractionX = 0
+  EndIf
+  If cameraX >= cameraMaxX
+    cameraX = cameraMaxX
+    cameraFractionX = 0
+  EndIf
+End Statement
+
+;; The player cannot leave the view or the level. This reads the final cameraX
+;; and never moves the camera.
+Statement ClampPlayerToView{}
+  SHARED playerX, playerScreenX, playerButtons, playerSpeedX, cameraX, areaColumns
+  If playerX < cameraX
+    playerX = cameraX
+    rightBits.w = playerButtons AND #MARIO_BTN_RIGHT
+    If rightBits = 0 Then playerSpeedX = 0
+  EndIf
+  rightEdge.w = cameraX + #VIEW_W - #TILE
+  If playerX > rightEdge
+    playerX = rightEdge
+    leftBits.w = playerButtons AND #MARIO_BTN_LEFT
+    If leftBits = 0 Then playerSpeedX = 0
+  EndIf
+  levelRight.w = (areaColumns - 1)*#TILE
+  If playerX > levelRight Then playerX = levelRight
+  playerScreenX = playerX - cameraX
+End Statement
+
+Statement UpdatePlayerCamera{}
+  SHARED castleEndTask
+  ; After a castle's bridge the view scrolls on its own (PlayerVictoryWalk), not after Mario.
+  If castleEndTask >= #CASTLE_END_WALK
+    CastleScroll{}
+  Else
+    CameraFollow{}
+  EndIf
+  CameraClamp{}
+  ClampPlayerToView{}
+End Statement
+;; ---------------------------------------------------------------
+;; Flagpole
+;; ---------------------------------------------------------------
+;;
+;; The pole is a state, not a mode inside the movement code. UpdatePlayer{}
+;; returns before the audited path when playerState is POLE, so nothing here can
+;; perturb the horizontal or vertical rules in the main project's PLAYER_PHYSICS note -- the slide
+;; owns Y outright, and the release restores a clean player rather than trying to
+;; hand one back.
+;;
+;; The slide and the flag go at the cartridge's rates (2 px a tick each), and the
+;; end of the slide, the points and the walk to the castle are the cartridge's
+;; (sparkydave.levelend.blitz.ab3). The grab test and the 8-px window are the ROM's
+;; own rule, cited at 12153-12159 in the main project's PLAYER_HITBOX note section 4.5.
+
+;; Take the pole. Every horizontal and vertical accumulator is zeroed, because
+;; the ROM discards them when it takes the pole and a half-built acceleration
+;; would otherwise be waiting when he lets go.
+Statement GrabFlagpole{}
+  SHARED areaFlagpoleX
+  SHARED playerState, playerX, playerFacing, playerPoleTimer, flagState, flagpoleSoundDelay
+  SHARED playerSpeedX, playerMoveForceX, playerFractionX
+  SHARED playerSpeedY, playerMoveForceY, playerFractionY, playerY
+  SHARED poleBand, poleNumberY, poleNumberShown
+  playerState = #PLAYER_ST_POLE
+  ; The music is silenced and the slide sound starts (smbdis 12180).
+  SoundEventMusic{#MUSIC_SILENCE}
+  flagpoleSoundDelay = 2
+  ;; The score band is Mario's height at the grab; the number starts at the foot of
+  ;; the pole and rises as the flag falls.
+  poleBand = PoleBandFor{playerY}
+  poleNumberY = #POLE_NUMBER_START_Y
+  poleNumberShown = True
+  playerX = (areaFlagpoleX/#TILE)*#TILE + #FLAGPOLE_SHAFT_X - #TILE/2
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  playerFractionX = 0
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  ;; The slide frames face right in the sheet, which is toward the pole when he
+  ;; takes it from the left. No flip, so playerFacing is pinned rather than
+  ;; derived.
+  playerFacing = #MARIO_FACE_RIGHT
+  playerPoleTimer = 0
+  ;; Start the flag, but do not start it at Mario's height: it begins at the top it
+  ;; is already at, and UpdateFlag{} walks it down while he slides (only then, as in
+  ;; the cartridge: it stops where it is when the slide ends).
+  flagState = #FLAG_ST_DOWN
+End Statement
+
+;; The flag's descent. It goes down 2 px a tick, but only while Mario is sliding:
+;; the cartridge's FlagpoleRoutine (smbdis 6579) moves it only while its slide
+;; routine runs, and ends that routine when the flag reaches #POLE_FLAG_END_Y or
+;; Mario is already at #POLE_END_Y. So a Mario who slides from high up waits at the
+;; foot of the pole for the flag, and one who grabs at the very bottom ends the
+;; slide at once and leaves the flag where it is.
+Statement UpdateFlag{}
+  SHARED flagState, flagY, playerState
+  If flagState <> #FLAG_ST_DOWN Then Statement Return
+  If playerState <> #PLAYER_ST_POLE Then Statement Return
+  flagY = flagY + #FLAGPOLE_FLAG_STEP
+End Statement
+
+;; The grab test is a window on the low nybble of X, as the ROM's (12153-12159), not a box overlap.
+;; There is no vertical test: the pole is a finish line, and the cartridge lets him take it at any height.
+;; A Y test would also never fire for a Mario running along the ground, whose box is below the pole's shaft.
+;; The pole is spent once the flag is (flagState leaves IDLE and never returns). Otherwise he is released
+;; at x 3167, one pixel inside the window, and grabs it again on the next step right.
+Statement CheckFlagpole{}
+  SHARED areaFlagpoleX
+  SHARED playerState, playerX, flagState
+  If playerState = #PLAYER_ST_POLE Then Statement Return
+  If flagState <> #FLAG_ST_IDLE Then Statement Return
+  ; An area with no flagpole has its box nowhere (#AREA_BOX_NONE): nothing to grab, however near the number comes.
+  If areaFlagpoleX = #AREA_BOX_NONE Then Statement Return
+  If playerX/#TILE <> areaFlagpoleX/#TILE Then Statement Return
+  poleNybble.w = playerX AND $0f
+  If poleNybble < #FLAGPOLE_GRAB_LO Then Statement Return
+  If poleNybble > #FLAGPOLE_GRAB_HI Then Statement Return
+  GrabFlagpole{}
+End Statement
+
+;; Slide to the base, then let go. The floor is the top of the base block, which
+;; is the bottom of the pole's box. The flag is not touched here: it has its own
+;; update, because it does not stop when he does.
+;;
+;; KNOWN GAP: the cartridge has Mario leap up to take the pole, so he normally
+;; grabs it well above the base and the slide is a real descent. Nothing here
+;; launches him, so a Mario who runs into the pole on the ground is snapped up
+;; onto the base block and let go again in the same tick, and a Mario who jumps
+;; into it gets the slide he expects. The auto-leap is the next thing to add, and
+;; it is a jump, not a change to anything above.
+Statement UpdatePoleSlide{}
+  SHARED playerState, playerY, playerFrame, playerPoleTimer, flagY, poleNumberY, flagpoleSoundDelay
+  ;; The slide sound goes into the queue a tick or two after the grab: the music's
+  ;; silence rewrites square 1's control register on the tick it is handled.
+  If flagpoleSoundDelay > 0
+    flagpoleSoundDelay = flagpoleSoundDelay - 1
+    If flagpoleSoundDelay = 0 Then SoundSquare1{#SFX_FLAGPOLE}
+  EndIf
+  ; The end is checked before the move, as the cartridge does.
+  If flagY >= #POLE_FLAG_END_Y OR playerY >= #POLE_END_Y
+    EndPoleSlide{}
+    Statement Return
+  EndIf
+  ; He hangs at #POLE_STOP_Y and only the flag goes on.
+  If playerY < #POLE_STOP_Y
+    playerY = playerY + #FLAGPOLE_SLIDE
+    playerPoleTimer = playerPoleTimer + 1
+    If playerPoleTimer >= #FLAGPOLE_FRAME_TIME
+      playerPoleTimer = 0
+      If playerFrame = #MARIO_F_CLIMB1
+        playerFrame = #MARIO_F_CLIMB2
+      Else
+        playerFrame = #MARIO_F_CLIMB1
+      EndIf
+    EndIf
+  EndIf
+  poleNumberY = poleNumberY - #POLE_NUMBER_STEP
+End Statement
+
+; THE VINE (StartVine{} is in sparkydave.collision.blitz.ab3, where a bumped brick starts one), grown a pixel on two ticks in four.
+Statement UpdateVine{}
+  SHARED vineColumnX, vineHeight, vineTarget, simTickCounter
+  If vineColumnX < 0 Then Statement Return
+  If vineHeight >= vineTarget Then Statement Return
+  If (simTickCounter AND 2) <> 0 Then vineHeight = vineHeight + 1
+End Statement
+
+;; The top of the climbable cells: the cell a tile under the vine's top (the cartridge writes its climbing metatile there as the vine passes),
+;; never above the status bar. Meaningful from #VINE_CLIMB_MIN high.
+Function.w VineClimbTop{}
+  SHARED vineBaseY, vineHeight
+  rawTop.w = vineBaseY - vineHeight + #TILE
+  If rawTop < #CLIMB_TOP_Y Then Function Return #CLIMB_TOP_Y
+  Function Return(rawTop/#TILE)*#TILE
+End Function
+
+; Whether a pixel is in a climbable cell.
+Function.w ClimbCellAt{pixelX.w, pixelY.w}
+  SHARED vineColumnX, vineBaseY, vineHeight
+  If vineColumnX < 0 Then Function Return False
+  If vineHeight < #VINE_CLIMB_MIN Then Function Return False
+  If pixelX < vineColumnX Then Function Return False
+  If pixelX >= vineColumnX + #TILE Then Function Return False
+  If pixelY >= vineBaseY Then Function Return False
+  If pixelY < VineClimbTop{} Then Function Return False
+  Function Return True
+End Function
+
+;; The ground rules of climbing, each tick while he is on a vine (PlayerPhysicsSub 6043 and ClimbingSub 5966): up (which wins) or down sets
+;; his speed and movement force, the force is carried in climbDummyY and its carry added to the move; left or right (not held since the
+;; timer last ran out) swaps him to the other side of the vine and turns him; nothing held clears the timer.
+Statement UpdateClimbMove{}
+  SHARED playerX, playerY, playerButtons, playerFacing, playerFacingDirection, playerSpeedX, playerMoveForceX, playerSpeedY
+  SHARED climbSpeedY, climbDummyY, climbSideTimer, climbAdder()
+  climbForce.w = 0
+  climbSpeedY = 0
+  If (playerButtons AND #MARIO_BTN_UP) <> 0
+    climbForce = #CLIMB_UP_FORCE
+    climbSpeedY = -1
+  Else
+    If (playerButtons AND #MARIO_BTN_DOWN) <> 0
+      climbForce = #CLIMB_DOWN_FORCE
+      climbSpeedY = 1
+    EndIf
+  EndIf
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  playerSpeedY = climbSpeedY
+  climbDummyY = climbDummyY + climbForce
+  climbCarry.w = 0
+  If climbDummyY >= 256
+    climbDummyY = climbDummyY - 256
+    climbCarry = 1
+  EndIf
+  playerY = playerY + climbSpeedY + climbCarry
+  sideButtons.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If sideButtons = 0
+    climbSideTimer = 0
+    Statement Return
+  EndIf
+  If climbSideTimer <> 0 Then Statement Return
+  climbSideTimer = #CLIMB_SIDE_TICKS
+  adderIndex.w = 2
+  If (sideButtons AND #MARIO_BTN_RIGHT) <> 0 Then adderIndex = 0
+  If playerFacingDirection <> #MARIO_BTN_RIGHT Then adderIndex = adderIndex + 1
+  playerX = playerX + climbAdder(adderIndex)
+  ; Turned to face the other way: the vine is on the side he is facing after the swap.
+  If sideButtons = #MARIO_BTN_RIGHT
+    playerFacingDirection = #MARIO_BTN_LEFT
+    playerFacing = #MARIO_FACE_LEFT
+  Else
+    playerFacingDirection = #MARIO_BTN_RIGHT
+    playerFacing = #MARIO_FACE_RIGHT
+  EndIf
+End Statement
+
+;; The grab (the side check's HandleClimbing 12153 and PutPlayerOnVine 12185), every tick after the sides are checked: climbing is
+;; lost first (the cartridge's collision makes the state falling each frame) and got back if a side probe is in a climbable cell, within
+;; the middle of it. He is put at its side by which way he faces (always left within #CLIMB_EDGE_X of the screen's left edge), his
+;; horizontal speed gone. A grab above the status bar starts the take-over. Not while he is taken over (that routine has no collision).
+Statement CheckVineGrab{}
+  SHARED playerX, playerY, playerClimbing, playerFacing, playerFacingDirection, playerSpeedX, playerMoveForceX, playerOnGround
+  SHARED climbAutoUp, cameraX, playerIsBig
+  If climbAutoUp <> False Then Statement Return
+  playerClimbing = False
+  touchX.w = -1
+  probeY.w = playerY + #PROBE_SIDE_Y
+  If ClimbCellAt{playerX + #PROBE_SIDE_X2, probeY} <> False Then touchX = playerX + #PROBE_SIDE_X2
+  If touchX < 0
+    If ClimbCellAt{playerX + #PROBE_SIDE_X1, probeY} <> False Then touchX = playerX + #PROBE_SIDE_X1
+  EndIf
+  If touchX < 0 AND BigStanding{} = True
+    upperY.w = playerY + #PROBE_SIDE_Y_UPPER
+    If ClimbCellAt{playerX + #PROBE_SIDE_X2, upperY} <> False Then touchX = playerX + #PROBE_SIDE_X2
+    If touchX < 0
+      If ClimbCellAt{playerX + #PROBE_SIDE_X1, upperY} <> False Then touchX = playerX + #PROBE_SIDE_X1
+    EndIf
+  EndIf
+  If touchX < 0 Then Statement Return
+  nybbleX.w = touchX AND $0f
+  If nybbleX < #CLIMB_GRAB_MIN Then Statement Return
+  If nybbleX > #CLIMB_GRAB_MAX Then Statement Return
+  If playerY < #CLIMB_TOP_Y Then climbAutoUp = True
+  playerClimbing = True
+  playerOnGround = False
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  If playerX - cameraX < #CLIMB_EDGE_X
+    playerFacingDirection = #MARIO_BTN_LEFT
+    playerFacing = #MARIO_FACE_LEFT
+  EndIf
+  cellX.w = (touchX/#TILE)*#TILE
+  If playerFacingDirection = #MARIO_BTN_LEFT
+    playerX = cellX + #CLIMB_X_LEFT
+  Else
+    playerX = cellX + #CLIMB_X_RIGHT
+  EndIf
+End Statement
+
+; Debug (F9): a vine from the ground in front of Mario, or none if there is one.
+Statement DebugVine{}
+  SHARED vineColumnX, playerX, playerY, playerClimbing, climbAutoUp, climbAreaChange
+  If vineColumnX >= 0
+    vineColumnX = -1
+    playerClimbing = False
+    climbAutoUp = False
+    climbAreaChange = False
+    Statement Return
+  EndIf
+  ; As tall as the screen, so that it reaches the status bar as 2-1's does (its cells run up to y 32), and the take-over can be tried.
+  debugBaseY.w = ((playerY + #TILE)/#TILE)*#TILE
+  StartVine{((playerX + 8)/#TILE + 2)*#TILE, debugBaseY, debugBaseY}
+End Statement
+
+; He has climbed out of the top of an area with no sky bonus to go to (the debug vine, F9): the vine is gone and he stands where it began.
+Statement VineTopReached{}
+  SHARED vineColumnX, vineBaseY, playerX, playerY, playerClimbing, climbAutoUp, climbAreaChange, playerSpeedY, playerSpeedX, playerOnGround
+  playerX = vineColumnX - 20
+  playerY = vineBaseY - #TILE
+  playerSpeedX = 0
+  playerSpeedY = 0
+  playerOnGround = True
+  playerClimbing = False
+  climbAutoUp = False
+  climbAreaChange = False
+  vineColumnX = -1
+End Statement
+
+;; The way into the sky bonus (the cartridge's EntrMode2 and VineEntr, smbdis 5524; Entrance_GameTimerSetup, 2856): he waits below the screen
+;; while the vine grows up from there to its full height, then climbs it by himself, with no collision, until his y is under #VINE_ENTRY_STOP_Y; then
+;; the state is free again and he walks right by himself (vineWalkOut) until #VINE_ENTRY_READY_X. Called from UpdatePlayer{} in place of the
+;; rest of the tick.
+Statement UpdateVineEntry{}
+  SHARED playerY, playerState, playerClimbing, playerButtons, vineHeight, vineWalkOut, climbSpeedY, playerOnGround
+  UpdateVine{}
+  If vineHeight < #VINE_HEIGHT_FULL Then Statement Return
+  If playerY >= #VINE_ENTRY_STOP_Y
+    playerButtons = #MARIO_BTN_UP
+    playerClimbing = True
+    UpdateClimbMove{}
+    UpdatePlayerAnimation{}
+    Statement Return
+  EndIf
+  playerClimbing = False
+  climbSpeedY = 0
+  playerState = #PLAYER_ST_FREE
+  vineWalkOut = True
+  playerOnGround = False
+End Statement
+
+;; The world of objects for one tick: what the screen has reached is made (the main area's Goombas, Koopas, plants, lifts, springs and hidden
+;; blocks), then every live object moves and meets Mario. From UpdatePlayer{}'s normal path and from the pipe's. The
+;; frame time report's objects share (debug mode only; sparkydave.timing-marks.blitz.ab3) is this.
+Statement UpdateObjectWorld{}
+  SHARED currentArea
+  ObjectsTimeBegin{}
+  If currentArea = #AREA_MAIN
+    ActivateGoombas{}
+    ActivateKoopas{}
+    ActivatePlants{}
+    ActivateBloobers{}
+    ActivateFirebars{}
+    ActivatePodoboos{}
+    ActivateBowsers{}
+    UpdateFrenzy{}
+    ActivateLifts{}
+    ActivateSprings{}
+    ActivateHiddenBlocks{}
+  EndIf
+  UpdateObjects{}
+  ObjectsTimeEnd{}
+End Statement
+
+Statement UpdatePlayer{}
+  SHARED playerRunningTimer, playerButtons, playerButtonsLast, playerOnGround, warpPipeTaken
+  SHARED playerY, playerSpeedY, playerMoveForceY, playerFractionY
+  SHARED sideCollisionTimer, blockBounceTimer, playerState
+  SHARED playerResizeToBig, playerResizeTimer, playerIsBig
+  SHARED playerCollisionBits, playerThrowTimer, playerHidden, currentArea
+  SHARED worldFreezeTicks, playerSizeAnimTicks, jumpBufferTimer, coyoteTimer
+  SHARED areaIntroWalk, jumpspringAnimCtrl, playerClimbing, climbAutoUp, climbSideTimer, climbAreaChange, vineWalkOut
+  SHARED currentAreaCloud, areaEvent, playerX, currentAreaType, jumpSwimTimer, castleEndTask, castleWalkStopX
+  ;; The cartridge's master timer and the size picture count down every tick, whatever he is
+  ;; doing (the first holds the enemies and the timers still, the second can outlast the hold).
+  If worldFreezeTicks > 0 Then worldFreezeTicks = worldFreezeTicks - 1
+  If playerSizeAnimTicks > 0 Then playerSizeAnimTicks = playerSizeAnimTicks - 1
+  ;; The pole and resize branches below reset the mask themselves: they return before ReadPlayerButtons{}
+  ;; and collision, so a mask from the grab or a mushroom would otherwise survive the slide or resize.
+  ;; Not reset here: ReadPlayerButtons{} below needs the previous frame's mask until it is applied.
+  ;; Before the pole branch below, which returns early: the flag is moved here, on
+  ;; the tick before UpdatePoleSlide{} checks for the end of the slide, and only
+  ;; while he is on the pole (UpdateFlag{} returns in any other state).
+  UpdateFlag{}
+  ;; The bump clock runs through the pole and resize branches too, so the bob ends 16 ticks after it started
+  ;; and the deferred settle cannot stall on a mid-bob resize.
+  If blockBounceTimer > 0 Then blockBounceTimer = blockBounceTimer - 1
+  ;; The decrement above brings the timer to 0 exactly once; that is the tick
+  ;; the block's deferred spend/restore lands.
+  UpdateBlockBump{}
+  ; Outside the free state a remembered press or a ledge's grace is not carried across.
+  If playerState <> #PLAYER_ST_FREE
+    jumpBufferTimer = 0
+    coyoteTimer = 0
+  EndIf
+  If playerState = #PLAYER_ST_DYING
+    UpdateDeath{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerState = #PLAYER_ST_POLE
+    UpdatePoleSlide{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  ; At the axe nothing moves but the bridge and Bowser (the cartridge's victory mode).
+  If playerState = #PLAYER_ST_AXE
+    UpdateBridgeCollapse{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerState = #PLAYER_ST_RESIZE
+    UpdateResize{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  ; On the way in from the sky bonus's vine: only that routine moves him until he is off the vine.
+  If playerState = #PLAYER_ST_VINE_ENTRY
+    UpdateVineEntry{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  ; In a pipe: only the pipe moves him (sparkydave.pipes.blitz.ab3).
+  If playerState = #PLAYER_ST_PIPE_DOWN OR playerState = #PLAYER_ST_PIPE_SIDE OR playerState = #PLAYER_ST_PIPE_UP
+    UpdatePipe{}
+    ;; The enemies and the rest go on while he is in a pipe, as the cartridge's do (only its TimerControl stops them, for the pole, a resize and
+    ;; a death): the ones in the first screen of the area he comes up into are made now and walk while he rises, so one standing on the pipe has
+    ;; gone by the time he has control. (Nothing touches him meanwhile: contact needs #PLAYER_ST_FREE.)
+    UpdateObjectWorld{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerRunningTimer > 0 Then playerRunningTimer = playerRunningTimer - 1
+  If playerThrowTimer > 0 Then playerThrowTimer = playerThrowTimer - 1
+  If sideCollisionTimer > 0 Then sideCollisionTimer = sideCollisionTimer - 1
+  If jumpSwimTimer > 0 Then jumpSwimTimer = jumpSwimTimer - 1
+  ReadPlayerButtons{}
+  ; The walk to the castle reads no input: right until he is hidden, then none.
+  If playerState = #PLAYER_ST_ENDWALK
+    playerButtons = #MARIO_BTN_RIGHT
+    If playerHidden = True Then playerButtons = 0
+    ; A castle's walk stops in the retainer's page (PlayerVictoryWalk).
+    If castleEndTask <> 0 AND playerX >= castleWalkStopX Then playerButtons = 0
+  EndIf
+  ; The pipe intro reads no input either: right, until he walks into the pipe.
+  If areaIntroWalk <> False AND playerState = #PLAYER_ST_FREE Then playerButtons = #MARIO_BTN_RIGHT
+  ; Off the vine, into the sky bonus: right by himself until he is far enough along.
+  If vineWalkOut <> False
+    playerButtons = #MARIO_BTN_RIGHT
+    If playerX >= #VINE_ENTRY_READY_X Then vineWalkOut = False
+  EndIf
+  ; Dropping into the bonus room: no control until he is well down the screen.
+  If playerState = #PLAYER_ST_DROP
+    playerButtons = 0
+    If playerY >= #BONUS_DROP_READY_Y Then playerState = #PLAYER_ST_FREE
+  EndIf
+  ; Taken over above the status bar: the controller is Up, and when he is out of the top of the world the area is to change.
+  If climbAutoUp <> False
+    playerButtons = #MARIO_BTN_UP
+    If playerY <= #CLIMB_AREA_Y Then climbAreaChange = True
+  EndIf
+  If climbSideTimer > 0 Then climbSideTimer = climbSideTimer - 1
+  ; Off a vine the wait before a swap of sides is set afresh each tick (ProcMove, smbdis 5886), so the first swap after a grab waits it out.
+  If playerClimbing = False Then climbSideTimer = #CLIMB_SIDE_TICKS
+  UpdateCrouch{}
+  TryThrowFireball{}
+  ;; After the button read, so the mask from ImpedePlayerMove{} on the previous frame is applied first.
+  ;; Then it is cleared, and collision writes this frame's.
+  playerCollisionBits = $ff
+  SetPlayerAbsoluteSpeed{}
+  ; In a water area he swims (SwimmingFlag, from the area type): the stroke, the water's limits and facing for the jump's.
+  swimNow.w = False
+  If currentAreaType = #AREA_TYPE_WATER Then swimNow = True
+  If playerClimbing = False AND swimNow = True
+    TryStartSwim{}
+    SetupSwimLimits{}
+    SwimAnimSpeed{}
+    SetPlayerAbsoluteSpeed{}
+    ApplySwimFacing{}
+    ApplyHorizontalFriction{}
+    MovePlayerHorizontal{}
+    SetPlayerMovingDirection{}
+  EndIf
+  If playerClimbing = False AND swimNow = False
+    ;; While a jumpspring squashes him he cannot start a jump, walk or fall (CheckForJumping, MovePlayerHorizontally and
+    ;; MovePlayerVertically all leave on JumpspringAnimCtrl).
+    If jumpspringAnimCtrl = 0 Then TryStartJump{}
+    SetupHorizontalLimits{}
+    PrepareGroundMotion{}
+    SetPlayerAbsoluteSpeed{}
+    ApplyPlayerFacing{}
+    ApplyHorizontalFriction{}
+    If jumpspringAnimCtrl = 0 Then MovePlayerHorizontal{}
+    SetPlayerMovingDirection{}
+  EndIf
+  If playerClimbing <> False
+    ; On a vine: no jump, no walk, no gravity (the cartridge's state 3 reaches none of them).
+    UpdateClimbMove{}
+  EndIf
+  CheckPlayerSides{}
+  CheckVineGrab{}
+  SetPlayerAbsoluteSpeed{}
+  If playerClimbing = False
+    If swimNow = True
+      SelectSwimForce{}
+    Else
+      SelectVerticalForce{}
+    EndIf
+    If playerOnGround = False AND jumpspringAnimCtrl = 0 Then MovePlayerVertical{}
+  EndIf
+  ;; Runs every frame, not just while airborne: the ROM re-derives grounded
+  ;; state inside PlayerBGCollision rather than trusting the previous tick.
+  CheckPlayerFeet{}
+  CheckPlayerHead{}
+  ; The whirlpools pull after his own move, unless the world is held (ProcessWhirlpools leaves on TimerControl).
+  If swimNow = True AND worldFreezeTicks = 0 Then ProcessWhirlpools{}
+  CheckPlayerCoins{}
+  CheckPitDeath{}
+  UpdatePlayerCamera{}
+  UpdatePlayerBoundBox{}
+  UpdateVine{}
+  ; Out of the top on a vine: the area's vine link says where (the sky bonus), or nowhere. Out of the bottom of a cloud area: the way out.
+  If climbAreaChange <> False
+    climbAreaChange = False
+    climbAutoUp = False
+    playerClimbing = False
+    areaEvent = #AREA_EVENT_VINE
+  EndIf
+  If currentAreaCloud <> 0
+    If playerY >= #CLOUD_EXIT_Y Then areaEvent = #AREA_EVENT_FALL
+  EndIf
+  UpdateObjectWorld{}
+  SetPlayerAbsoluteSpeed{}
+  UpdatePlayerAnimation{}
+  ;; Last, so the audited path above runs untouched and the grab happens on the
+  ;; first tick his X reaches the window rather than before he has moved there.
+  CheckFlagpole{}
+  CheckCastleDoor{}
+  CheckAxe{}
+  If PipeEntryReady{} = True
+    warpPipeTaken = -1
+    StartPipe{#PLAYER_ST_PIPE_DOWN}
+  EndIf
+  warpReady.w = WarpPipeReady{}
+  If warpReady >= 0
+    warpPipeTaken = warpReady
+    StartPipe{#PLAYER_ST_PIPE_DOWN}
+  EndIf
+  If PipeExitReady{} = True Then StartPipe{#PLAYER_ST_PIPE_SIDE}
+  playerButtonsLast = playerButtons
+End Statement
+
+; Whether the big pictures are the ones drawn now: his size, but the two alternate while he grows or shrinks.
+Function.w PlayerShownBig{}
+  SHARED playerIsBig, playerSizeAnimTicks
+  shown.w = playerIsBig
+  If playerSizeAnimTicks > 0 Then shown = SizeAnimShowsBig{}
+  Function Return shown
+End Function
+
+;; The bitmap row of the top of the picture drawn, for the size shown (playerY is his feet less a tile, for both sizes).
+;; The one place the big picture's lift is worked out: DrawPlayer{} and PlayerTopRow{} both use it.
+Function.w PictureTopRow{shownBig.w}
+  SHARED playerY
+  If shownBig = True Then Function Return playerY - (#MARIO_BIG_H - #TILE)
+  Function Return playerY
+End Function
+
+; The bitmap row of his top, as DrawPlayer{} places him.
+Function.w PlayerTopRow{}
+  Function Return PictureTopRow{PlayerShownBig{}}
+End Function
+
+;; Which of the #PLAYER_CLIP_SLOTS shapes holds Mario cut short by this many rows (1 up) facing this way (0 right, 1 left): big Mario's
+;; #PLAYER_CLIP_BIG_ROWS rows that can show are the first slots (a row a pair), small Mario's #PLAYER_CLIP_SMALL_ROWS the last.
+Function.w PlayerClipIndex{shownBig.w, cutRows.w, facingLeft.w}
+  If shownBig = True Then Function Return(cutRows - 1)*2 + facingLeft
+  Function Return 2*#PLAYER_CLIP_BIG_ROWS + (cutRows - 1)*2 + facingLeft
+End Function
+
+;; Whether the HUD is to be away for a Mario whose top is at this row: any of him above the world list's top (#VIEW_TOP),
+;; less #AWAY_LEAD (HudAwayNeeded{}, sparkydave.cover.blitz.ab3).
+Function.w HudAwayNeededForTop{topRow.w}
+  If topRow < #VIEW_TOP + #AWAY_LEAD Then Function Return True
+  Function Return False
+End Function
+
+Statement DrawPlayer{}
+  SHARED playerX, playerY, playerFacing, playerFrame, drawBitmap, drawBuffer
+  SHARED playerIsBig, playerInjuryIntervals, simTickCounter
+  SHARED playerState, deathKind, playerThrowTimer, playerHidden, playerSizeAnimTicks
+  SHARED debugMode, clipCutTimed, clipCutLines, clipCutWorst, clipDrawn, playerClipFrame()
+  SHARED marioSpriteShape, marioSpriteX, marioSpriteRow
+  ; No sprite unless this call decides one (#MARIO_SPRITE): every early return below leaves him hidden for the frame.
+  marioSpriteShape = -1
+  If playerHidden = True Then Statement Return
+  ;; A killed Mario is drawn in the death pose. It is set here, not in
+  ;; StartPlayerDeath{}, because a kill by an enemy happens inside UpdatePlayer{}
+  ;; before UpdatePlayerAnimation{} on the same tick, which would write the jump or
+  ;; idle frame over it, and the dying branch never runs the animation again.
+  If playerState = #PLAYER_ST_DYING
+    If deathKind = #DEATH_HOP Then playerFrame = #MARIO_F_DEATH
+  EndIf
+  ;; Invulnerable: drawn on alternate ticks only (PlayerGfxHandler, smbdis 14436).
+  ;; Skipping the blit is safe, UnBuffer already removed last tick's.
+  If playerInjuryIntervals > 0
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  ;; Falling out of the world: not drawn once any of him is below the bitmap
+  ;; (BBlit clipping at the bottom edge is unconfirmed, and he would wrap).
+  If playerY + #TILE > #SURFACE_H Then Statement Return
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  ;; The frames are cut once at start (sparkydave.shapes.blitz.ab3): a right-facing
+  ;; and a left-facing set each for small and big. The debug frame stepper can ask
+  ;; for a frame past the end of a sheet, so the index is clamped.
+  drawFrame.w = playerFrame
+  If drawFrame < 0 Then drawFrame = 0
+  ; The size picture while he grows or shrinks alternates the two, whatever the size now is.
+  shownBig.w = PlayerShownBig{}
+  ;; Above the top of the bitmap (through a ceiling, a high jump at the flag): a blit at a negative row writes before
+  ;; each plane, into the end of the plane before (ghost pixels at the bottom of the picture). So the part of him from
+  ;; row 0 down is cut from his sheet, into the one shape #PRE_PLAYER_CLIP (cut again each tick he is up there), and
+  ;; blitted at row 0. The HUD is away while he is up there (HudAwayNeeded{}), so rows #AWAY_TOP (13) and down are on
+  ;; show; wholly above that he is not drawn.
+  topRow.w = PictureTopRow{shownBig}
+  cellHeight.w = #TILE
+  If shownBig = True Then cellHeight = #MARIO_BIG_H
+  If topRow + cellHeight <= #AWAY_TOP Then Statement Return
+  cutRows.w = 0
+  If topRow < 0 Then cutRows = -topRow
+  blitShape.w = 0
+  sheetBitmap.w = #MARIO_BM
+  If shownBig = True
+    If drawFrame > #PRE_BIG_FRAMES - 1 Then drawFrame = #PRE_BIG_FRAMES - 1
+    ; Throwing a fireball shows the throwing pose, whatever he was doing.
+    If playerThrowTimer > 0 Then drawFrame = #MARIO_F_THROW
+    ;; Bottom-aligned: big Mario's cells are 16x32 with the art filling the cell, so the blit is lifted by the
+    ;; difference. That keeps playerY meaning his feet for both sizes, which lets one set of physics serve both.
+    sheetBitmap = #MARIO_BIG_BM
+    blitShape = #PRE_BIG_R + drawFrame
+    If playerFacing = #MARIO_FACE_LEFT Then blitShape = #PRE_BIG_L + drawFrame
+  Else
+    If drawFrame > #PRE_SMALL_FRAMES - 1 Then drawFrame = #PRE_SMALL_FRAMES - 1
+    blitShape = #PRE_SMALL_R + drawFrame
+    If playerFacing = #MARIO_FACE_LEFT Then blitShape = #PRE_SMALL_L + drawFrame
+  EndIf
+  ;; As a hardware sprite he is not blitted: which of the sprites, where, and ShowMarioSprite{} puts it on the lists with the picture.
+  ;; The sprite is clipped by the list, so a part above the top needs no cut shape. Numbered as CutMarioSprites{} cut them: small
+  ;; right, small left, big right, big left.
+  If #MARIO_SPRITE = 1
+    If shownBig = True
+      spriteNumber.w = MarioSpriteFrame{drawFrame, #SPRITE_BIG_FRAMES} + 2*#SPRITE_SMALL_FRAMES
+      If playerFacing = #MARIO_FACE_LEFT Then spriteNumber = spriteNumber + #SPRITE_BIG_FRAMES
+    Else
+      spriteNumber = MarioSpriteFrame{drawFrame, #SPRITE_SMALL_FRAMES}
+      If playerFacing = #MARIO_FACE_LEFT Then spriteNumber = spriteNumber + #SPRITE_SMALL_FRAMES
+    EndIf
+    marioSpriteShape = spriteNumber
+    marioSpriteX = playerX
+    marioSpriteRow = topRow
+    Statement Return
+  EndIf
+  If cutRows = 0
+    BBlit drawBuffer, blitShape, playerX, topRow
+  Else
+    ;; Only the rows of him the tall list shows (from #AWAY_TOP on) are cut, and drawn at #AWAY_TOP. Cached by how many rows are
+    ;; cut and which way he faces, and cut again only when the slot holds another frame: a jump above the top is one frame, and the
+    ;; same rows come round again on the way down and in the next jump.
+    firstRow.w = #AWAY_TOP + cutRows
+    clipFacing.w = 0
+    If playerFacing = #MARIO_FACE_LEFT Then clipFacing = 1
+    clipIndex.w = PlayerClipIndex{shownBig, cutRows, clipFacing}
+    clipShape.w = #PRE_PLAYER_CLIP + clipIndex
+    If debugMode <> False Then clipDrawn = clipDrawn + 1
+    If playerClipFrame(clipIndex) <> drawFrame + 1
+      If debugMode <> False Then cutStart.l = RasterLine{}
+      Use BitMap sheetBitmap
+      WaitBlitter
+      GetaShape clipShape, drawFrame*#TILE, firstRow, #TILE, cellHeight - firstRow
+      If clipFacing = 1 Then XFlip clipShape
+      playerClipFrame(clipIndex) = drawFrame + 1
+      Use BitMap drawBitmap
+      If debugMode <> False
+        cutLines.l = RasterLine{} - cutStart
+        If cutLines < 0 Then cutLines = cutLines + FrameLines{}
+        clipCutTimed = clipCutTimed + 1
+        clipCutLines = clipCutLines + cutLines
+        If cutLines > clipCutWorst Then clipCutWorst = cutLines
+      EndIf
+    EndIf
+    BBlit drawBuffer, clipShape, playerX, #AWAY_TOP
+  EndIf
+End Statement
+
+;; Mario and the vine behind the cloud floor on the way into the sky bonus: the cartridge starts him with the background priority bit
+;; (PlayerBGPriorityData, smbdis 2861) and gives the vine's slot the same (7152), so both are hidden by the floor's tiles until he is
+;; in control again (the priority is cleared once the routine is the normal one, smbdis 5617). After DrawPlayer{}, as DrawPipeOcclusion{}
+;; is: the cells of the floor in the columns he and the vine are in are drawn again over them, raw. Only while he climbs in and walks off.
+Statement DrawVineEntryOcclusion{}
+  SHARED playerState, vineWalkOut, playerX, vineColumnX, mapBuffer(), drawBitmap, playerHidden
+  If #MARIO_SPRITE = 1 Then Statement Return
+  If playerState <> #PLAYER_ST_VINE_ENTRY AND vineWalkOut = False Then Statement Return
+  If playerHidden = True Then Statement Return
+  firstCol.w = playerX/#TILE
+  lastCol.w = (playerX + #TILE - 1)/#TILE
+  If vineColumnX >= 0
+    If vineColumnX/#TILE < firstCol Then firstCol = vineColumnX/#TILE
+    If vineColumnX/#TILE > lastCol Then lastCol = vineColumnX/#TILE
+  EndIf
+  For occludeRow.w = 0 To #MAP_H - 1
+    For occludeCol.w = firstCol To lastCol
+      occludeGid.w = mapBuffer(occludeRow*#MAP_W + occludeCol)
+      If occludeGid <> 0
+        cellShape.w = PlantCellShape{occludeGid}
+        Use BitMap drawBitmap
+        Block cellShape, occludeCol*#TILE, occludeRow*#TILE
+      EndIf
+    Next
+  Next
+End Statement
+
+;; END OF PLAYER (BLITZ MODE)

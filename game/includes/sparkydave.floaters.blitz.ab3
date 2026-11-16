@@ -1,0 +1,150 @@
+;; =======================================================
+;; FLOATING SCORE NUMBERS (BLITZ MODE)
+;; =======================================================
+
+;; The number that floats up from a stomped Goomba or a power-up. The numbers are
+;; in constants.ab3 with their ROM sources. A number only shows points the cartridge
+;; shows: a stomp (the chain), a power-up (1000), a 1-UP. A coin (200) and a broken
+;; brick (50) add to the score with no number, so they do not come through here.
+;;
+;; The points are added by the number, not by the stomp: five ticks after it
+;; appears, as the cartridge's FloateyNumbersRoutine does. A set that is full still
+;; adds the points at once, so a full set loses only its number, never a score. A
+;; level reset (ResetLevel{}) drops the numbers on screen without awarding them: a
+;; reset is a new game or a restart after a death, long after a number's five ticks.
+
+; Add what an index is worth. Index 11 is a 1-UP, not points.
+Statement AwardFloaterPoints{pointsIndex.w}
+  SHARED scorePoints(), playerLives
+  If pointsIndex >= #FLOATER_ONEUP_INDEX
+    playerLives = playerLives + 1
+    SoundSquare2{#SFX_EXTRA_LIFE}
+  Else
+    AddScore{scorePoints(pointsIndex)}
+  EndIf
+End Statement
+
+;; A number at pixel (floaterAtX, floaterAtY), the top left of whatever earned it.
+;; pointsIndex is the stomp chain count, and is capped at the 1-UP.
+Statement SpawnFloater{floaterAtX.w, floaterAtY.w, pointsIndex.w}
+  SHARED floaterActive(), floaterX(), floaterY(), floaterIndex(), floaterTimer()
+  indexNow.w = pointsIndex
+  If indexNow > #FLOATER_ONEUP_INDEX Then indexNow = #FLOATER_ONEUP_INDEX
+  freeSlot.w = -1
+  For slotIndex = 0 To #FLOATER_SLOTS - 1
+    If freeSlot = -1
+      If floaterActive(slotIndex) = False Then freeSlot = slotIndex
+    EndIf
+  Next
+  If freeSlot = -1
+    AwardFloaterPoints{indexNow}
+    Statement Return
+  EndIf
+  floaterActive(freeSlot) = True
+  floaterX(freeSlot) = floaterAtX
+  floaterY(freeSlot) = floaterAtY
+  floaterIndex(freeSlot) = indexNow
+  floaterTimer(freeSlot) = #FLOATER_TICKS
+End Statement
+
+;; All six slots free. ResetLevel{} in map.blitz does the same inline, because it is
+;; earlier in the include order than this file.
+Statement ClearFloaters{}
+  SHARED floaterActive()
+  For slotIndex = 0 To #FLOATER_SLOTS - 1
+    floaterActive(slotIndex) = False
+  Next
+End Statement
+
+; Once per sim tick, from timing.ab3.
+Statement UpdateFloaters{}
+  SHARED floaterActive(), floaterY(), floaterIndex(), floaterTimer()
+  For slotIndex = 0 To #FLOATER_SLOTS - 1
+    If floaterActive(slotIndex) = True
+      If floaterTimer(slotIndex) = 0
+        floaterActive(slotIndex) = False
+      Else
+        If floaterTimer(slotIndex) = #FLOATER_SCORE_AT
+          AwardFloaterPoints{floaterIndex(slotIndex)}
+        EndIf
+        If floaterY(slotIndex) >= #FLOATER_TOP_Y Then floaterY(slotIndex) = floaterY(slotIndex) - 1
+        floaterTimer(slotIndex) = floaterTimer(slotIndex) - 1
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; Cut once at start: the six digits from the 4x8 sheet and the "1UP" from the 16x16
+;; items sheet. Needs both loaded.
+Statement CutFloaterShapes{}
+  Use BitMap #DIGITS_BM
+  For digitIndex = 0 To 5
+    GetaShape #FLOATER_DIGIT_SHAPE + digitIndex, digitIndex*#FLOATER_DIGIT_W, 0, #FLOATER_DIGIT_W, #FLOATER_DIGIT_H
+  Next
+  Use BitMap #ITEMS_BM
+  GetaShape #FLOATER_ONEUP_SHAPE, #FLOATER_UP_CELL*#TILE, 0, #TILE, #TILE
+End Statement
+
+;; Cut once, after CutFloaterShapes{}: each number of the table as one shape, composed from the digit shapes
+;; in the cover bitmap (free until the first cover is drawn), 16 px to a cell. One blit draws a number, not three or four.
+Statement CutFloaterNumbers{}
+  SHARED scorePoints(), digitShape()
+  Use BitMap #COVER_BM
+  Boxf 0, 0, 10*#TILE - 1, #FLOATER_DIGIT_H - 1, 0
+  For numberIndex = 1 To 10
+    remaining.l = scorePoints(numberIndex)
+    digitCount.w = 3
+    If remaining >= 1000 Then digitCount = 4
+    For place = digitCount - 1 To 0 Step -1
+      digitNow.w = remaining MOD 10
+      remaining = remaining/10
+      ;; A digit with no glyph (3, 6, 7, 9: digitShape() is -1) is left blank, as it was when
+      ;; the digits were drawn one by one.
+      If digitShape(digitNow) >= 0 Then Blit #FLOATER_DIGIT_SHAPE + digitShape(digitNow), (numberIndex - 1)*#TILE + place*#FLOATER_DIGIT_W, 0
+    Next
+  Next
+  For numberIndex = 1 To 10
+    digitCount.w = 3
+    If scorePoints(numberIndex) >= 1000 Then digitCount = 4
+    GetaShape #FLOATER_NUMBER_SHAPE + numberIndex, (numberIndex - 1)*#TILE, 0, digitCount*#FLOATER_DIGIT_W, #FLOATER_DIGIT_H
+  Next
+  ; The cover bitmap is on screen while the game loads (black, pen 0): leave nothing in it.
+  Boxf 0, 0, 10*#TILE - 1, #FLOATER_DIGIT_H - 1, 0
+End Statement
+
+;; Render only: the digits side by side, centred over the number's x, 8 px above its
+;; y; a number outside the view, or whose shape would not lie inside the bitmap, is
+;; not drawn. Its timing is unaffected.
+;; One score number: the points of table index `pointsIndex` as 4x8 digits centred
+;; over a 16 px cell at atX, its top at atY, or the "1UP" picture for the 1-UP. In
+;; the world bitmap, skipped outside the view and outside the bitmap. The caller has
+;; set BBlitMode and the bitmap.
+Statement DrawScoreNumber{pointsIndex.w, atX.w, atY.w}
+  SHARED scorePoints(), drawBuffer, viewLeft, viewRight
+  If atY < 0 Then Statement Return
+  If atY + #TILE > #SURFACE_H Then Statement Return
+  If atX + #TILE <= viewLeft - #VIEW_GUARD Then Statement Return
+  If atX >= viewRight + #VIEW_GUARD Then Statement Return
+  If pointsIndex >= #FLOATER_ONEUP_INDEX
+    BBlit drawBuffer, #FLOATER_ONEUP_SHAPE, atX, atY
+    Statement Return
+  EndIf
+  ; One blit: the whole number, centred over the cell.
+  If pointsIndex < 1 Then Statement Return
+  numberDX.w = (#TILE - 3*#FLOATER_DIGIT_W)/2
+  If scorePoints(pointsIndex) >= 1000 Then numberDX = 0
+  BBlit drawBuffer, #FLOATER_NUMBER_SHAPE + pointsIndex, atX + numberDX, atY
+End Statement
+
+Statement DrawFloaters{}
+  SHARED floaterActive(), floaterX(), floaterY(), floaterIndex(), drawBitmap
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  For slotIndex = 0 To #FLOATER_SLOTS - 1
+    If floaterActive(slotIndex) = True
+      DrawScoreNumber{floaterIndex(slotIndex), floaterX(slotIndex), floaterY(slotIndex) - 8}
+    EndIf
+  Next
+End Statement
+
+;; END OF FLOATING SCORE NUMBERS (BLITZ MODE)

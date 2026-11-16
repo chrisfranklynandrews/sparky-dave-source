@@ -1,0 +1,129 @@
+;; =======================================================
+;; GAME OBJECTS SETUP (AMIGA MODE)
+;; =======================================================
+
+;; The Game Objects sheet: things that live in the world and are neither
+;; playfield tiles nor Mario. The flag is tile #OBJ_FLAG, and more will follow.
+;;
+;; Its colours do not come from its own CMAP. The screen palette is the atlas's,
+;; loaded once by DisplayPalette 0, 0, so the atlas has to carry the flag's
+;; colours too -- which is what manifest.SWATCHES does, reserving pens 13 and
+;; 14 on the atlas for them. That is the whole reason a sprite's
+;; swatch declaration has to agree with the atlas pen for pen rather than
+;; merely be self-consistent.
+BitMap #OBJ_BM, #OBJ_SHEET_W, #OBJ_SHEET_H, #PLAYFIELD_PLANES
+BitMap #ITEMS_BM, #ITEMS_SHEET_W, #ITEMS_SHEET_H, #PLAYFIELD_PLANES
+BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+; The HUD glyph sheet. No palette of its own: it uses the atlas pens.
+BitMap #HUD_BM, #HUD_SHEET_W, 8, #PLAYFIELD_PLANES
+; The floating score numbers' digit sheet, also on the atlas pens.
+BitMap #DIGITS_BM, #DIGITS_SHEET_W, 8, #PLAYFIELD_PLANES
+
+objectsIff$ = dataDir$ + "game-objects.iff"
+itemsIff$ = dataDir$ + "items-16x16.iff"
+enemiesIff$ = dataDir$ + "enemies.iff"
+hudIff$ = dataDir$ + "hud-objects.iff"
+digitsIff$ = dataDir$ + "items-4x8.iff"
+logoIff$ = dataDir$ + "title-logo.iff"
+panelIff$ = dataDir$ + "title-panel.iff"
+; The All-Stars look's sheets: the NES art recoloured to its pens by nearest colour (tools/recolour_sheets_allstars.py).
+If #LOOK_ALLSTARS = 1
+  objectsIff$ = dataDir$ + "game-objects-allstars.iff"
+  itemsIff$ = dataDir$ + "items-16x16-allstars.iff"
+  enemiesIff$ = dataDir$ + "enemies-allstars.iff"
+  hudIff$ = dataDir$ + "hud-objects-allstars.iff"
+  digitsIff$ = dataDir$ + "items-4x8-allstars.iff"
+  logoIff$ = dataDir$ + "title-logo-allstars.iff"
+  panelIff$ = dataDir$ + "title-panel-allstars.iff"
+EndIf
+
+;; The underground tile set's two sheets (tools/recolour_sheets_allstars.py under): the enemies and the items, in that set's pens (the items
+;; sheet named items16, so the name keeps to AmigaDOS's 30 characters). They are loaded again, and
+;; the shapes cut from them again, when the area on show changes tile set (EnsureTileSet{}, sparkydave.tileset.blitz.ab3).
+enemiesIffUnder$ = dataDir$ + "enemies-allstars-under.iff"
+itemsIffUnder$ = dataDir$ + "items16-allstars-under.iff"
+enemiesIffWater$ = dataDir$ + "enemies-allstars-water.iff"
+itemsIffWater$ = dataDir$ + "items16-allstars-water.iff"
+enemiesIffCastle$ = dataDir$ + "enemies-allstars-castle.iff"
+itemsIffCastle$ = dataDir$ + "items16-allstars-castle.iff"
+
+Statement LoadObjects{}
+  SHARED objectsIff$
+  SHARED itemsIff$
+  SHARED enemiesIff$
+  SHARED hudIff$
+  SHARED digitsIff$
+  LoadBitMap #OBJ_BM, objectsIff$
+  LoadBitMap #ITEMS_BM, itemsIff$
+  LoadBitMap #ENEMIES_BM, enemiesIff$
+  LoadBitMap #HUD_BM, hudIff$
+  LoadBitMap #DIGITS_BM, digitsIff$
+End Statement
+
+;; The enemies' and items' sheets' bitmaps made again (FreeStartupSheets{} and FreeSetSheets{} free them), for a set to be loaded
+;; into, or copied into from Fast RAM (CopyTileSet{}).
+Statement MakeSetSheets{}
+  BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+  BitMap #ITEMS_BM, #ITEMS_SHEET_W, #ITEMS_SHEET_H, #PLAYFIELD_PLANES
+End Statement
+
+; The enemies' and items' sheets of a tile set, for EnsureTileSet{}: the bitmaps are made again and loaded.
+Statement LoadSetSheets{tileSet.w}
+  SHARED enemiesIff$, itemsIff$, enemiesIffUnder$, itemsIffUnder$, enemiesIffWater$, itemsIffWater$, enemiesIffCastle$, itemsIffCastle$
+  MakeSetSheets{}
+  If tileSet = #TILE_SET_UNDERGROUND
+    LoadBitMap #ENEMIES_BM, enemiesIffUnder$
+    LoadBitMap #ITEMS_BM, itemsIffUnder$
+  EndIf
+  If tileSet = #TILE_SET_WATER
+    LoadBitMap #ENEMIES_BM, enemiesIffWater$
+    LoadBitMap #ITEMS_BM, itemsIffWater$
+  EndIf
+  If tileSet = #TILE_SET_CASTLE
+    LoadBitMap #ENEMIES_BM, enemiesIffCastle$
+    LoadBitMap #ITEMS_BM, itemsIffCastle$
+  EndIf
+  If tileSet = 0
+    LoadBitMap #ENEMIES_BM, enemiesIff$
+    LoadBitMap #ITEMS_BM, itemsIff$
+  EndIf
+End Statement
+
+; The two sheets again, once the shapes are cut from them.
+Statement FreeSetSheets{}
+  Free BitMap #ENEMIES_BM
+  Free BitMap #ITEMS_BM
+End Statement
+
+;; The title's panel tiles go in the digit sheet's bitmap slot (as the logo's, #LOGO_BM) first: free once the floating numbers' digits
+;; are cut (all twelve slots are in use). Call after CutActorShapes{}; CutPanelShapes{} then cuts the nine tiles into shapes, and
+;; LoadLogo{} takes the slot over for the logo.
+Statement LoadPanel{}
+  SHARED panelIff$
+  Free BitMap #DIGITS_BM
+  BitMap #LOGO_BM, #PANEL_SHEET_W, #PANEL_TILE, #PLAYFIELD_PLANES
+  LoadBitMap #LOGO_BM, panelIff$
+End Statement
+
+;; The title logo goes in the same slot, once the panel's tiles are cut from it (LoadPanel{}, CutPanelShapes{}); CutLogoShape{} then cuts
+;; it into its shape.
+Statement LoadLogo{}
+  SHARED logoIff$
+  Free BitMap #LOGO_BM
+  BitMap #LOGO_BM, #LOGO_W, #LOGO_H, #PLAYFIELD_PLANES
+  LoadBitMap #LOGO_BM, logoIff$
+End Statement
+
+;; The sheets used only to cut shapes at start-up, freed once every shape is cut (from init.blitz, after InitHud{}): GetaShape
+;; copies, so the shapes keep their pictures. About 28 KB of Chip RAM: the enemies sheet (10,752 bytes), the items (7,936), the
+;; title logo (7,744), the HUD glyphs (1,408), the flag (128). Kept: the tile atlas (a repainted cell is cut from it in play) and the
+;; two Mario sheets (Mario cut short at the top of the bitmap, when first wanted).
+Statement FreeStartupSheets{}
+  Free BitMap #ENEMIES_BM
+  Free BitMap #ITEMS_BM
+  Free BitMap #LOGO_BM
+  Free BitMap #HUD_BM
+  Free BitMap #OBJ_BM
+End Statement
+
+;; END OF GAME OBJECTS SETUP (AMIGA MODE)

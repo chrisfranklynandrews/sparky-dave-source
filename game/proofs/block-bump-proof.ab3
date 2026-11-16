@@ -1,0 +1,314 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "BlockBumpProof"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: the block bump, clear -> bob -> restore, against one brick and one
+;; `?` block. ESC quits, RIGHT walks, SPACE jumps.
+;;
+;; This is the proof for the bump refactor. The includes it pulls in are the
+;; live, refactored ones, so the whole path is the real one: CheckPlayerHead{}
+;; triggers StartBlockBump{}, the cell clears to sky and queues through
+;; RedrawMetatileCells{}, DrawBlockBump{} bobs the tile as a cookie for
+;; #MARIO_BLOCKBOUNCE frames, and FinishBlockBump{} settles it when the timer
+;; reaches 0. The display loop is the live DrawFrame{} and the live
+;; UnBuffer + ping-pong, so what is proved is the draw sequencing under the
+;; 2-frame drain, not a stand-in for it.
+;;
+;; What to look for, on each bump:
+;;   - the block pops up a few pixels and settles back with no sky flash: the
+;;     cleared cell is sky in BOTH bitmaps before the bob ever draws, so the
+;;     drain can never repaint under it;
+;;   - the brick settles back to a brick (its GID is restored), and the `?`
+;;     settles to the used block;
+;;   - nothing smears: the bob is a cookie, so UnBuffer removes it between
+;;     frames, and the settled tile lands exactly where the last bob frame
+;;     rested (offset 0 at both ends of the table).
+;;
+;; The map is the left edge of the level, synthetic: floor row 12, a brick and
+;; a `?` at row 8, cols 3 and 4. The player starts under the brick at x 48;
+;; walk right about 16 px and jump to bump the `?`. Both columns stay left of
+;; x 80, so the camera never scrolls and the non-scrolling display the proof
+;; uses stays true.
+
+WBStartup
+
+#PLAYFIELD_PLANES = 4
+#COPPER_FLAGS = $10004
+#COPPER_COLORS = 16
+
+#FLOOR_ROW = 12
+#BLOCK_ROW = 8
+#BRICK_COLUMN = 3
+#QUESTION_COLUMN = 4
+#START_X = 48
+#GROUND_GID = 1
+#BRICK_GID = 2
+#QUESTION_GID = 24
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.palettes.data.ab3"
+XINCLUDE "/includes/sparkydave.globals.ab3"
+Dim metatileBuffer.w(#MAP_CELLS - 1)
+Dim mapBuffer.w(#MAP_CELLS - 1)
+Dim mapBufferBackup.w(#MAP_CELLS - 1)
+Dim stampHead.w(#STAMP_GID_MAX)
+Dim stampNext.w(#MAP_CELLS - 1)
+Dim backStampHead.w(#STAMP_GID_MAX)
+Dim backStampNext.w(#BACK_CELLS - 1)
+Dim metatileBufferBackup.w(#MAP_CELLS - 1)
+XINCLUDE "/includes/sparkydave.metatile.classes.ab3"
+XINCLUDE "/includes/sparkydave.sound.data.ab3"
+XINCLUDE "/includes/sparkydave.sound.ab3"
+
+mapWidth.w = #MAP_W
+quitFlag.w = False
+buttons.w = 0
+screenHeight = DispHeight
+
+;; Playfield: one tile wider than the map, like the live game's. The atlas,
+;; the Game Objects sheet (the flag) and Mario's sheet load from the real
+;; assets, so the blocks and the player are the real art.
+BitMap 0, (#MAP_W + 1)*#TILE, screenHeight, #PLAYFIELD_PLANES
+BitMap 1, (#MAP_W + 1)*#TILE, screenHeight, #PLAYFIELD_PLANES
+BitMap #ATLAS_BM, #ATLAS_W, #ATLAS_H, #PLAYFIELD_PLANES
+BitMap #OBJ_BM, #OBJ_SHEET_W, #OBJ_SHEET_H, #PLAYFIELD_PLANES
+BitMap #MARIO_BM, #MARIO_SHEET_W, #TILE, #PLAYFIELD_PLANES
+InitPalette 0, #COPPER_COLORS
+InitShape #TILE_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #MARIO_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #FLAG_SHAPE, #FLAG_W, #FLAG_H, #PLAYFIELD_PLANES
+InitShape #BUMP_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+;; DrawPlayer{} blits pre-cut shapes. This proof has only the small Mario sheet,
+;; so it cuts only the small set (and the flag, above).
+For preSlot = #PRE_SMALL_R To #PRE_SMALL_L + #PRE_SMALL_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+
+atlasIff$ = "sparky-dave:game/assets/tiles-all.iff"
+objectsIff$ = "sparky-dave:game/assets/game-objects.iff"
+marioIff$ = "sparky-dave:game/assets/mario-small.iff"
+LoadBitMap #ATLAS_BM, atlasIff$, 0
+LoadBitMap #OBJ_BM, objectsIff$, 0
+LoadBitMap #MARIO_BM, marioIff$, 0
+
+;; The player stands on the floor under the brick. Everything else the physics
+;; needs is the globals' defaults.
+playerX.w = #START_X
+playerY.w = (#FLOOR_ROW - 1)*#TILE
+
+BLITZ
+;; Canonical DisplayLib startup. $10004 is agacolors + four bitplanes: the
+;; proof does not scroll the bitmap, so the smooth-scroll bit would only black
+;; the screen out.
+InitCopList 0, #COPPER_FLAGS
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "/includes/sparkydave.sound.blitz.ab3"
+XINCLUDE "/includes/sparkydave.timing-marks.blitz.ab3"
+XINCLUDE "/includes/sparkydave.allstars-palette.data.ab3"
+XINCLUDE "/includes/sparkydave.map.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system.blitz.ab3"
+XINCLUDE "/includes/sparkydave.debris.blitz.ab3"
+XINCLUDE "/includes/sparkydave.floaters.blitz.ab3"
+XINCLUDE "/includes/sparkydave.collision.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player-state.blitz.ab3"
+XINCLUDE "/includes/sparkydave.life.blitz.ab3"
+XINCLUDE "/includes/sparkydave.enemies.blitz.ab3"
+XINCLUDE "/includes/sparkydave.fireballs.blitz.ab3"
+XINCLUDE "/includes/sparkydave.levelend.blitz.ab3"
+XINCLUDE "/includes/sparkydave.pipes.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system-runtime.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player.blitz.ab3"
+XINCLUDE "/includes/sparkydave.hud.blitz.ab3"
+XINCLUDE "/includes/sparkydave.shapes.blitz.ab3"
+XINCLUDE "/includes/sparkydave.draw.ab3"
+
+;; ---------------------------------------------------------------
+;; Harness
+;; ---------------------------------------------------------------
+
+Statement SetProofCell{testRow.w, testColumn.w, testClass.w, testGid.w}
+  SHARED metatileBuffer(), mapBuffer()
+  proofCell.w = testRow*#MAP_W + testColumn
+  metatileBuffer(proofCell) = testClass
+  mapBuffer(proofCell) = testGid
+End Statement
+
+Statement BuildProofMap{}
+  SHARED metatileBuffer(), mapBuffer()
+  For proofCell = 0 To #MAP_CELLS - 1
+    metatileBuffer(proofCell) = 0
+    mapBuffer(proofCell) = 0
+  Next
+  For proofColumn = 0 To #VIEW_TILES_W - 1
+    SetProofCell{#FLOOR_ROW, proofColumn, #MT_GROUND, #GROUND_GID}
+  Next
+  SetProofCell{#BLOCK_ROW, #BRICK_COLUMN, #MT_BRICK, #BRICK_GID}
+  SetProofCell{#BLOCK_ROW, #QUESTION_COLUMN, #MT_QUESTION, #QUESTION_GID}
+End Statement
+
+;; Copied from tests/test-harness.ab3 so the two drive the tick identically.
+;; If UpdatePlayer{} gains or reorders a call, this has to change with it.
+Statement Tick{buttons.w}
+  SHARED playerButtons, playerButtonsLast, playerRunningTimer
+  SHARED sideCollisionTimer, blockBounceTimer, playerOnGround, playerState
+  SHARED playerIsBig, playerCollisionBits
+  ;; Not reset here: ApplyCollisionButtonMask{} below needs the previous
+  ;; frame's mask to survive until it is applied, so the reset is after
+  ;; that call. Pole/resize branches reset explicitly before returning.
+  UpdateFlag{}
+  If playerState = #PLAYER_ST_POLE
+    UpdatePoleSlide{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerState = #PLAYER_ST_RESIZE
+    UpdateResize{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerRunningTimer > 0 Then playerRunningTimer = playerRunningTimer - 1
+  If sideCollisionTimer > 0 Then sideCollisionTimer = sideCollisionTimer - 1
+  If blockBounceTimer > 0 Then blockBounceTimer = blockBounceTimer - 1
+  UpdateBlockBump{}
+  playerButtons = buttons
+  ;; The live masking step, not a copy of it: ReadPlayerButtons{} cannot be
+  ;; used here because it reads the keyboard, but the mask itself is engine
+  ;; code and calling the same routine is the point.
+  ApplyCollisionButtonMask{}
+  playerCollisionBits = $ff
+  SetPlayerAbsoluteSpeed{}
+  TryStartJump{}
+  SetupHorizontalLimits{}
+  PrepareGroundMotion{}
+  SetPlayerAbsoluteSpeed{}
+  ApplyPlayerFacing{}
+  ApplyHorizontalFriction{}
+  MovePlayerHorizontal{}
+  SetPlayerMovingDirection{}
+  CheckPlayerSides{}
+  SetPlayerAbsoluteSpeed{}
+  SelectVerticalForce{}
+  If playerOnGround = False Then MovePlayerVertical{}
+  CheckPlayerFeet{}
+  CheckPlayerHead{}
+  UpdatePlayerCamera{}
+  UpdatePlayerBoundBox{}
+  SetPlayerAbsoluteSpeed{}
+  UpdatePlayerAnimation{}
+  CheckFlagpole{}
+  playerButtonsLast = playerButtons
+End Statement
+
+BuildProofMap{}
+CutSmallMarioShapes{}
+CutFlagShape{}
+;; Stamp both playfields from the proof map and seed both bob buffers. It leaves
+;; drawBitmap/drawBuffer at A; draw the player into each, then end at B, exactly
+;; as init.blitz.ab3 does.
+StampBothPlayfields{}
+DrawPlayer{}
+drawBitmap = #PLAY_BM_B
+drawBuffer = #BOB_BUF_B
+DrawPlayer{}
+
+While quitFlag = False
+  buttons = 0
+  If RawStatus(#RAW_KEY_RIGHT) Then buttons = #MARIO_BTN_RIGHT
+  If RawStatus(#RAW_KEY_JUMP) Then buttons = buttons OR #MARIO_BTN_JUMP
+  Tick{buttons}
+  DrawFrame{}
+  displayBitmap = drawBitmap
+  VWait
+  DisplayBitMap 0, displayBitmap
+  drawBitmap = #PLAY_BM_A + #PLAY_BM_B - displayBitmap
+  drawBuffer = #BOB_BUF_A + #BOB_BUF_B - displayBitmap
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+End

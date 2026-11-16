@@ -1,0 +1,102 @@
+.KEY variant/A,look/A
+.BRA {
+.KET }
+; Compile and run the test harness for one physics variant (ntsc or pal) and one look (nes or
+; allstars). Called by run-tests for each of the four; it can be run by hand too:
+;   execute sparky-dave:S/run-tests-one pal allstars
+; The variant and the look are the copies of sparkydave.physics.ab3 and sparkydave.look.ab3 in place
+; at compile time, so this copies the two files over them for the compile and puts the committed
+; copies (the NTSC physics, the NES look) back as soon as it has compiled, or failed to.
+; The harness names its results file by the two (#SIM_HZ, #LOOK_ALLSTARS):
+;   sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt
+; Compile errors go to game/tests/compile-tests-{variant}-{look}.log. A failure is noted in
+; RAM:sparky-tests-failed, which run-tests reads.
+
+FAILAT 21
+
+ECHO "Behaviour tests: {variant} {look}"
+COPY sparky-dave:game/includes/sparkydave.physics.{variant}.ab3 TO sparky-dave:game/includes/sparkydave.physics.ab3 QUIET
+IF ERROR
+  ECHO "Could not copy the {variant} physics file into place"
+  ECHO "failed" TO RAM:sparky-tests-failed
+  QUIT 0
+ENDIF
+COPY sparky-dave:game/includes/sparkydave.look.{look}.ab3 TO sparky-dave:game/includes/sparkydave.look.ab3 QUIET
+IF ERROR
+  ECHO "Could not copy the {look} look file into place"
+  ECHO "failed" TO RAM:sparky-tests-failed
+  COPY sparky-dave:game/includes/sparkydave.physics.ntsc.ab3 TO sparky-dave:game/includes/sparkydave.physics.ab3 QUIET
+  COPY sparky-dave:game/includes/sparkydave.look.nes.ab3 TO sparky-dave:game/includes/sparkydave.look.ab3 QUIET
+  QUIT 0
+ENDIF
+DELETE sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt QUIET
+DELETE sparky-dave:game/tests/compile-tests-{variant}-{look}.log QUIET
+DELETE RAM:TestHarness QUIET
+
+Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/tests/test-harness.ab3 -e RAM:TestHarness -v 2 > sparky-dave:game/tests/compile-tests-{variant}-{look}.log
+
+; The compiler does not always return an error code when it finds errors, so the three checks are
+; the return code (taken here, before anything else runs), the log (an error is a "Compiler Error"
+; line) and the program, which was deleted above.
+IF ERROR
+  SET testcompiled failed
+ELSE
+  SET testcompiled ok
+ENDIF
+
+; The committed copies go back now: the program is compiled (or not), and nothing else needs them.
+COPY sparky-dave:game/includes/sparkydave.physics.ntsc.ab3 TO sparky-dave:game/includes/sparkydave.physics.ab3 QUIET
+COPY sparky-dave:game/includes/sparkydave.look.nes.ab3 TO sparky-dave:game/includes/sparkydave.look.ab3 QUIET
+
+IF "$testcompiled" EQ "failed"
+  UNSET testcompiled
+  ECHO "{variant} {look} test compile failed"
+  TYPE sparky-dave:game/tests/compile-tests-{variant}-{look}.log
+  ECHO "failed" TO RAM:sparky-tests-failed
+  QUIT 0
+ENDIF
+UNSET testcompiled
+
+SEARCH sparky-dave:game/tests/compile-tests-{variant}-{look}.log "Compiler Error" QUIET
+IF NOT WARN
+  ECHO "{variant} {look} test compile failed"
+  TYPE sparky-dave:game/tests/compile-tests-{variant}-{look}.log
+  ECHO "failed" TO RAM:sparky-tests-failed
+  QUIT 0
+ENDIF
+
+IF NOT EXISTS RAM:TestHarness
+  ECHO "{variant} {look} test compile failed: no program was made"
+  TYPE sparky-dave:game/tests/compile-tests-{variant}-{look}.log
+  ECHO "failed" TO RAM:sparky-tests-failed
+  QUIT 0
+ENDIF
+
+ECHO "{variant} {look} tests compiled, running"
+
+RAM:TestHarness
+
+IF NOT EXISTS sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt
+  ECHO "{variant} {look} test run wrote no results file"
+  ECHO "failed" TO RAM:sparky-tests-failed
+  QUIT 0
+ENDIF
+
+; SEARCH returns 0 when the text is found and WARN when it is not.
+SEARCH sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt ": FAIL" QUIET
+IF NOT WARN
+  ECHO "{variant} {look} tests failed: FAIL assertions"
+  ECHO "failed" TO RAM:sparky-tests-failed
+ENDIF
+
+SEARCH sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt ": NO RESULT" QUIET
+IF NOT WARN
+  ECHO "{variant} {look} tests failed: NO RESULT assertions"
+  ECHO "failed" TO RAM:sparky-tests-failed
+ENDIF
+
+SEARCH sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt ": NOT RUN" QUIET
+IF NOT WARN
+  ECHO "{variant} {look} tests failed: scenario NOT RUN"
+  ECHO "failed" TO RAM:sparky-tests-failed
+ENDIF

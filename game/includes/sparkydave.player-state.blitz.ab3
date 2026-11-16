@@ -1,0 +1,156 @@
+;; =======================================================
+;; PLAYER STATE HELPERS (BLITZ MODE)
+;; =======================================================
+
+;; Grow or shrink (the main project's LIFE_CYCLE note, "The freeze"). The world's timers stand still for the
+;; cartridge's number of ticks (worldFreezeTicks); UpdateResize{} holds him for the first part.
+Statement StartResize{toBig.w}
+  SHARED playerState, playerResizeToBig, playerResizeTimer
+  SHARED playerFire, playerResizeFire, worldFreezeTicks, playerSizeAnimTicks
+  playerResizeToBig = toBig
+  playerResizeFire = False
+  ;; Shrinking, however it came about, takes the fire with it: a hit Fire Mario is
+  ;; small at once, with no step through big (ForceInjury, smbdis 11405).
+  If toBig = False Then playerFire = False
+  playerResizeTimer = 0
+  playerSizeAnimTicks = 0
+  worldFreezeTicks = #INJURY_FREEZE_TICKS
+  If toBig = True Then worldFreezeTicks = #GROW_FREEZE_TICKS
+  playerState = #PLAYER_ST_RESIZE
+End Statement
+
+;; A big Mario takes a flower (UpToFiery, smbdis 11285): a freeze in which he stays
+;; big and only his colours change (UpdateMarioColours{}), then he is Fire Mario.
+Statement StartFireUp{}
+  SHARED playerState, playerResizeToBig, playerResizeTimer
+  SHARED playerResizeFire, worldFreezeTicks
+  playerResizeToBig = True
+  playerResizeFire = True
+  playerResizeTimer = 0
+  worldFreezeTicks = #FIRE_FLASH_TICKS
+  playerState = #PLAYER_ST_RESIZE
+End Statement
+
+; The flower: nothing to a Fire Mario, a grow to a small one, the fire to a big one.
+Statement GrabFlower{}
+  SHARED playerIsBig, playerFire
+  If playerFire = True Then Statement Return
+  If playerIsBig = False
+    StartResize{True}
+  Else
+    StartFireUp{}
+  EndIf
+End Statement
+
+;; One tick of the hold. A fire-up is the colour flash only. A grow holds him for the whole freeze
+;; (the size flips and the picture starts #GROW_ANIM_START ticks in), clearing the freeze when it
+;; ends as the cartridge's DonePlayerTask does. A hit holds him only #INJURY_HOLD_TICKS: the size
+;; flips and the shrink picture starts, and he is free from the next tick, with the enemies and
+;; the timers still standing still (worldFreezeTicks, counted down in UpdatePlayer{}).
+Statement UpdateResize{}
+  SHARED playerState, playerIsBig, playerResizeToBig
+  SHARED playerResizeTimer, playerFire, playerResizeFire
+  SHARED worldFreezeTicks, playerSizeAnimTicks, playerSizeAnimGrow
+  playerResizeTimer = playerResizeTimer + 1
+  If playerResizeFire = True
+    If playerResizeTimer >= #FIRE_FLASH_TICKS
+      playerFire = True
+      playerResizeFire = False
+      playerState = #PLAYER_ST_FREE
+      playerResizeTimer = 0
+      worldFreezeTicks = 0
+    EndIf
+    Statement Return
+  EndIf
+  If playerResizeToBig = True
+    If playerResizeTimer = #GROW_ANIM_START
+      playerIsBig = True
+      playerSizeAnimGrow = True
+      playerSizeAnimTicks = #SIZE_ANIM_TICKS
+    EndIf
+    If playerResizeTimer >= #GROW_FREEZE_TICKS
+      playerIsBig = True
+      playerState = #PLAYER_ST_FREE
+      playerResizeTimer = 0
+      worldFreezeTicks = 0
+    EndIf
+  Else
+    If playerResizeTimer >= #INJURY_HOLD_TICKS
+      playerIsBig = False
+      playerSizeAnimGrow = False
+      playerSizeAnimTicks = #SIZE_ANIM_TICKS
+      playerState = #PLAYER_ST_FREE
+      playerResizeTimer = 0
+    EndIf
+  EndIf
+End Statement
+
+;; Which size the alternating picture shows this tick, True for the big one: the cartridge's
+;; ChangeSizeOffsetAdder (smbdis 14689) step by step, 4 ticks a step. Growing flickers small and
+;; big and ends on big; shrinking alternates from small to big. Not asked unless
+;; playerSizeAnimTicks is above 0.
+Function.w SizeAnimShowsBig{}
+  SHARED playerSizeAnimTicks, playerSizeAnimGrow
+  stepNow.w = (#SIZE_ANIM_TICKS - playerSizeAnimTicks)/#SIZE_ANIM_STEP_TICKS
+  If stepNow < 0 Then stepNow = 0
+  If stepNow > #SIZE_ANIM_STEPS - 1 Then stepNow = #SIZE_ANIM_STEPS - 1
+  patternText$ = "0101010101"
+  If playerSizeAnimGrow = True Then patternText$ = "0101011011"
+  showsBig.w = False
+  If Mid$(patternText$, stepNow + 1, 1) = "1" Then showsBig = True
+  Function Return showsBig
+End Function
+
+;; The colour set Mario should show: 0 normal, 1 fire, 2 to 5 the four star sets,
+;; stepped through while he takes a flower. UpdateMarioColours{} in
+;; sparkydave.palette.blitz.ab3 puts it on screen; this is the decision, kept here
+;; because it needs no screen and the tests can read it.
+Function.w MarioColourSetWanted{}
+  SHARED playerState, playerFire, playerResizeFire, playerResizeTimer
+  SHARED playerStarIntervals, simTickCounter
+  If playerState = #PLAYER_ST_RESIZE
+    If playerResizeFire = True Then Function Return 2 + ((playerResizeTimer/#FLASH_SET_TICKS) MOD 4)
+  EndIf
+  ;; Starman: the four sets in turn, quickly until the last 8 intervals and slowly
+  ;; for them (the cartridge's frame counter shifted once or three times).
+  If playerStarIntervals > 0
+    If playerStarIntervals >= #STAR_FAST_INTERVALS
+      Function Return 2 + ((simTickCounter/#STAR_FAST_TICKS) MOD 4)
+    EndIf
+    Function Return 2 + ((simTickCounter/#STAR_SLOW_TICKS) MOD 4)
+  EndIf
+  If playerFire = True Then Function Return 1
+  Function Return 0
+End Function
+
+;; The sprite sheet's frame for the picture number the engine uses (playerFrame, the NES sheets' order: walk 0 to 2, turn, jump, death, idle,
+;; climb 7 and 8, swim 9 to 13 or 14 as a picture and a kick for each of three steps, #MARIO_F_THROW for the throw). The NES look's sprites are
+;; cut from those sheets, so it is the number itself. The All-Stars sheets agree to the climb (0 to 8), have one swim pose a step (#MARIO_F_SWIM1
+;; + the step: the picture's pair halved) and the throw at #SPRITE_F_THROW; a frame past the sheet is the last.
+Function.w MarioSpriteFrame{pictureFrame.w, frameCount.w}
+  If #MARIO_SPRITE_COLOURS = 3 Then Function Return pictureFrame
+  spriteFrame.w = pictureFrame
+  If pictureFrame = #MARIO_F_THROW
+    spriteFrame = #SPRITE_F_THROW
+  Else
+    If pictureFrame >= #MARIO_F_SWIM1 Then spriteFrame = #MARIO_F_SWIM1 + (pictureFrame - #MARIO_F_SWIM1)/2
+  EndIf
+  If spriteFrame > frameCount - 1 Then spriteFrame = frameCount - 1
+  Function Return spriteFrame
+End Function
+
+;; Every motion of his own zeroed and him not standing: the start of a pipe move and
+;; of an area switch, so no speed carries across.
+Statement StopPlayer{}
+  SHARED playerSpeedX, playerMoveForceX, playerFractionX
+  SHARED playerSpeedY, playerMoveForceY, playerFractionY, playerOnGround
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  playerFractionX = 0
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  playerOnGround = False
+End Statement
+
+;; END OF PLAYER STATE HELPERS (BLITZ MODE)

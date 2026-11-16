@@ -1,0 +1,547 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; precut-shapes.ab3 -- does cutting the shapes once at init make drawing cheaper?
+;; Compile in UAE. Not part of the game. Proof for the main project's journal notes ("pre-cut the
+;; animation frames") and the main project's TIMING note.
+;;
+;; The game draws every actor every frame like this: GetaShape cuts the current
+;; frame out of its sheet (and builds the cookie), XFlip turns it if it faces
+;; left, then BBlit draws it. The frame time reports put draw and HUD at about
+;; 80 percent of the work. This proof draws the same eight actors two ways and
+;; times the draw segment of each, on the same beam clock as frametime.blitz.ab3:
+;;   mode 0, per-frame cut: GetaShape, XFlip when facing left, BBlit (the game today)
+;;   mode 1, pre-cut: BBlit of a shape cut once at init, one shape per frame and
+;;                    one more set for left-facing
+;; Actors: small Mario, big Mario, four Goombas, a mushroom, a coin. That is
+;; heavier than the busiest real scene, which has only one Mario.
+;; It alternates 400 frames of mode 0 with 400 of mode 1, three rounds, then writes
+;; precut-shapes-results.txt and quits. Esc quits early.
+;;
+;; The colour box at the top left shows the mode: red is per-frame cut, green is
+;; pre-cut. Actors walk back and forth; the picture should look the same in both.
+;;
+;; What the results answer
+;; 1. How many raster lines does the draw segment take in each mode, average and
+;;    worst, and what is the saving? (A line is about 63.5 microseconds, a PAL frame
+;;    is 312 lines.)
+;; 2. What does pre-cutting cost in Chip RAM, and what does the shape count come to
+;;    against Max Shape = 192?
+;; 3. Does free Chip RAM drift during the per-frame cut phases? (A second look at the
+;;    leak question.)
+;; If the saving is small, GetaShape was not the hot spot and the plan changes.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_ESC   = $45
+
+#COPPER_COLORS = 16
+#COPPER_FLAGS  = $10004
+#COPPER_YPOS   = 44
+#SCREEN_W   = 320
+#SCREEN_H   = 256
+
+#TILE       = 16
+#BOB_BYTES  = 16384
+
+;; Bitmaps: 0 and 1 draw buffers, 2 small Mario, 3 big Mario, 4 enemies, 5 items,
+;; 6 atlas (palette only).
+#BM_A       = 0
+#BM_B       = 1
+#BM_SMALL   = 2
+#BM_BIG     = 3
+#BM_ENEMIES = 4
+#BM_ITEMS   = 5
+#BM_ATLAS   = 6
+#SMALL_W    = 224
+#BIG_W      = 304
+#BIG_H      = 32
+#ENEMIES_W  = 480
+#ENEMIES_H  = 32
+#ITEMS_W    = 832
+#ATLAS_W    = 464
+#ATLAS_H    = 96
+
+;; Shapes the game also uses every frame, one slot per sheet.
+#CUT_SMALL  = 1
+#CUT_BIG    = 2
+#CUT_ENEMY  = 3
+#CUT_ITEMS  = 4
+
+;; Pre-cut slots. Small Mario 14 frames, big Mario 19, Goomba 3, mushroom cells 29 to
+;; 31, coin cells 42 to 49. Small and big have a right and a left set.
+#PRE_SMALL_R   = 20
+#PRE_SMALL_L   = 34
+#PRE_BIG_R     = 48
+#PRE_BIG_L     = 67
+#PRE_GOOMBA    = 86
+#PRE_MUSHROOM  = 89
+#PRE_COIN      = 92
+#PRE_LAST      = 99
+
+#MUSHROOM_CELL = 29
+#COIN_CELL     = 42
+
+#ACTORS      = 8
+#PHASE_FRAMES = 400
+#PHASES      = 6
+#LINES_PAL   = 312
+
+;; Actor types.
+#T_SMALL    = 0
+#T_BIG      = 1
+#T_GOOMBA   = 2
+#T_MUSHROOM = 3
+#T_COIN     = 4
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+phase.w = 0
+phaseFrame.w = 0
+phaseMode.w = 0
+startLine.l = 0
+endLine.l = 0
+slotIndex.w = 0
+cellIndex.w = 0
+chipStart.l = 0
+chipBeforeCut.l = 0
+chipAfterCut.l = 0
+chipEnd.l = 0
+chipPhaseStart.l = 0
+foundAtlas.w = False
+
+Dim actorType.w(#ACTORS - 1)
+Dim actorX.w(#ACTORS - 1)
+Dim actorY.w(#ACTORS - 1)
+Dim actorFrame.w(#ACTORS - 1)
+Dim actorDir.w(#ACTORS - 1)
+Dim actorTimer.w(#ACTORS - 1)
+
+;; Totals per mode.
+Dim modeFrames.l(1)
+Dim modeSum.l(1)
+Dim modeMax.l(1)
+Dim modeDrift.l(1)
+
+atlasIff$ = "sparky-dave:game/assets/tiles-all.iff"
+smallIff$ = "sparky-dave:game/assets/mario-small.iff"
+bigIff$ = "sparky-dave:game/assets/mario-big.iff"
+enemiesIff$ = "sparky-dave:game/assets/enemies.iff"
+itemsIff$ = "sparky-dave:game/assets/items-16x16.iff"
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+chipStart = AvailMem_(2)
+BitMap #BM_A, #SCREEN_W, #SCREEN_H, 4
+BitMap #BM_B, #SCREEN_W, #SCREEN_H, 4
+BitMap #BM_SMALL, #SMALL_W, #TILE, 4
+BitMap #BM_BIG, #BIG_W, #BIG_H, 4
+BitMap #BM_ENEMIES, #ENEMIES_W, #ENEMIES_H, 4
+BitMap #BM_ITEMS, #ITEMS_W, #TILE, 4
+BitMap #BM_ATLAS, #ATLAS_W, #ATLAS_H, 4
+InitPalette 0, #COPPER_COLORS
+;; Placeholder if the atlas is missing.
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 255, 255, 255
+AGAPalRGB 0, 2, 200, 60, 0
+AGAPalRGB 0, 3, 0, 160, 0
+
+If Exists(atlasIff$) > 0
+  foundAtlas = True
+  LoadBitMap #BM_ATLAS, atlasIff$, 0
+EndIf
+LoadBitMap #BM_SMALL, smallIff$
+LoadBitMap #BM_BIG, bigIff$
+LoadBitMap #BM_ENEMIES, enemiesIff$
+LoadBitMap #BM_ITEMS, itemsIff$
+
+;; The four shapes the game keeps for per-frame cutting.
+InitShape #CUT_SMALL, #TILE, #TILE, 4
+InitShape #CUT_BIG, #TILE, #BIG_H, 4
+InitShape #CUT_ENEMY, #TILE, #TILE, 4
+InitShape #CUT_ITEMS, #TILE, #TILE, 4
+
+;; The pre-cut shapes. Chip RAM is read around their allocation and cutting.
+chipBeforeCut = AvailMem_(2)
+For slotIndex = #PRE_SMALL_R To #PRE_BIG_R - 1
+  InitShape slotIndex, #TILE, #TILE, 4
+Next
+For slotIndex = #PRE_BIG_R To #PRE_GOOMBA - 1
+  InitShape slotIndex, #TILE, #BIG_H, 4
+Next
+For slotIndex = #PRE_GOOMBA To #PRE_LAST
+  InitShape slotIndex, #TILE, #TILE, 4
+Next
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+Statement ApplyDisplay{}
+  InitCopList 0, #COPPER_YPOS, #SCREEN_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+  CreateDisplay 0
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, #BM_A
+End Statement
+
+;; Cut every frame once. The left sets are the right sets flipped once.
+Statement PrecutShapes{}
+  SHARED cellIndex
+  Use BitMap #BM_SMALL
+  For cellIndex = 0 To 13
+    GetaShape #PRE_SMALL_R + cellIndex, cellIndex*#TILE, 0, #TILE, #TILE
+    GetaShape #PRE_SMALL_L + cellIndex, cellIndex*#TILE, 0, #TILE, #TILE
+    XFlip #PRE_SMALL_L + cellIndex
+  Next
+  Use BitMap #BM_BIG
+  For cellIndex = 0 To 18
+    GetaShape #PRE_BIG_R + cellIndex, cellIndex*#TILE, 0, #TILE, #BIG_H
+    GetaShape #PRE_BIG_L + cellIndex, cellIndex*#TILE, 0, #TILE, #BIG_H
+    XFlip #PRE_BIG_L + cellIndex
+  Next
+  Use BitMap #BM_ENEMIES
+  For cellIndex = 0 To 2
+    GetaShape #PRE_GOOMBA + cellIndex, cellIndex*#TILE, 16, #TILE, #TILE
+  Next
+  Use BitMap #BM_ITEMS
+  For cellIndex = 0 To 2
+    GetaShape #PRE_MUSHROOM + cellIndex, (#MUSHROOM_CELL + cellIndex)*#TILE, 0, #TILE, #TILE
+  Next
+  For cellIndex = 0 To 7
+    GetaShape #PRE_COIN + cellIndex, (#COIN_CELL + cellIndex)*#TILE, 0, #TILE, #TILE
+  Next
+End Statement
+
+Statement InitActors{}
+  SHARED actorType(), actorX(), actorY(), actorFrame(), actorDir(), actorTimer()
+  For i.w = 0 To #ACTORS - 1
+    actorDir(i) = 1
+    actorTimer(i) = i
+    actorFrame(i) = 0
+    actorY(i) = 208
+    actorX(i) = 20 + i*34
+  Next
+  actorType(0) = #T_SMALL
+  actorType(1) = #T_BIG
+  actorType(2) = #T_GOOMBA
+  actorType(3) = #T_GOOMBA
+  actorType(4) = #T_GOOMBA
+  actorType(5) = #T_GOOMBA
+  actorType(6) = #T_MUSHROOM
+  actorType(7) = #T_COIN
+  actorFrame(6) = #MUSHROOM_CELL
+  actorFrame(7) = #COIN_CELL
+  actorY(7) = 120
+  actorDir(1) = -1
+  actorDir(3) = -1
+  actorDir(5) = -1
+End Statement
+
+;; Walk, turn at the edges, animate. Not timed.
+Statement UpdateActors{}
+  SHARED actorType(), actorX(), actorY(), actorFrame(), actorDir(), actorTimer()
+  For i.w = 0 To #ACTORS - 1
+    actorTimer(i) = actorTimer(i) + 1
+    If actorType(i) = #T_SMALL OR actorType(i) = #T_BIG
+      actorX(i) = actorX(i) + actorDir(i)*2
+      If actorTimer(i) >= 5
+        actorTimer(i) = 0
+        actorFrame(i) = actorFrame(i) + 1
+        If actorFrame(i) > 2 Then actorFrame(i) = 0
+      EndIf
+    EndIf
+    If actorType(i) = #T_GOOMBA
+      actorX(i) = actorX(i) + actorDir(i)
+      If actorTimer(i) >= 8
+        actorTimer(i) = 0
+        actorFrame(i) = 1 - actorFrame(i)
+      EndIf
+    EndIf
+    If actorType(i) = #T_MUSHROOM Then actorX(i) = actorX(i) + actorDir(i)
+    If actorType(i) = #T_COIN
+      If actorTimer(i) >= 4
+        actorTimer(i) = 0
+        actorFrame(i) = actorFrame(i) + 1
+        If actorFrame(i) >= #COIN_CELL + 8 Then actorFrame(i) = #COIN_CELL
+      EndIf
+    EndIf
+    If actorX(i) >= 296 Then actorDir(i) = -1
+    If actorX(i) <= 8 Then actorDir(i) = 1
+  Next
+End Statement
+
+;; Mode 0: what the game does today, every actor, every frame.
+Statement DrawActorsCut{}
+  SHARED actorType(), actorX(), actorY(), actorFrame(), actorDir(), drawBm, drawBuf
+  For i.w = 0 To #ACTORS - 1
+    If actorType(i) = #T_SMALL
+      Use BitMap #BM_SMALL
+      GetaShape #CUT_SMALL, actorFrame(i)*#TILE, 0, #TILE, #TILE
+      If actorDir(i) < 0 Then XFlip #CUT_SMALL
+      Use BitMap drawBm
+      BBlit drawBuf, #CUT_SMALL, actorX(i), actorY(i)
+    EndIf
+    If actorType(i) = #T_BIG
+      Use BitMap #BM_BIG
+      GetaShape #CUT_BIG, actorFrame(i)*#TILE, 0, #TILE, #BIG_H
+      If actorDir(i) < 0 Then XFlip #CUT_BIG
+      Use BitMap drawBm
+      BBlit drawBuf, #CUT_BIG, actorX(i), actorY(i) - 16
+    EndIf
+    If actorType(i) = #T_GOOMBA
+      Use BitMap #BM_ENEMIES
+      GetaShape #CUT_ENEMY, actorFrame(i)*#TILE, 16, #TILE, #TILE
+      Use BitMap drawBm
+      BBlit drawBuf, #CUT_ENEMY, actorX(i), actorY(i)
+    EndIf
+    If actorType(i) = #T_MUSHROOM OR actorType(i) = #T_COIN
+      Use BitMap #BM_ITEMS
+      GetaShape #CUT_ITEMS, actorFrame(i)*#TILE, 0, #TILE, #TILE
+      Use BitMap drawBm
+      BBlit drawBuf, #CUT_ITEMS, actorX(i), actorY(i)
+    EndIf
+  Next
+End Statement
+
+;; Mode 1: the same blits from shapes cut once.
+Statement DrawActorsPrecut{}
+  SHARED actorType(), actorX(), actorY(), actorFrame(), actorDir(), drawBm, drawBuf
+  Use BitMap drawBm
+  For i.w = 0 To #ACTORS - 1
+    If actorType(i) = #T_SMALL
+      If actorDir(i) < 0
+        BBlit drawBuf, #PRE_SMALL_L + actorFrame(i), actorX(i), actorY(i)
+      Else
+        BBlit drawBuf, #PRE_SMALL_R + actorFrame(i), actorX(i), actorY(i)
+      EndIf
+    EndIf
+    If actorType(i) = #T_BIG
+      If actorDir(i) < 0
+        BBlit drawBuf, #PRE_BIG_L + actorFrame(i), actorX(i), actorY(i) - 16
+      Else
+        BBlit drawBuf, #PRE_BIG_R + actorFrame(i), actorX(i), actorY(i) - 16
+      EndIf
+    EndIf
+    If actorType(i) = #T_GOOMBA
+      BBlit drawBuf, #PRE_GOOMBA + actorFrame(i), actorX(i), actorY(i)
+    EndIf
+    If actorType(i) = #T_MUSHROOM
+      BBlit drawBuf, #PRE_MUSHROOM + (actorFrame(i) - #MUSHROOM_CELL), actorX(i), actorY(i)
+    EndIf
+    If actorType(i) = #T_COIN
+      BBlit drawBuf, #PRE_COIN + (actorFrame(i) - #COIN_CELL), actorX(i), actorY(i)
+    EndIf
+  Next
+End Statement
+
+;; The mode marker: red box for mode 0, green for mode 1, in both buffers.
+Statement DrawModeBox{boxMode.w}
+  pen.w = 2
+  If boxMode = 1 Then pen = 3
+  Use BitMap #BM_A
+  Boxf 0, 0, 15, 7, pen
+  Use BitMap #BM_B
+  Boxf 0, 0, 15, 7, pen
+End Statement
+
+BBlitMode CookieMode
+Use BitMap #BM_A
+Cls 0
+Use BitMap #BM_B
+Cls 0
+PrecutShapes{}
+chipAfterCut = AvailMem_(2)
+InitActors{}
+DrawModeBox{0}
+ApplyDisplay{}
+chipPhaseStart = AvailMem_(2)
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  UpdateActors{}
+
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  If phaseMode = 0
+    DrawActorsCut{}
+  Else
+    DrawActorsPrecut{}
+  EndIf
+  endLine = RasterLine{}
+  drawLines.l = endLine - startLine
+  If drawLines < 0 Then drawLines = drawLines + #LINES_PAL
+  ;; The first 10 frames of a phase are not counted: the buffers are settling.
+  If phaseFrame >= 10
+    modeFrames(phaseMode) = modeFrames(phaseMode) + 1
+    modeSum(phaseMode) = modeSum(phaseMode) + drawLines
+    If drawLines > modeMax(phaseMode) Then modeMax(phaseMode) = drawLines
+  EndIf
+
+  VWait
+  DisplayBitMap 0, drawBm
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+
+  phaseFrame = phaseFrame + 1
+  If phaseFrame >= #PHASE_FRAMES
+    ;; Free Chip RAM change across the phase, taken at the end of each phase.
+    chipNow.l = AvailMem_(2)
+    modeDrift(phaseMode) = modeDrift(phaseMode) + (chipPhaseStart - chipNow)
+    chipPhaseStart = chipNow
+    phaseFrame = 0
+    phase = phase + 1
+    If phase >= #PHASES
+      quitFlag = True
+    Else
+      phaseMode = phase MOD 2
+      DrawModeBox{phaseMode}
+    EndIf
+  EndIf
+Wend
+
+chipEnd = AvailMem_(2)
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/precut-shapes-results.txt")
+  FileOutput 0
+  NPrint "precut-shapes: draw segment, ", #ACTORS, " actors, ", #PHASE_FRAMES, " frames a phase"
+  NPrint "A raster line is about 63.5 microseconds. A PAL frame is ", #LINES_PAL, " lines."
+  NPrint ""
+  NPrint "                      frames  average lines  worst lines  average us"
+  If modeFrames(0) > 0
+    NPrint "per-frame cut (game)  ", modeFrames(0), "  ", modeSum(0)/modeFrames(0), "  ", modeMax(0), "  ", (modeSum(0)/modeFrames(0))*127/2
+  EndIf
+  If modeFrames(1) > 0
+    NPrint "pre-cut               ", modeFrames(1), "  ", modeSum(1)/modeFrames(1), "  ", modeMax(1), "  ", (modeSum(1)/modeFrames(1))*127/2
+  EndIf
+  If modeFrames(0) > 0
+    If modeFrames(1) > 0
+      NPrint ""
+      NPrint "saving per frame, average lines: ", modeSum(0)/modeFrames(0) - modeSum(1)/modeFrames(1)
+      NPrint "saving, worst lines: ", modeMax(0) - modeMax(1)
+    EndIf
+  EndIf
+  NPrint ""
+  NPrint "chip RAM free at start        ", chipStart
+  NPrint "chip RAM before pre-cut       ", chipBeforeCut
+  NPrint "chip RAM after pre-cut        ", chipAfterCut
+  NPrint "chip RAM cost of pre-cut      ", chipBeforeCut - chipAfterCut
+  NPrint "chip RAM free at end          ", chipEnd
+  NPrint "chip RAM lost during per-frame cut phases (sum)  ", modeDrift(0)
+  NPrint "chip RAM lost during pre-cut phases (sum)        ", modeDrift(1)
+  NPrint "shapes used: highest slot ", #PRE_LAST, " of 192 (Max Shape)"
+  If foundAtlas = True
+    NPrint "atlas iff found"
+  Else
+    NPrint "atlas iff NOT found (placeholder colours)"
+  EndIf
+  CloseFile 0
+EndIf
+End

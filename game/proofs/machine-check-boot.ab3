@@ -1,0 +1,49 @@
+;; Cold-boot variant of machine-check.ab3. Run from a bootable diagnostic ADF so the
+;; OS and chipset readings can be compared before a Workbench startup sequence runs.
+;; Observed AGA: ChipRevBits0 was 19 before system startup and 31 after; DENISEID was
+;; $f8 in both cases. MachineProblem{} accepts Lisa's hardware ID for the cold boot.
+;; Compile to game/proofs/MachineCheckBoot, then run:
+;;   python tools/make_machine_check_adf.py
+;; The program writes DF0:machine-check-boot-results.txt; Startup-Sequence types it.
+
+WBStartup
+
+#GFXF_AA_ALICE    = 4
+#GFXF_AA_LISA     = 8
+#GFX_CHIPREVBITS0 = 236
+#DENISEID_LISA    = $f8
+#DENISEID_ECS     = $fc
+
+gfxVersion.l = 0
+chipRevBits.l = -1
+gfxBase.l = OpenLibrary_("graphics.library", 39)
+If gfxBase <> 0
+  gfxVersion = Peek.w(gfxBase + 20) AND $ffff
+  chipRevBits = Peek.b(gfxBase + #GFX_CHIPREVBITS0) AND 255
+  CloseLibrary_ gfxBase
+EndIf
+
+deniseId.l = Peek.w($dff07c) AND 255
+fastFree.l = AvailMem_(4)
+fastLargest.l = AvailMem_($20004)
+chipFree.l = AvailMem_(2)
+chipLargest.l = AvailMem_($20002)
+
+If WriteFile(0, "DF0:machine-check-boot-results.txt")
+  FileOutput 0
+  NPrint "machine-check-boot"
+  If gfxBase <> 0
+    NPrint "graphics.library version: ", gfxVersion
+    NPrint "ChipRevBits0: ", chipRevBits
+    NPrint "AA Alice flag: ", chipRevBits AND #GFXF_AA_ALICE
+    NPrint "AA Lisa flag: ", chipRevBits AND #GFXF_AA_LISA
+  Else
+    NPrint "graphics.library could not be opened at V39"
+  EndIf
+  NPrint "DENISEID low byte: ", deniseId, " ($f8 = AGA Lisa, $fc = ECS Denise)"
+  NPrint "Fast RAM free: ", fastFree, ", largest block ", fastLargest
+  NPrint "Chip RAM free: ", chipFree, ", largest block ", chipLargest
+  CloseFile 0
+EndIf
+
+End

@@ -1,0 +1,437 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; swim-pair.ab3 -- big Mario's swim poses 32 wide: two attached sprite pairs side by side, on the game's display.
+;; Compile in UAE (S/run-proof swim-pair). Not part of the game. the main project's candidates notes, "The swimming looks a bit goofy": the three big
+;; swim poses are 18 to 20 pixels wide in the All-Stars art and the sprite is 16, so his nose, his front hand and his feet are cut off.
+;; game-data/derived/mario-big-swim-all-stars.png has them 32 wide (tools/make_sprite_mario.py), the 16 columns the game shows today
+;; at the frame's columns 8 to 23, so he stays where he was. Each pose is cut into two 4 plane 16 wide shapes, each made an attached
+;; pair (15 colours): the left half on channels 0 and 1 at his x less 8, the right half on channels 2 and 3 at his x plus 8. Facing
+;; left, each half is flipped and the two swap sides. Both pairs use the same 15 colours (the sprite bank's 33 to 47, as the game).
+;;
+;; The display is the game's (SparkyDave.ab3; proofs/allstars-scene.ab3): a 16 line HUD list over a 208 line dual playfield world
+;; list, fetch mode 1 with the sprite flag ($11414, $11438), 8 sprite channels, DisplayAdjust 0, 0, 0, 31, -33, the back's colours at
+;; 16 to 31, sprite bank 2 (BPLCON4 xor $33). proofs/scroll-256-sprite.ab3 found fetch mode 1 at DDF 0 and 0 leaves channels 0 to 4
+;; their DMA, so channels 2 and 3 should show. Front: ground and a pipe; back: hills, at half speed.
+;;
+;; Keys: arrows move him; F faces him the other way; W wide (both pairs) or the game's today (the 16 wide frame of mario-big-all-stars,
+;; channel 0 only) to compare; P the priority: 1 in front of both playfields (as the game swims), 2 behind the front one with the game's
+;; xor $2c (PF1P 0, PF2P 1: the back is in front of pairs 2 and 3), 3 the same with $34 (PF1P 0, PF2P 2: both pairs in front of the
+;; back); Space stops and starts the pose cycling; Esc quits and writes results/swim-pair-results.txt.
+;;
+;; What to look at and report
+;; 1. W: is the wide Mario whole (nose, the hand in front, the feet), with no seam or gap at the middle, in his colours on both halves?
+;;    And does he stay in the same place as the game's 16 wide one?
+;; 2. F: facing left, is he a mirror image, whole, with no seam?
+;; 3. Moving and with the picture scrolling: do the two halves stay together (no tear for a frame)?
+;; 4. P 2 and 3, moved over the pipe and the hills: with $2c the right half is expected to go behind the hills as well; with $34 both
+;;    halves behind the pipe and in front of the hills. Which is right?
+;; 5. Near the HUD band and the bottom of the picture: anything odd at the edges?
+
+WBStartup
+
+; Mario's palettes (tools/make_sprite_mario.py): only the first, normal, is read.
+XINCLUDE "sprite-attach-data.ab3"
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_UP    = $4c
+#RAW_KEY_DOWN  = $4d
+#RAW_KEY_P     = $19
+#RAW_KEY_F     = $23
+#RAW_KEY_W     = $11
+#RAW_KEY_SPACE = $40
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#WORLD_W    = 448
+#WORLD_H    = 256
+#HUD_W      = 320
+#SCROLL_MAX = 120
+#LINES_PAL  = 312
+#POSE_STEP  = 8
+#DISPLAYS   = 3
+
+#HUD_FLAGS            = $11414
+#WORLD_FLAGS          = $11438
+#BANK_XOR             = $33
+#PLAYFIELD2_OFFSET_16 = $1c00
+#SCROLL_BIAS          = -32
+
+#BM_FRONT = 0
+#BM_BACK  = 1
+#BM_HUD   = 2
+#BM_SWIM  = 3
+#BM_BIG   = 4
+#BM_TMP   = 5
+
+;; The sprites: pose p's four at p*4: 0 the right-facing left half, 1 its right half, 2 the left-facing left half (the right half
+;; flipped), 3 its right half (the left half flipped). The game's 16 wide frames 9 to 11, facing right and left, at 12 to 17.
+#SPRITE_OLD = 12
+#SHAPE_CUT  = 0
+#POSES      = 3
+#SWIM_W     = 32
+#HALF_W     = 16
+#MARIO_H    = 32
+#WINDOW_X   = 8
+
+quitFlag.w = False
+display.w = 0
+Dim displayBplcon2.w(#DISPLAYS - 1)
+displayBplcon2(0) = 0
+displayBplcon2(1) = $2c
+displayBplcon2(2) = $34
+facingLeft.w = False
+wideOn.w = True
+cycling.w = True
+pose.w = 0
+frameCount.l = 0
+marioX.w = 120
+marioY.w = 120
+scrollX.q = 0
+scrollDir.q = 0.25
+keyP.w = False
+keyF.w = False
+keyW.w = False
+keySpace.w = False
+startLine.l = 0
+spriteSum.l = 0
+spriteMax.l = 0
+spriteFrames.l = 0
+chipBefore.l = 0
+chipAfter.l = 0
+
+;; Mario's normal colours, pens 1 to 15 (the first of the five palettes in sprite-attach-data.ab3).
+Dim marioRGB.w(15, 2)
+; One 16x32 piece's pens, read from a sheet (CutPiece{}).
+Dim piecePens.w(#MARIO_H - 1, #HALF_W - 1)
+readRed.w = 0
+readGreen.w = 0
+readBlue.w = 0
+For penIndex.w = 1 To 15
+  Read readRed
+  Read readGreen
+  Read readBlue
+  marioRGB(penIndex, 0) = readRed
+  marioRGB(penIndex, 1) = readGreen
+  marioRGB(penIndex, 2) = readBlue
+Next
+
+BitMap #BM_FRONT, #WORLD_W, #WORLD_H, 4
+BitMap #BM_BACK, #WORLD_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+;; As the game loads its sprite sheets (sparkydave.player.ab3, LoadMarioSpriteSheets): each bitmap made first, then loaded into. And a
+;; 16x32 4 plane scratch bitmap the halves are copied through (CutMarioAttachedSet{}: a shape cut straight from a loaded sheet showed
+;; pens 1 to 3 only). A trail file says how far it got, in case it stops before the display is up.
+Statement WriteStage{stageText$}
+  If WriteFile(1, "sparky-dave:game/proofs/results/swim-pair-stages.txt")
+    FileOutput 1
+    NPrint stageText$
+    CloseFile 1
+    DefaultOutput
+  EndIf
+End Statement
+
+WriteStage{"started"}
+BitMap #BM_SWIM, #SWIM_W*#POSES, #MARIO_H, 4
+BitMap #BM_BIG, 256, #MARIO_H, 4
+BitMap #BM_TMP, #HALF_W, #MARIO_H, 4
+LoadBitMap #BM_SWIM, "sparky-dave:game/assets/mario-big-swim-all-stars.iff"
+LoadBitMap #BM_BIG, "sparky-dave:game/assets/mario-big-all-stars.iff"
+WriteStage{"bitmaps made and loaded"}
+
+; From Blitz mode: the trail written in Amiga mode and back.
+Statement MarkStage{stageText$}
+  QAMIGA
+  WriteStage{stageText$}
+  BLITZ
+End Statement
+
+InitPalette 0, 48
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+For penIndex.w = 16 To 31
+  AGAPalRGB 0, penIndex, 20 + (penIndex - 16)*6, 100 + (penIndex - 16)*6, 40 + (penIndex - 16)*3
+Next
+For penIndex.w = 1 To 15
+  AGAPalRGB 0, 32 + penIndex, marioRGB(penIndex, 0), marioRGB(penIndex, 1), marioRGB(penIndex, 2)
+Next
+
+BLITZ
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; Display d uses CopList 2d (HUD) and 2d + 1 (world): the game's two lists, differing only in the world list's priority.
+Statement BuildLists{}
+  SHARED displayBplcon2()
+  For displayIndex.w = 0 To #DISPLAYS - 1
+    hudList.w = displayIndex*2
+    worldList.w = hudList + 1
+    InitCopList hudList, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, 48, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 8, 0, 0
+    DisplayControls hudList, 0, 0, #BANK_XOR
+    DisplayControls worldList, displayBplcon2(displayIndex), #PLAYFIELD2_OFFSET_16, #BANK_XOR
+    DisplayAdjust hudList, 0, 0, 0, 31, -33
+    DisplayAdjust worldList, 0, 0, 0, 31, -33
+  Next
+End Statement
+
+Statement ShowDisplay{displayIndex.w}
+  hudList.w = displayIndex*2
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, #BM_HUD, #SCROLL_BIAS, 0
+End Statement
+
+;; Ground, a pipe 32 wide and 64 high, ruler lines every 32 pixels.
+Statement DrawFront{}
+  Use BitMap #BM_FRONT
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    penIndex.w = 6
+    If columnIndex MOD 2 = 1 Then penIndex = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, penIndex
+  Next
+  Boxf 176, 144, 207, 207, 7
+  Boxf 176, 144, 207, 151, 6
+  For rulerX.w = 32 To #WORLD_W - 32 Step 32
+    Boxf rulerX, 32, rulerX, 40, 3
+  Next
+End Statement
+
+;; Hills on the back, every circle inside the bitmap (Circlef does not clip).
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For hillIndex.w = 0 To 6
+    centreX.w = 56 + hillIndex*54
+    Circlef centreX, 200, 50, 2
+    Circlef centreX, 200, 38, 3
+    Circlef centreX, 200, 22, 4
+  Next
+End Statement
+
+;; The HUD: one white box a display, so P shows which.
+Statement DrawHud{displayIndex.w}
+  Use BitMap #BM_HUD
+  Cls 1
+  For boxIndex.w = 0 To displayIndex
+    Boxf 40 + boxIndex*10, 4, 47 + boxIndex*10, 11, 8
+  Next
+End Statement
+
+;; One 16x32 piece of a sheet (sheetBitmap, its left at sourceX) as sprite slot rightSprite, and flipped as leftSprite: copied a pixel at
+;; a time through the scratch bitmap, then cut, as the game's CutMarioAttachedSet{} does.
+Statement CutPiece{sheetBitmap.w, sourceX.w, rightSprite.w, leftSprite.w}
+  SHARED piecePens()
+  Use BitMap sheetBitmap
+  For pixelY.w = 0 To #MARIO_H - 1
+    For pixelX.w = 0 To #HALF_W - 1
+      piecePens(pixelY, pixelX) = Point(sourceX + pixelX, pixelY)
+    Next
+  Next
+  Use BitMap #BM_TMP
+  Cls 0
+  For pixelY.w = 0 To #MARIO_H - 1
+    For pixelX.w = 0 To #HALF_W - 1
+      If piecePens(pixelY, pixelX) <> 0 Then Plot pixelX, pixelY, piecePens(pixelY, pixelX)
+    Next
+  Next
+  GetaShape #SHAPE_CUT, 0, 0, #HALF_W, #MARIO_H
+  GetaSprite rightSprite, #SHAPE_CUT
+  XFlip #SHAPE_CUT
+  GetaSprite leftSprite, #SHAPE_CUT
+End Statement
+
+;; Each pose's two halves, both facings; then the game's 16 wide frames for the comparison.
+Statement CutSprites{}
+  For poseIndex.w = 0 To #POSES - 1
+    For halfIndex.w = 0 To 1
+      CutPiece{#BM_SWIM, poseIndex*#SWIM_W + halfIndex*#HALF_W, poseIndex*4 + halfIndex, poseIndex*4 + 3 - halfIndex}
+    Next
+  Next
+  For poseIndex.w = 0 To #POSES - 1
+    CutPiece{#BM_BIG, (9 + poseIndex)*#HALF_W, #SPRITE_OLD + poseIndex, #SPRITE_OLD + #POSES + poseIndex}
+  Next
+End Statement
+
+MarkStage{"in Blitz mode"}
+chipBefore = AvailMem_(2)
+CutSprites{}
+chipAfter = AvailMem_(2)
+MarkStage{"sprites cut"}
+DrawFront{}
+DrawBack{}
+DrawHud{0}
+BuildLists{}
+ShowDisplay{0}
+MarkStage{"display up"}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  If RawStatus(#RAW_KEY_LEFT) AND marioX > 16 Then marioX = marioX - 1
+  If RawStatus(#RAW_KEY_RIGHT) AND marioX < 224 Then marioX = marioX + 1
+  If RawStatus(#RAW_KEY_UP) AND marioY > 0 Then marioY = marioY - 1
+  If RawStatus(#RAW_KEY_DOWN) AND marioY < 176 Then marioY = marioY + 1
+
+  If RawStatus(#RAW_KEY_P)
+    If keyP = False
+      display = (display + 1) MOD #DISPLAYS
+      DrawHud{display}
+      ShowDisplay{display}
+    EndIf
+    keyP = True
+  Else
+    keyP = False
+  EndIf
+  If RawStatus(#RAW_KEY_F)
+    If keyF = False Then facingLeft = NOT facingLeft
+    keyF = True
+  Else
+    keyF = False
+  EndIf
+  If RawStatus(#RAW_KEY_W)
+    If keyW = False Then wideOn = NOT wideOn
+    keyW = True
+  Else
+    keyW = False
+  EndIf
+  If RawStatus(#RAW_KEY_SPACE)
+    If keySpace = False Then cycling = NOT cycling
+    keySpace = True
+  Else
+    keySpace = False
+  EndIf
+  If cycling = True AND frameCount MOD #POSE_STEP = 0 Then pose = (pose + 1) MOD #POSES
+
+  scrollX = scrollX + scrollDir
+  If scrollX >= #SCROLL_MAX Then scrollDir = -0.25
+  If scrollX <= 0
+    scrollX = 0
+    scrollDir = 0.25
+  EndIf
+
+  VWait
+  worldList.w = display*2 + 1
+  DisplayBitMap worldList, #BM_FRONT, scrollX + #SCROLL_BIAS, #VIEW_TOP, #BM_BACK, scrollX/2 + #SCROLL_BIAS, #VIEW_TOP
+  startLine = RasterLine{}
+  ;; The left half at his x less the window's 8, the right half 16 further; facing left the flipped halves (2 and 3).
+  If wideOn = True
+    firstSprite.w = pose*4
+    If facingLeft = True Then firstSprite = pose*4 + 2
+    DisplaySprite worldList, firstSprite, marioX - #WINDOW_X - #SCROLL_BIAS, marioY, 0
+    DisplaySprite worldList, firstSprite + 1, marioX - #WINDOW_X + #HALF_W - #SCROLL_BIAS, marioY, 2
+  Else
+    oldSprite.w = #SPRITE_OLD + pose
+    If facingLeft = True Then oldSprite = #SPRITE_OLD + #POSES + pose
+    DisplaySprite worldList, oldSprite, marioX - #SCROLL_BIAS, marioY, 0
+    DisplaySprite worldList, 0, 0, 300, 2
+  EndIf
+  spriteLines.l = RasterLine{} - startLine
+  If spriteLines < 0 Then spriteLines = spriteLines + #LINES_PAL
+  If frameCount >= 10
+    spriteFrames = spriteFrames + 1
+    spriteSum = spriteSum + spriteLines
+    If spriteLines > spriteMax Then spriteMax = spriteLines
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/swim-pair-results.txt")
+  FileOutput 0
+  NPrint "swim-pair: big Mario's swim poses 32 wide, two attached pairs (channels 0-1 and 2-3), on the game's display"
+  NPrint "the two DisplaySprite calls a frame: ", spriteFrames, " frames, average ", spriteSum/(spriteFrames + 1), " lines, worst ", spriteMax
+  NPrint "Chip RAM of the 18 sprites and their shape: ", chipBefore - chipAfter, " bytes"
+  NPrint "last display ", display + 1, " (1 in front of both, 2 behind the front with $2c, 3 behind the front with $34); wide ", wideOn, ", facing left ", facingLeft
+  CloseFile 0
+EndIf
+End

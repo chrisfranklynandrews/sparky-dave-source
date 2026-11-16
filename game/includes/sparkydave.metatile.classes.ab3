@@ -1,0 +1,19 @@
+;; =======================================================
+;; METATILE CLASSES -- GENERATED
+;; =======================================================
+;; python tools/build_assets.py
+;; The #MT_* collision class codes (manifest.METATILE_CLASS), the one place they exist: do not repeat them in
+;; sparkydave.constants.ab3. The game and the test harness include this; each area file carries its own class map.
+
+#MT_EMPTY           = 0
+#MT_GROUND          = 1
+#MT_BRICK           = 2
+#MT_BLOCK           = 3
+#MT_QUESTION        = 4
+#MT_SPENT_GID       = 4
+#MT_PIPE_TOP_LEFT   = 5
+#MT_PIPE_TOP_RIGHT  = 6
+#MT_PIPE_BODY_LEFT  = 7
+#MT_PIPE_BODY_RIGHT = 8
+
+;; END OF METATILE CLASSES -- GENERATED

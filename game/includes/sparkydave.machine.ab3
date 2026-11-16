@@ -1,0 +1,96 @@
+;; =======================================================
+;; THE MACHINE CHECKS (AMIGA MODE)
+;; =======================================================
+;; Whether this machine can run the game, and if not what it lacks. Used twice:
+;; by the launcher's helper DetectVideo (game/launcher/detect-video.ab3), which is plain 68000 code and runs
+;; before the game is loaded, so an A500 or A600 is told why instead of crashing in the game's 68020 code
+;; (OPTIMIZE 1); and by the game itself (sparkydave.startup.ab3), before its first Dim, for a start without
+;; the launcher. Definitions only: the two callers print and stop.
+;; In order:
+;; 1. A 68020 or better: ExecBase's AttnFlags (offset 296, exec/execbase.ab3), AFF_68020 (2; set for any later CPU).
+;; 2. Kickstart 3.0 or later: graphics.library opens at V39.
+;; 3. AGA: GfxBase's ChipRevBits0 (offset 236, graphics/gfxbase.ab3) has GFXF_AA_LISA (8) (graphics.doc,
+;;    SetChipRev), or DENISEID at $dff07c identifies AGA's Lisa ($f8). On cold boot ChipRevBits0 may not
+;;    have its AGA bits set until system startup initializes them: the diagnostic read 19 before startup,
+;;    and 31 after. OCS has no DENISEID register, so its open-bus value is not a definitive negative; accept
+;;    the explicit Lisa ID as positive evidence.
+;; 4. Fast RAM: without it the code (about 710 KB) and every array (about 215 KB) go into Chip RAM, over 2 MB
+;;    with the display (the main project's MEMORY note). The free total and one block: the largest arrays (slotGids and
+;;    slotClasses) are 57,600 bytes each. Before the game is loaded (codeBytes #MACHINE_CODE_BYTES) the code's
+;;    one hunk needs its own block, and room on top: 800,000 for a hunk of about 709,000 (0.94), with room to grow.
+;; 5. Chip RAM: about 1.45 MB in all (the debug report's "total used"), and a block bigger than one world bitmap.
+#MACHINE_OK         = 0
+#MACHINE_NO_68020   = 1
+#MACHINE_OLD_OS     = 2
+#MACHINE_NOT_AGA    = 3
+#MACHINE_NO_FAST    = 4
+#MACHINE_FAST_SHORT = 5
+#MACHINE_CHIP_SHORT = 6
+
+#MACHINE_CPU_68020      = 2
+#MACHINE_AA_LISA        = 8
+#MACHINE_CHIPREV_OFFSET = 236
+#MACHINE_DENISEID_LISA  = $f8
+#MACHINE_ATTN_OFFSET    = 296
+#MIN_FAST_LARGEST       = 65536
+#MIN_FAST_FREE          = 320000
+#MIN_CHIP_LARGEST       = 600000
+#MACHINE_CODE_BYTES     = 800000
+#MIN_CHIP_FREE          = 1455000
+#MACHINE_DENISEID       = $dff07c
+
+; The Fast RAM block the game needs: the largest arrays' or, before it is loaded, the code's.
+Function.l MachineFastBlock{codeBytes.l}
+  blockBytes.l = #MIN_FAST_LARGEST
+  If codeBytes > blockBytes Then blockBytes = codeBytes
+  Function Return blockBytes
+End Function
+
+;; What the machine lacks, #MACHINE_OK if nothing. codeBytes is the room the game's code still needs in Fast
+;; RAM: #MACHINE_CODE_BYTES before it is loaded (DetectVideo), 0 once it is (the game, which is in it by then).
+Function.w MachineProblem{codeBytes.l}
+  attnFlags.l = Peek.w(Peek.l(4) + #MACHINE_ATTN_OFFSET) AND $ffff
+  If (attnFlags AND #MACHINE_CPU_68020) = 0 Then Function Return #MACHINE_NO_68020
+  graphicsBase.l = OpenLibrary_("graphics.library", 39)
+  If graphicsBase = 0 Then Function Return #MACHINE_OLD_OS
+  chipRevBits.l = Peek.b(graphicsBase + #MACHINE_CHIPREV_OFFSET) AND 255
+  CloseLibrary_ graphicsBase
+  If (chipRevBits AND #MACHINE_AA_LISA) = 0
+    deniseId.l = Peek.w(#MACHINE_DENISEID) AND 255
+    If deniseId <> #MACHINE_DENISEID_LISA Then Function Return #MACHINE_NOT_AGA
+  EndIf
+  fastFree.l = AvailMem_(4)
+  If fastFree = 0 Then Function Return #MACHINE_NO_FAST
+  If fastFree < #MIN_FAST_FREE + codeBytes OR AvailMem_($20004) < MachineFastBlock{codeBytes} Then Function Return #MACHINE_FAST_SHORT
+  If AvailMem_(2) < #MIN_CHIP_FREE OR AvailMem_($20002) < #MIN_CHIP_LARGEST Then Function Return #MACHINE_CHIP_SHORT
+  Function Return #MACHINE_OK
+End Function
+
+; The message for a problem, its lines joined by line feeds, ready to NPrint: what is missing, and what to do.
+Function.s MachineProblemText{problem.w, codeBytes.l}
+  lineEnd$ = Chr$(10)
+  text$ = "Sparky Dave cannot start on this machine." + lineEnd$
+  Select problem
+    Case #MACHINE_NO_68020
+      text$ = text$ + "It needs a 68020 processor or better (an A1200 has one; an A500 or A600 does not)."
+    Case #MACHINE_OLD_OS
+      text$ = text$ + "It needs Kickstart 3.0 or later."
+    Case #MACHINE_NOT_AGA
+      text$ = text$ + "It needs the AGA chipset (an A1200, A4000 or CD32); this one is older (OCS or ECS)."
+    Case #MACHINE_NO_FAST
+      text$ = text$ + "It needs Fast RAM, and this machine has none." + lineEnd$
+      text$ = text$ + "An A1200 needs a Fast RAM expansion (2 MB or more) to run it."
+    Case #MACHINE_FAST_SHORT
+      text$ = text$ + "It needs " + Str$(#MIN_FAST_FREE + codeBytes) + " bytes of free Fast RAM, with one block of "
+      text$ = text$ + Str$(MachineFastBlock{codeBytes}) + "." + lineEnd$
+      text$ = text$ + "Free now: " + Str$(AvailMem_(4)) + ", largest block " + Str$(AvailMem_($20004)) + "." + lineEnd$
+      text$ = text$ + "Quit other programs, or reboot, and try again."
+    Case #MACHINE_CHIP_SHORT
+      text$ = text$ + "It needs " + Str$(#MIN_CHIP_FREE) + " bytes of free Chip RAM, with one block of " + Str$(#MIN_CHIP_LARGEST) + "." + lineEnd$
+      text$ = text$ + "Free now: " + Str$(AvailMem_(2)) + ", largest block " + Str$(AvailMem_($20002)) + "." + lineEnd$
+      text$ = text$ + "Quit other programs, or reboot, and try again."
+  End Select
+  Function Return text$
+End Function
+
+;; END OF THE MACHINE CHECKS (AMIGA MODE)

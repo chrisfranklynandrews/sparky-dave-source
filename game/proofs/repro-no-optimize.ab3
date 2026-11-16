@@ -1,0 +1,62 @@
+;; repro-no-optimize.ab3
+;; AND inside a function's Function Return, with the 68020 optimizer off.
+;; The companion file repro-optimize-1.ab3 is identical except that it has an OPTIMIZE 1 line.
+;;
+;; Four forms are computed for every input from -40 to 40. The ModForm column is the reference.
+;;   LeftConstantAnd   2 + ((n/4) AND 3)            constant first, inside a function
+;;   RightConstantAnd  ((n/4) AND 3) + 2            constant last, inside a function
+;;   InlineLeft        2 + ((n/4) AND 3)            constant first, in the loop (no function)
+;;   ModForm           2 + ((n/4) MOD 4)            inside a function
+;; The result is written to RAM:repro-result.txt.
+
+WBStartup
+
+#LOW  = -40
+#HIGH = 40
+
+Dim leftFirst.l(#HIGH - #LOW)
+Dim rightFirst.l(#HIGH - #LOW)
+Dim inlineLeft.l(#HIGH - #LOW)
+Dim modForm.l(#HIGH - #LOW)
+
+BLITZ
+
+Function.w LeftConstantAnd{inputValue.w}
+  Function Return 2 + ((inputValue/4) AND 3)
+End Function
+
+Function.w RightConstantAnd{inputValue.w}
+  Function Return ((inputValue/4) AND 3) + 2
+End Function
+
+Function.w ModForm{inputValue.w}
+  Function Return 2 + ((inputValue/4) MOD 4)
+End Function
+
+For inputValue.w = #LOW To #HIGH
+  slot.l = inputValue - #LOW
+  leftFirst(slot) = LeftConstantAnd{inputValue}
+  rightFirst(slot) = RightConstantAnd{inputValue}
+  inlineLeft(slot) = 2 + ((inputValue/4) AND 3)
+  modForm(slot) = ModForm{inputValue}
+Next
+
+AMIGA
+If WriteFile(0, "RAM:repro-result.txt")
+  FileOutput 0
+  NPrint "input  leftFirst  rightFirst  inlineLeft  modForm"
+  leftMismatches.l = 0
+  rightMismatches.l = 0
+  inlineMismatches.l = 0
+  For inputValue.w = #LOW To #HIGH
+    slot.l = inputValue - #LOW
+    NPrint inputValue, "  ", leftFirst(slot), "  ", rightFirst(slot), "  ", inlineLeft(slot), "  ", modForm(slot)
+    If leftFirst(slot) <> modForm(slot) Then leftMismatches = leftMismatches + 1
+    If rightFirst(slot) <> modForm(slot) Then rightMismatches = rightMismatches + 1
+    If inlineLeft(slot) <> modForm(slot) Then inlineMismatches = inlineMismatches + 1
+  Next
+  NPrint ""
+  NPrint "Rows differing from modForm: leftFirst ", leftMismatches, ", rightFirst ", rightMismatches, ", inlineLeft ", inlineMismatches
+  CloseFile 0
+EndIf
+End

@@ -1,0 +1,457 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 20
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 24
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; sprite-channels.ab3 -- how many hardware sprite channels does each display mode leave?
+;; Compile in UAE (S/run-proof sprite-channels). Not part of the game. The all-stars branch
+;; (the all-stars plan): proofs/planes.ab3 showed that bobs are the expensive part of a 5 or 6
+;; plane front, so Mario, the enemies and the items might be hardware sprites. The catch, from
+;; the main project's SPRITES_VS_BOBS note and proofs/firebar-sprites.ab3: at the game's fetch mode 3 the
+;; early fetch for the scroll takes the DMA slots of every sprite channel but 0 (fetch mode 1
+;; left 5 of 7, fetch mode 0 all 7). That was found with a dual playfield of 4 + 4 planes. The
+;; Blitz guide (InitCopList) says 8 planes and 8 sprites need a display of about 256 pixels. So
+;; the count must be measured for each display the all-stars build might use.
+;;
+;; The display is the game's: a 16 line HUD list at line 44 over a 208 line world list,
+;; DisplayAdjust -1 and -1, smooth scrolling, sprites in the lores flag ($400) and sprite bank 2
+;; (entries 32 to 47, DisplayControls BPLCON4 xor $33, as sprite-over-hud.ab3), the world list with
+;; 8 sprite channels. Static: no bobs, nothing to time.
+;;
+;; The test figures: eight 16 pixel wide sprites, one per channel, across the world list. Channel k
+;; is drawn as k + 1 horizontal bars (so a sprite can be told apart without a legend), in the pair's
+;; colours (channels 0 and 1 red, yellow and white; 2 and 3 green, cyan and white; 4 and 5 magenta,
+;; orange and white; 6 and 7 blue, pink and white). Over the world list's sky, left to right
+;; at x = 20, 58, 96 ... 286. Every channel that gets its DMA slots shows its figure; one that does
+;; not shows nothing at its place.
+;;
+;; Eleven configurations (the type word without the sprite flag, planes, fetch mode, scroll):
+;;   0  $13038  8 planes dual playfield  fetch 3  scroll moving   the game today (expect 1 channel)
+;;   1  $13014  4 planes                 fetch 3  scroll still
+;;   2  $13014  4 planes                 fetch 3  scroll moving
+;;   3  $13016  6 planes                 fetch 3  scroll still
+;;   4  $13016  6 planes                 fetch 3  scroll moving
+;;   5  $11016  6 planes                 fetch 1  scroll still
+;;   6  $11016  6 planes                 fetch 1  scroll moving
+;;   7  $11018  8 planes                 fetch 1  scroll moving
+;;   8  $10016  6 planes                 fetch 0  scroll moving
+;;   9  $13015  5 planes                 fetch 3  scroll moving
+;;  10  $12016  6 planes                 fetch 2  scroll moving
+;; "Still" is scroll x 0; "moving" is a slow back and forth over 0 to 60 pixels (a fractional x).
+;; The HUD shows the config without text: white boxes for the planes (8 for the dual one), orange
+;; boxes for the fetch mode (none for 0), a green box if the scroll moves and a red one if it is
+;; still, and a white box at the far end for the dual playfield.
+;;
+;; Keys: Space next config, Backspace the one before, 0 to 8 record how many figures you can see
+;; for this config (the HUD shows that many yellow ticks), Esc quits and writes
+;; sprite-channels-results.txt. Go through all eleven. Report anything odd as well: figures in the
+;; wrong place, stray lines or specks, a figure cut off, a broken HUD or gap line, tearing.
+;;
+;; What the results answer
+;; 1. How many of the eight channels show in each display, and does the scroll matter (still
+;;    against moving), the plane count, and the fetch mode?
+;; 2. Is the harness right? Config 0 is the game's own display and should show 1.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE     = $40
+#RAW_KEY_BACKSPACE = $41
+#RAW_KEY_ESC       = $45
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#HUD_W      = 384
+#WORLD_W    = 384
+#WORLD_H    = 256
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; The sprite flag, the sprite bank, and the colour offset that keeps a dual playfield's back at
+;; entries 16 to 31 (the values sprite-over-hud.ab3 uses).
+#SPRITE_FLAG          = $400
+#BANK_XOR             = $33
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+#CONFIGS  = 11
+#DEPTHS   = 4
+#CHANNELS = 8
+#SPRITE_W = 16
+#SPRITE_H = 24
+#SPRITE_Y = 100
+#SCROLL_MAX = 60
+
+;; Bitmaps per depth d (0 to 3, for 4, 5, 6 and 8 planes): d*3 the world, d*3 + 1 the HUD band.
+;; Bitmap 12 is the dual playfield's back (4 planes), 13 the 2 plane sprite source.
+#BM_BACK    = 12
+#BM_SPRITE  = 13
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+config.w = 0
+scrollX.q = 0
+scrollDir.q = 0.25
+keyWasDown.w = False
+chipBefore.l = 0
+chipAfter.l = 0
+
+Dim depthPlanes.w(#DEPTHS - 1)
+depthPlanes(0) = 4
+depthPlanes(1) = 5
+depthPlanes(2) = 6
+depthPlanes(3) = 8
+
+Dim configFlags.l(#CONFIGS - 1)
+Dim configPlanes.w(#CONFIGS - 1)
+Dim configFetch.w(#CONFIGS - 1)
+Dim configMoves.w(#CONFIGS - 1)
+Dim configDual.w(#CONFIGS - 1)
+Dim configSeen.w(#CONFIGS - 1)
+
+;; flags, planes, fetch mode, scroll moves, dual
+configFlags(0) = $13038 : configPlanes(0) = 8 : configFetch(0) = 3 : configMoves(0) = 1 : configDual(0) = 1
+configFlags(1) = $13014 : configPlanes(1) = 4 : configFetch(1) = 3 : configMoves(1) = 0 : configDual(1) = 0
+configFlags(2) = $13014 : configPlanes(2) = 4 : configFetch(2) = 3 : configMoves(2) = 1 : configDual(2) = 0
+configFlags(3) = $13016 : configPlanes(3) = 6 : configFetch(3) = 3 : configMoves(3) = 0 : configDual(3) = 0
+configFlags(4) = $13016 : configPlanes(4) = 6 : configFetch(4) = 3 : configMoves(4) = 1 : configDual(4) = 0
+configFlags(5) = $11016 : configPlanes(5) = 6 : configFetch(5) = 1 : configMoves(5) = 0 : configDual(5) = 0
+configFlags(6) = $11016 : configPlanes(6) = 6 : configFetch(6) = 1 : configMoves(6) = 1 : configDual(6) = 0
+configFlags(7) = $11018 : configPlanes(7) = 8 : configFetch(7) = 1 : configMoves(7) = 1 : configDual(7) = 0
+configFlags(8) = $10016 : configPlanes(8) = 6 : configFetch(8) = 0 : configMoves(8) = 1 : configDual(8) = 0
+configFlags(9) = $13015 : configPlanes(9) = 5 : configFetch(9) = 3 : configMoves(9) = 1 : configDual(9) = 0
+configFlags(10) = $12016 : configPlanes(10) = 6 : configFetch(10) = 2 : configMoves(10) = 1 : configDual(10) = 0
+
+For configIndex.w = 0 To #CONFIGS - 1
+  configSeen(configIndex) = -1
+Next
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+chipBefore = AvailMem_(2)
+
+For depthIndex.w = 0 To #DEPTHS - 1
+  BitMap depthIndex*3, #WORLD_W, #WORLD_H, depthPlanes(depthIndex)
+  BitMap depthIndex*3 + 1, #HUD_W, #HUD_H, depthPlanes(depthIndex)
+Next
+BitMap #BM_BACK, #WORLD_W, #WORLD_H, 4
+BitMap #BM_SPRITE, 64, #SPRITE_H, 2
+
+chipAfter = AvailMem_(2)
+
+;; One palette of 256: the game's 16 pens, a dim ramp at 16 to 31 (the dual back's), the eight
+;; sprite colour sets at 33 to 35, 37 to 39, 41 to 43 and 45 to 47, a ramp above.
+InitPalette 0, 256
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 0, 0, 0
+For pen.w = 16 To 255
+  AGAPalRGB 0, pen, (pen*5) MOD 256, (pen*3 + 85) MOD 256, 255 - (pen MOD 256)
+Next
+AGAPalRGB 0, 33, 255, 0, 0
+AGAPalRGB 0, 34, 255, 255, 0
+AGAPalRGB 0, 35, 255, 255, 255
+AGAPalRGB 0, 37, 0, 200, 0
+AGAPalRGB 0, 38, 0, 255, 255
+AGAPalRGB 0, 39, 255, 255, 255
+AGAPalRGB 0, 41, 255, 0, 255
+AGAPalRGB 0, 42, 255, 140, 0
+AGAPalRGB 0, 43, 255, 255, 255
+AGAPalRGB 0, 45, 60, 60, 255
+AGAPalRGB 0, 46, 255, 120, 200
+AGAPalRGB 0, 47, 255, 255, 255
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+;; Config c uses CopList 2c for the HUD and 2c + 1 for the world. The HUD list loads the palette
+;; (at least 48 entries, so the sprite colours are in); the world list holds the sprites.
+Statement BuildLists{}
+  SHARED configFlags(), configPlanes(), configDual()
+  For configIndex.w = 0 To #CONFIGS - 1
+    hudList.w = configIndex*2
+    worldList.w = hudList + 1
+    flags.l = configFlags(configIndex) + #SPRITE_FLAG
+    colourCount.w = 48
+    If configPlanes(configIndex) = 6 Then colourCount = 64
+    If configPlanes(configIndex) = 8 AND configDual(configIndex) = 0 Then colourCount = 256
+    hudFlags.l = flags
+    If configDual(configIndex) = 1 Then hudFlags = $13014 + #SPRITE_FLAG
+    InitCopList hudList, #HUD_YPOS, #HUD_H, hudFlags, 0, colourCount, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, flags, #CHANNELS, 0, 0
+    pf2Offset.w = 0
+    If configDual(configIndex) = 1 Then pf2Offset = #PLAYFIELD2_OFFSET_16
+    DisplayControls hudList, 0, 0, #BANK_XOR
+    DisplayControls worldList, 0, pf2Offset, #BANK_XOR
+    DisplayAdjust hudList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+    DisplayAdjust worldList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+  Next
+End Statement
+
+;; The depth (0 to 3) whose bitmaps a config shows: the dual one is 4 + 4 planes.
+Function.w ConfigDepth{configIndex.w}
+  SHARED configPlanes(), configDual()
+  If configDual(configIndex) = 1 Then Function Return 0
+  If configPlanes(configIndex) = 4 Then Function Return 0
+  If configPlanes(configIndex) = 5 Then Function Return 1
+  If configPlanes(configIndex) = 6 Then Function Return 2
+  Function Return 3
+End Function
+
+Statement ShowConfig{configIndex.w}
+  SHARED configDual()
+  hudList.w = configIndex*2
+  depthIndex.w = ConfigDepth{configIndex}
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, depthIndex*3 + 1, 0, 0
+  If configDual(configIndex) = 1
+    DisplayBitMap hudList + 1, depthIndex*3, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+  Else
+    DisplayBitMap hudList + 1, depthIndex*3, 0, #VIEW_TOP
+  EndIf
+End Statement
+
+;; The config as boxes (see the header), then a yellow tick for each figure recorded.
+Statement DrawHud{configIndex.w}
+  SHARED configPlanes(), configFetch(), configMoves(), configDual(), configSeen()
+  Use BitMap ConfigDepth{configIndex}*3 + 1
+  Cls 0
+  For planeIndex.w = 0 To configPlanes(configIndex) - 1
+    Boxf 4 + planeIndex*9, 4, 9 + planeIndex*9, 11, 8
+  Next
+  For fetchIndex.w = 1 To configFetch(configIndex)
+    Boxf 86 + fetchIndex*10, 4, 93 + fetchIndex*10, 11, 4
+  Next
+  If configMoves(configIndex) = 1
+    Boxf 130, 4, 137, 11, 12
+  Else
+    Boxf 130, 4, 137, 11, 11
+  EndIf
+  If configDual(configIndex) = 1 Then Boxf 150, 4, 157, 11, 8
+  If configSeen(configIndex) > 0
+    For tickIndex.w = 1 To configSeen(configIndex)
+      Boxf 190 + tickIndex*10, 2, 196 + tickIndex*10, 13, 9
+    Next
+  EndIf
+End Statement
+
+;; Ground, a pen 3 ruler every 64 pixels, and the edge markers (red on column 0, green on 319).
+Statement DrawWorld{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    pen.w = 6
+    If columnIndex MOD 2 = 1 Then pen = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, pen
+  Next
+  For rulerX.w = 64 To #WORLD_W - 64 Step 64
+    Boxf rulerX, #VIEW_TOP, rulerX, 207, 3
+  Next
+  Boxf 0, #VIEW_TOP, 0, 239, 11
+  Boxf #VIEW_W - 1, #VIEW_TOP, #VIEW_W - 1, 239, 12
+End Statement
+
+;; Sprite k: k + 1 bars of 2 lines, 1 line apart, in pens 1 to 3 (the pair's three colours).
+Statement MakeSprites{}
+  For channelIndex.w = 0 To #CHANNELS - 1
+    Use BitMap #BM_SPRITE
+    Cls 0
+    For barIndex.w = 0 To channelIndex
+      Boxf 0, barIndex*3, #SPRITE_W - 1, barIndex*3 + 1, 1 + (barIndex MOD 3)
+    Next
+    GetaShape channelIndex, 0, 0, #SPRITE_W, #SPRITE_H
+    GetaSprite channelIndex, channelIndex
+  Next
+End Statement
+
+For depthIndex.w = 0 To #DEPTHS - 1
+  DrawWorld{depthIndex*3}
+Next
+DrawWorld{#BM_BACK}
+MakeSprites{}
+BuildLists{}
+DrawHud{0}
+ShowConfig{0}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If configMoves(config) = 1
+    scrollX = scrollX + scrollDir
+    If scrollX >= #SCROLL_MAX Then scrollDir = -0.25
+    If scrollX <= 0
+      scrollX = 0
+      scrollDir = 0.25
+    EndIf
+  Else
+    scrollX = 0
+  EndIf
+
+  VWait
+  If configDual(config) = 1
+    DisplayBitMap config*2 + 1, ConfigDepth{config}*3, scrollX, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+  Else
+    DisplayBitMap config*2 + 1, ConfigDepth{config}*3, scrollX, #VIEW_TOP
+  EndIf
+  For channelIndex.w = 0 To #CHANNELS - 1
+    DisplaySprite config*2 + 1, channelIndex, 20 + channelIndex*38, #SPRITE_Y, channelIndex
+  Next
+
+  ;; One key at a time: Space, Backspace and the digits act when pressed, not while held.
+  pressedKey.w = -1
+  If RawStatus(#RAW_KEY_SPACE) Then pressedKey = 20
+  If RawStatus(#RAW_KEY_BACKSPACE) Then pressedKey = 21
+  For digitIndex.w = 0 To 8
+    rawCode.w = digitIndex
+    If digitIndex = 0 Then rawCode = $0a
+    If RawStatus(rawCode) Then pressedKey = digitIndex
+  Next
+  If pressedKey >= 0
+    If keyWasDown = False
+      If pressedKey <= 8
+        configSeen(config) = pressedKey
+        DrawHud{config}
+      EndIf
+      If pressedKey = 20 AND config < #CONFIGS - 1
+        config = config + 1
+        scrollX = 0
+        DrawHud{config}
+        VWait
+        ShowConfig{config}
+      EndIf
+      If pressedKey = 21 AND config > 0
+        config = config - 1
+        scrollX = 0
+        DrawHud{config}
+        VWait
+        ShowConfig{config}
+      EndIf
+    EndIf
+    keyWasDown = True
+  Else
+    keyWasDown = False
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/sprite-channels-results.txt")
+  FileOutput 0
+  NPrint "sprite-channels: how many of the 8 sprite channels showed a figure, as recorded by the user"
+  NPrint "(-1 means that config was not recorded). Config 0 is the game's own display."
+  NPrint ""
+  NPrint "config  planes  dual  fetch  scroll   flags      figures seen"
+  For configIndex.w = 0 To #CONFIGS - 1
+    scrollWord$ = "still "
+    If configMoves(configIndex) = 1 Then scrollWord$ = "moving"
+    Print configIndex, "  ", configPlanes(configIndex), "  ", configDual(configIndex), "  ", configFetch(configIndex), "  ", scrollWord$, "  $", Hex$(configFlags(configIndex)), "  "
+    NPrint configSeen(configIndex)
+  Next
+  NPrint ""
+  NPrint "Chip RAM of the proof's bitmaps: ", chipBefore - chipAfter, " bytes"
+  CloseFile 0
+EndIf
+End

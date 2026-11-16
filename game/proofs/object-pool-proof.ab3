@@ -1,0 +1,338 @@
+;; =======================================================
+;; OBJECT POOL PROOF (BLITZ MODE)
+;; =======================================================
+;; Standalone proof for the fixed-capacity object pool. Tests allocation,
+;; slot reuse, type dispatch, and full-slot failure. Compile in UAE to verify
+;; the pattern before folding into live includes.
+
+#MAX_OBJECTS = 8
+#OBJ_NONE = 0
+#OBJ_MUSHROOM = 1
+#OBJ_COIN = 2
+
+;; Generic object pool arrays
+Dim objType.w(#MAX_OBJECTS - 1)
+Dim objState.w(#MAX_OBJECTS - 1)
+Dim objActive.w(#MAX_OBJECTS - 1)
+Dim objX.w(#MAX_OBJECTS - 1)
+Dim objY.w(#MAX_OBJECTS - 1)
+Dim objVelX.w(#MAX_OBJECTS - 1)
+Dim objVelY.w(#MAX_OBJECTS - 1)
+Dim objDir.w(#MAX_OBJECTS - 1)
+Dim objSprite.w(#MAX_OBJECTS - 1)
+Dim objAnimTimer.w(#MAX_OBJECTS - 1)
+Dim objAnimFrame.w(#MAX_OBJECTS - 1)
+Dim objAux.w(#MAX_OBJECTS - 1)
+
+;; Item-specific arrays (mushroom rise/occlusion, coin pop)
+Dim objRiseRemaining.w(#MAX_OBJECTS - 1)
+Dim objRiseStep.w(#MAX_OBJECTS - 1)
+Dim objRiseTarget.w(#MAX_OBJECTS - 1)
+Dim objFractionY.w(#MAX_OBJECTS - 1)
+Dim objSourceCell.w(#MAX_OBJECTS - 1)
+Dim objPopTimer.w(#MAX_OBJECTS - 1)
+Dim objStartY.w(#MAX_OBJECTS - 1)
+
+;; Simulation constants
+#SIM_STEP_NUM = 50
+#ITEM_H = 16
+#TILE = 16
+#MUSHROOM_SPEED = 1
+#MUSHROOM_GRAVITY = 32
+#MUSHROOM_FALL_MAX = 512
+#COIN_POP_FRAMES = 32
+#COIN_ANIM_SPEED = 4
+#COIN_SPRITE_BASE = 42
+#COIN_SPRITE_TURN_BASE = 45
+#COIN_H = 16
+#MARIO_BTN_RIGHT = 1
+#MARIO_BTN_LEFT = 2
+#MT_EMPTY = 0
+
+;; =======================================================
+;; POOL HELPERS
+;; =======================================================
+
+;; Find a free slot. Returns index (0..#MAX_OBJECTS-1) or -1 if full.
+Function.w PoolAlloc{}
+  SHARED objType(), objState(), objActive(), objX(), objY()
+  SHARED objVelX(), objVelY(), objDir(), objSprite()
+  SHARED objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget()
+  SHARED objFractionY(), objSourceCell(), objPopTimer(), objStartY()
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = False
+      objActive(i) = True
+      objType(i) = #OBJ_NONE
+      objState(i) = 0
+      objX(i) = 0
+      objY(i) = 0
+      objVelX(i) = 0
+      objVelY(i) = 0
+      objDir(i) = 0
+      objSprite(i) = 0
+      objAnimTimer(i) = 0
+      objAnimFrame(i) = 0
+      objAux(i) = 0
+      objRiseRemaining(i) = 0
+      objRiseStep(i) = 0
+      objRiseTarget(i) = 0
+      objFractionY(i) = 0
+      objSourceCell(i) = 0
+      objPopTimer(i) = 0
+      objStartY(i) = 0
+      Function Return i
+    EndIf
+  Next
+  Function Return -1
+End Function
+
+;; Release a slot back to the pool
+Statement PoolFree{slot.w}
+  SHARED objActive(), objType()
+  If slot >= 0 AND slot < #MAX_OBJECTS
+    objActive(slot) = False
+    objType(slot) = #OBJ_NONE
+  EndIf
+End Statement
+
+;; Test if any object of given type is active
+Function.w PoolTypeActive{type.w}
+  SHARED objActive(), objType()
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = True AND objType(i) = type
+      Function Return i
+    EndIf
+  Next
+  Function Return -1
+End Function
+
+;; Initialize a block-spawned item slot as a mushroom. A caller spawning a flower or
+;; star sets objType(slot) after this call (SpawnBlockItem does).
+Statement PoolInitBlockItem{slot.w, x.w, y.w, sprite.w, sourceCell.w, simStepNum.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY()
+  objType(slot) = #OBJ_MUSHROOM
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = #MARIO_BTN_RIGHT
+  objSprite(slot) = sprite
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = simStepNum
+  objRiseStep(slot) = (#ITEM_H*256)/simStepNum
+  objRiseTarget(slot) = y - #ITEM_H
+  objFractionY(slot) = 0
+  objSourceCell(slot) = sourceCell
+  objPopTimer(slot) = 0
+  objStartY(slot) = 0
+End Statement
+
+;; Initialize a coin slot
+Statement PoolInitCoin{slot.w, x.w, y.w, startY.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY()
+  objType(slot) = #OBJ_COIN
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = 0
+  objSprite(slot) = #COIN_SPRITE_TURN_BASE
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = #COIN_POP_FRAMES
+  objStartY(slot) = startY
+End Statement
+
+;; =======================================================
+;; UPDATE DISPATCHER
+;; =======================================================
+
+Function.w MetatileAt{pixelX.w, pixelY.w}
+  Function Return #MT_EMPTY
+End Function
+
+Statement UpdateObjects{}
+  SHARED objType(), objState(), objActive(), objX(), objY()
+  SHARED objVelX(), objVelY(), objDir(), objSprite()
+  SHARED objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY()
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = False Then Continue
+    
+    Select objType(i)
+      Case #OBJ_MUSHROOM
+        ;; Rise phase
+        If objRiseRemaining(i) > 0
+          objFractionY(i) = objFractionY(i) + objRiseStep(i)
+          If objFractionY(i) >= 256
+            objY(i) = objY(i) - 1
+            objFractionY(i) = objFractionY(i) - 256
+          EndIf
+          objRiseRemaining(i) = objRiseRemaining(i) - 1
+          If objRiseRemaining(i) = 0
+            objY(i) = objRiseTarget(i)
+            objFractionY(i) = 0
+            objVelY(i) = 0
+          EndIf
+        Else
+          ;; Active phase: gravity, landing, horizontal walk
+          objVelY(i) = objVelY(i) + #MUSHROOM_GRAVITY
+          If objVelY(i) > #MUSHROOM_FALL_MAX Then objVelY(i) = #MUSHROOM_FALL_MAX
+          wholePx.w = objVelY(i)/256
+          objFractionY(i) = objFractionY(i) + (objVelY(i) - wholePx*256)
+          objY(i) = objY(i) + wholePx
+          If objFractionY(i) >= 256
+            objY(i) = objY(i) + 1
+            objFractionY(i) = objFractionY(i) - 256
+          EndIf
+          
+          ;; Landing
+          footRow.w = (objY(i) + #ITEM_H)/#TILE
+          If footRow >= 15
+            PoolFree{i}
+            Next
+          EndIf
+          If objVelY(i) >= 0 AND MetatileAt{objX(i) + 8, objY(i) + #ITEM_H} <> #MT_EMPTY
+            objY(i) = footRow*#TILE - #ITEM_H
+            objVelY(i) = 0
+            objFractionY(i) = 0
+          EndIf
+          
+          ;; Horizontal walk
+          If objVelY(i) >= 0
+            If objDir(i) = #MARIO_BTN_RIGHT
+              If MetatileAt{objX(i) + #ITEM_H, objY(i) + 8} <> #MT_EMPTY
+                objDir(i) = #MARIO_BTN_LEFT
+              Else
+                objX(i) = objX(i) + #MUSHROOM_SPEED
+              EndIf
+            Else
+              If MetatileAt{objX(i) - 1, objY(i) + 8} <> #MT_EMPTY
+                objDir(i) = #MARIO_BTN_RIGHT
+              Else
+                objX(i) = objX(i) - #MUSHROOM_SPEED
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+      
+      Case #OBJ_COIN
+        If objPopTimer(i) > 0
+          objPopTimer(i) = objPopTimer(i) - 1
+          objAnimTimer(i) = objAnimTimer(i) + 1
+          If objAnimTimer(i) >= #COIN_ANIM_SPEED
+            objAnimTimer(i) = 0
+            objAnimFrame(i) = objAnimFrame(i) + 1
+            If objAnimFrame(i) > 3
+              objAnimFrame(i) = 0
+            EndIf
+            objSprite(i) = #COIN_SPRITE_TURN_BASE + objAnimFrame(i)
+          EndIf
+          objFractionY(i) = objFractionY(i) + 704
+          If objPopTimer(i) >= #COIN_POP_FRAMES/2
+            objY(i) = objY(i) - (objFractionY(i)/256)
+            objFractionY(i) = objFractionY(i)&$ff
+          Else
+            objY(i) = objY(i) + (objFractionY(i)/256)
+            objFractionY(i) = objFractionY(i)&$ff
+          EndIf
+          If objPopTimer(i) = 0
+            objY(i) = objStartY(i)
+            PoolFree{i}
+          EndIf
+        Else
+          PoolFree{i}
+        EndIf
+    End Select
+  Next
+End Statement
+
+;; =======================================================
+;; TEST PROGRAM
+;; =======================================================
+
+BLITZ
+BitMap 0, 320, 256, 4
+BitMap 1, 320, 256, 4
+
+Print "Object Pool Proof"
+Print "================="
+Print ""
+
+;; Test 1: Allocate all slots
+Print "Test 1: Allocate all 8 slots"
+For i = 0 To 7
+  slot.w = PoolAlloc{}
+  Print "Slot " + Str$(i) + " = " + Str$(slot)
+  If slot >= 0
+    If i < 4
+      PoolInitBlockItem{slot, 100, 100, 29, 100, #SIM_STEP_NUM}
+    Else
+      PoolInitCoin{slot, 200, 200, 200}
+    EndIf
+  EndIf
+Next
+Print ""
+
+;; Test 2: Full pool allocation should fail
+Print "Test 2: Full pool allocation (should return -1)"
+slot.w = PoolAlloc{}
+Print "Slot = " + Str$(slot)
+Print ""
+
+;; Test 3: Free a slot and reallocate
+Print "Test 3: Free slot 3 and reallocate"
+PoolFree{3}
+slot.w = PoolAlloc{}
+Print "New slot = " + Str$(slot)
+If slot >= 0
+  PoolInitBlockItem{slot, 300, 300, 30, 200, #SIM_STEP_NUM}
+EndIf
+Print ""
+
+;; Test 4: Type active query
+Print "Test 4: Query active mushroom slot"
+mushSlot.w = PoolTypeActive{#OBJ_MUSHROOM}
+Print "Mushroom slot = " + Str$(mushSlot)
+coinSlot.w = PoolTypeActive{#OBJ_COIN}
+Print "Coin slot = " + Str$(coinSlot)
+Print ""
+
+;; Test 5: Run update dispatcher for a few frames
+Print "Test 5: Run UpdateObjects for 60 frames"
+For frame = 1 To 60
+  UpdateObjects{}
+  If frame = 1 OR frame = 30 OR frame = 60
+    Print "Frame " + Str$(frame) + ":"
+    For i = 0 To #MAX_OBJECTS - 1
+      If objActive(i) = True
+        Print "  Slot " + Str$(i) + ": type=" + Str$(objType(i)) + " x=" + Str$(objX(i)) + " y=" + Str$(objY(i)) + " state=" + Str$(objState(i)) + " riseRem=" + Str$(objRiseRemaining(i)) + " popTimer=" + Str$(objPopTimer(i))
+      EndIf
+    Next
+  EndIf
+Next
+Print ""
+
+Print "Proof complete. Press key to exit."
+Repeat
+Until Inkey$ <> ""
+
+End

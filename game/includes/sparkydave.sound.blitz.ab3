@@ -1,0 +1,1487 @@
+;; =======================================================
+;; SOUND (BLITZ MODE)
+;; =======================================================
+;; Three layers, from the cartridge down to the Amiga:
+;;
+;;   the engine   a port of smbdis.asm's SoundEngine (15045 to 15950): the effects' three
+;;                state machines, the music handler, their queues and buffers. The game
+;;                sets a queue (SoundSquare1{} and the others); the engine writes what
+;;                the cartridge would write to the NES's sound registers. Where an
+;;                effect owns a channel the music skips it: that is the "duck".
+;;   the APU      a model of the NES's four channels, enough to hear what the engine
+;;                writes: the pulse sweep, the envelope, the length and linear counters,
+;;                and the frame counter that clocks them (the engine writes $4017 every
+;;                frame, which makes a clock four envelope steps and two length and sweep
+;;                steps per frame).
+;;   Paula        UpdatePaula{} turns each channel's state into a waveform pointer, a
+;;                period and a volume on one Paula channel, written straight to the
+;;                hardware registers (checked by ear).
+;;
+;; SoundTick{} runs all three once per sim tick. Registers are written as (channel,
+;; register 0 to 3): control, sweep, timer low, timer high and length. See
+;; the main project's SOUND note.
+
+;; --------------------------------------------------------------------------
+;; The virtual APU
+;; --------------------------------------------------------------------------
+
+;; One write to an APU register: channel 0 to 3 and register 0 to 3 ($4000 + 4*channel +
+;; register), as the cartridge's engine does.
+Statement ApuWriteReg{apuChannel.w, registerIndex.w, writtenValue.w}
+  SHARED apuState(), apuLengthTable()
+  channelBase.w = apuChannel*16
+  If registerIndex = 0
+    apuState(channelBase + #AP_CONTROL) = writtenValue
+    Statement Return
+  EndIf
+  If registerIndex = 1
+    apuState(channelBase + #AP_SWEEP) = writtenValue
+    apuState(channelBase + #AP_SWEEP_RELOAD) = True
+    Statement Return
+  EndIf
+  If registerIndex = 2
+    If apuChannel = 3
+      apuState(channelBase + #AP_NOISE_PERIOD) = writtenValue AND 15
+      apuState(channelBase + #AP_NOISE_MODE) = writtenValue AND 128
+    Else
+      apuState(channelBase + #AP_TIMER) = (apuState(channelBase + #AP_TIMER) AND $700) OR writtenValue
+    EndIf
+    Statement Return
+  EndIf
+  ; Register 3: the timer's high bits, the length counter, and a new envelope.
+  If apuChannel <> 3
+    apuState(channelBase + #AP_TIMER) = (apuState(channelBase + #AP_TIMER) AND $ff) OR ((writtenValue AND 7)*256)
+  EndIf
+  If apuState(channelBase + #AP_ENABLED) <> 0
+    apuState(channelBase + #AP_LENGTH) = apuLengthTable((writtenValue/8) AND 31)
+  EndIf
+  apuState(channelBase + #AP_ENVELOPE_START) = True
+  If apuChannel = 2 Then apuState(channelBase + #AP_LINEAR_RELOAD) = True
+End Statement
+
+;; $4015: bit 0 pulse 1, 1 pulse 2, 2 triangle, 3 noise. A cleared bit silences the
+;; channel (its length counter is zeroed) until its next note.
+Statement ApuMaster{masterValue.w}
+  SHARED apuState(), apuPowerOfTwo()
+  If masterValue = $0f
+    For apuChannel.w = 0 To 3
+      apuState(apuChannel*16 + #AP_ENABLED) = True
+    Next
+    Statement Return
+  EndIf
+  For apuChannel.w = 0 To 3
+    If (masterValue AND apuPowerOfTwo(apuChannel)) <> 0
+      apuState(apuChannel*16 + #AP_ENABLED) = True
+    Else
+      apuState(apuChannel*16 + #AP_ENABLED) = False
+      apuState(apuChannel*16 + #AP_LENGTH) = 0
+    EndIf
+  Next
+End Statement
+
+;; The pulse sweep unit's target period: the timer changed by timer >> shift, up, or
+;; down (pulse 1 takes one more off, as the hardware does).
+Function.l ApuSweepTarget{apuChannel.w}
+  SHARED apuState(), apuPowerOfTwo()
+  channelBase.w = apuChannel*16
+  timerNow.l = apuState(channelBase + #AP_TIMER)
+  sweepValue.w = apuState(channelBase + #AP_SWEEP)
+  changeValue.l = timerNow/apuPowerOfTwo(sweepValue AND 7)
+  If (sweepValue AND 8) <> 0
+    targetValue.l = timerNow - changeValue
+    If apuChannel = 0 Then targetValue = targetValue - 1
+    If targetValue < 0 Then targetValue = 0
+  Else
+    targetValue.l = timerNow + changeValue
+  EndIf
+  Function Return targetValue
+End Function
+
+; One envelope step (a quarter frame) of a pulse or noise channel.
+Statement ApuEnvelopeStep{channelBase.w, controlValue.w}
+  SHARED apuState()
+  If apuState(channelBase + #AP_ENVELOPE_START) <> 0
+    apuState(channelBase + #AP_ENVELOPE_START) = False
+    apuState(channelBase + #AP_ENVELOPE_LEVEL) = 15
+    apuState(channelBase + #AP_ENVELOPE_DIV) = controlValue AND 15
+    Statement Return
+  EndIf
+  If apuState(channelBase + #AP_ENVELOPE_DIV) <> 0
+    apuState(channelBase + #AP_ENVELOPE_DIV) = apuState(channelBase + #AP_ENVELOPE_DIV) - 1
+    Statement Return
+  EndIf
+  apuState(channelBase + #AP_ENVELOPE_DIV) = controlValue AND 15
+  If apuState(channelBase + #AP_ENVELOPE_LEVEL) > 0
+    apuState(channelBase + #AP_ENVELOPE_LEVEL) = apuState(channelBase + #AP_ENVELOPE_LEVEL) - 1
+  Else
+    If (controlValue AND 32) <> 0 Then apuState(channelBase + #AP_ENVELOPE_LEVEL) = 15
+  EndIf
+End Statement
+
+; One step of the triangle's linear counter (a quarter frame).
+Statement ApuLinearStep{channelBase.w, controlValue.w}
+  SHARED apuState()
+  If apuState(channelBase + #AP_LINEAR_RELOAD) <> 0
+    apuState(channelBase + #AP_LINEAR) = controlValue AND 127
+  Else
+    If apuState(channelBase + #AP_LINEAR) > 0 Then apuState(channelBase + #AP_LINEAR) = apuState(channelBase + #AP_LINEAR) - 1
+  EndIf
+  If (controlValue AND 128) = 0 Then apuState(channelBase + #AP_LINEAR_RELOAD) = False
+End Statement
+
+;; One step of a pulse channel's sweep unit (a half frame). A disabled sweep changes
+;; nothing, and its divider and reload flag only matter once a write enables it, so it
+;; is skipped.
+Statement ApuSweepStep{apuChannel.w}
+  SHARED apuState()
+  channelBase.w = apuChannel*16
+  sweepValue.w = apuState(channelBase + #AP_SWEEP)
+  If (sweepValue AND 128) = 0 Then Statement Return
+  dividerZero.w = False
+  If apuState(channelBase + #AP_SWEEP_DIV) = 0 Then dividerZero = True
+  If dividerZero = True AND (sweepValue AND 7) <> 0
+    targetValue.l = ApuSweepTarget{apuChannel}
+    If apuState(channelBase + #AP_TIMER) >= 8 AND targetValue <= $7ff Then apuState(channelBase + #AP_TIMER) = targetValue
+  EndIf
+  If dividerZero = True OR apuState(channelBase + #AP_SWEEP_RELOAD) <> 0
+    apuState(channelBase + #AP_SWEEP_DIV) = (sweepValue/16) AND 7
+    apuState(channelBase + #AP_SWEEP_RELOAD) = False
+  Else
+    apuState(channelBase + #AP_SWEEP_DIV) = apuState(channelBase + #AP_SWEEP_DIV) - 1
+  EndIf
+End Statement
+
+;; True when a pulse channel's sweep unit mutes it: a timer under 8, or a target period
+;; over $7ff (which a sweep set to negate, as the engine's $7f is, never reaches).
+Function.w ApuPulseMuted{apuChannel.w}
+  SHARED apuState()
+  channelBase.w = apuChannel*16
+  If apuState(channelBase + #AP_TIMER) < 8 Then Function Return True
+  If (apuState(channelBase + #AP_SWEEP) AND 8) <> 0 Then Function Return False
+  If ApuSweepTarget{apuChannel} > $7ff Then Function Return True
+  Function Return False
+End Function
+
+;; The clock at the start of the frame, before the engine runs: the cartridge's write to
+;; $4017 clocks a quarter and a half frame at once. A channel with no length left is
+;; silent and everything it holds is reset by the write that starts its next note, so
+;; it is skipped; so is the envelope of a constant-volume channel.
+Statement ApuClockEarly{}
+  SHARED apuState()
+  For apuChannel.w = 0 To 3
+    channelBase.w = apuChannel*16
+    If apuState(channelBase + #AP_LENGTH) > 0
+      controlValue.w = apuState(channelBase + #AP_CONTROL)
+      If apuChannel = 2
+        If (controlValue AND 128) = 0 Then apuState(channelBase + #AP_LENGTH) = apuState(channelBase + #AP_LENGTH) - 1
+        ApuLinearStep{channelBase, controlValue}
+      Else
+        If (controlValue AND 32) = 0 Then apuState(channelBase + #AP_LENGTH) = apuState(channelBase + #AP_LENGTH) - 1
+        If (controlValue AND 16) = 0 Then ApuEnvelopeStep{channelBase, controlValue}
+        If apuChannel < 2 Then ApuSweepStep{apuChannel}
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The rest of the frame after the engine: three quarter clocks and one half clock, then
+;; each channel's loudness (#AP_LEVEL, 0 to 15) for Paula: the average of the envelope's
+;; four steps for an envelope channel, the constant volume otherwise, 0 when the length
+;; ran out or a pulse is muted.
+Statement ApuClockLate{}
+  SHARED apuState()
+  For apuChannel.w = 0 To 3
+    channelBase.w = apuChannel*16
+    levelNow.w = 0
+    If apuState(channelBase + #AP_LENGTH) > 0
+      controlValue.w = apuState(channelBase + #AP_CONTROL)
+      If apuChannel = 2
+        ApuLinearStep{channelBase, controlValue}
+        ApuLinearStep{channelBase, controlValue}
+        ApuLinearStep{channelBase, controlValue}
+        If (controlValue AND 128) = 0 AND apuState(channelBase + #AP_LENGTH) > 0 Then apuState(channelBase + #AP_LENGTH) = apuState(channelBase + #AP_LENGTH) - 1
+        If apuState(channelBase + #AP_LENGTH) > 0 AND apuState(channelBase + #AP_LINEAR) > 0 AND apuState(channelBase + #AP_TIMER) >= 2 Then levelNow = 15
+      Else
+        If (controlValue AND 16) = 0
+          levelSum.w = apuState(channelBase + #AP_ENVELOPE_LEVEL)
+          ApuEnvelopeStep{channelBase, controlValue}
+          levelSum = levelSum + apuState(channelBase + #AP_ENVELOPE_LEVEL)
+          ApuEnvelopeStep{channelBase, controlValue}
+          levelSum = levelSum + apuState(channelBase + #AP_ENVELOPE_LEVEL)
+          ApuEnvelopeStep{channelBase, controlValue}
+          levelNow = (levelSum + apuState(channelBase + #AP_ENVELOPE_LEVEL))/4
+        Else
+          levelNow = controlValue AND 15
+        EndIf
+        If (controlValue AND 32) = 0 AND apuState(channelBase + #AP_LENGTH) > 0 Then apuState(channelBase + #AP_LENGTH) = apuState(channelBase + #AP_LENGTH) - 1
+        If apuChannel < 2
+          ApuSweepStep{apuChannel}
+          If ApuPulseMuted{apuChannel} = True Then levelNow = 0
+        EndIf
+        If apuState(channelBase + #AP_LENGTH) = 0 Then levelNow = 0
+      EndIf
+    EndIf
+    apuState(channelBase + #AP_LEVEL) = levelNow
+  Next
+End Statement
+
+;; --------------------------------------------------------------------------
+;; Paula
+;; --------------------------------------------------------------------------
+
+;; The cycle length (index 0 is 32 bytes, 1 is 16, 2 is 8) and Paula period for a timer
+;; value. scaleTimes10000 is the ratio of Paula's clock to the NES's times the 16 or 32
+;; steps of the NES's own cycle: 317081 for the pulse, 634162 for the triangle. The
+;; longest cycle whose period is not below #PAULA_PERIOD_MIN wins; if none, the 8-byte
+;; cycle at the minimum.
+Statement PlanSoundCycle{timerValue.l, scaleTimes10000.l}
+  SHARED soundPlanSize, soundPlanPeriod
+  ; The period times the cycle length: one division, then the longest cycle that fits.
+  periodTimesBytes.l = ((timerValue + 1)*scaleTimes10000)/10000
+  If periodTimesBytes >= #PAULA_PERIOD_MIN*32
+    soundPlanSize = 0
+    soundPlanPeriod = (periodTimesBytes + 16)/32
+  Else
+    If periodTimesBytes >= #PAULA_PERIOD_MIN*16
+      soundPlanSize = 1
+      soundPlanPeriod = (periodTimesBytes + 8)/16
+    Else
+      soundPlanSize = 2
+      soundPlanPeriod = (periodTimesBytes + 4)/8
+      If soundPlanPeriod < #PAULA_PERIOD_MIN Then soundPlanPeriod = #PAULA_PERIOD_MIN
+    EndIf
+  EndIf
+  If soundPlanPeriod > #PAULA_PERIOD_MAX Then soundPlanPeriod = #PAULA_PERIOD_MAX
+End Statement
+
+;; Gives a Paula channel a waveform, a length in words, a period and a volume. The
+;; pointer and length latch at the next wrap of the running waveform (no click); the
+;; period and volume apply at once.
+Statement PaulaSet{paulaChannel.w, waveAddress.l, waveWords.l, periodValue.l, volumeValue.w}
+  registerBase.l = #PAULA_BASE + paulaChannel*16
+  Poke.l registerBase, waveAddress
+  Poke.w registerBase + 4, waveWords
+  Poke.w registerBase + 6, periodValue
+  Poke.w registerBase + 8, volumeValue
+End Statement
+
+; Starts the audio: no modulation, every channel on a silent 8-byte wave, the DMA on.
+Statement SoundStart{}
+  SHARED soundWaveBlock, soundPulseWaveOffset(), soundHardwareOn, soundPaulaKey(), soundPaulaVolume()
+  If soundWaveBlock = 0 Then Statement Return
+  Poke.w #PAULA_ADKCON, $00ff
+  For paulaChannel.w = 0 To 3
+    PaulaSet{paulaChannel, soundWaveBlock + soundPulseWaveOffset(2*3 + 2), 4, 400, 0}
+    soundPaulaKey(paulaChannel) = -1
+    soundPaulaVolume(paulaChannel) = 0
+  Next
+  Poke.w #PAULA_DMACON, #PAULA_DMA_AUDIO
+  soundHardwareOn = True
+End Statement
+
+;; The tuning: a pan layout from the table (every channel is silenced and rewritten, so a held
+;; note moves at once), and the Amiga's low-pass filter, which is a bit of CIA-A's port A (bit 1,
+;; the power LED: 0 is the filter on).
+;;
+;; A new layout gives each Paula channel another APU channel's part, so another kind of wave. A wave given by
+;; PaulaSet{} only takes over when the running one wraps, and the long noise is 32 KB, so a channel could keep
+;; the old wave for about a second. The audio DMA is therefore stopped, every channel put on the silent 8-byte
+;; wave as SoundStart{} does, and started again: a restarted channel loads its pointer at once, and the next
+;; UpdatePaula{} gives it its part's wave, which takes over within 8 bytes. Two raster lines between the stop and start.
+Statement SoundSetPan{layoutNumber.w}
+  SHARED soundPanLayout(), soundPaulaChannel(), soundPanNow, soundPaulaKey(), soundPaulaVolume(), soundHardwareOn
+  SHARED soundWaveBlock, soundPulseWaveOffset()
+  soundPanNow = layoutNumber
+  For apuChannel.w = 0 To 3
+    soundPaulaChannel(apuChannel) = soundPanLayout(layoutNumber*4 + apuChannel)
+  Next
+  For paulaChannel.w = 0 To 3
+    soundPaulaKey(paulaChannel) = -1
+    soundPaulaVolume(paulaChannel) = 0
+  Next
+  If soundHardwareOn = False Then Statement Return
+  Poke.w #PAULA_DMACON, $000f
+  For paulaChannel.w = 0 To 3
+    PaulaSet{paulaChannel, soundWaveBlock + soundPulseWaveOffset(2*3 + 2), 4, 400, 0}
+  Next
+  For lineWait.w = 1 To 2
+    lineNow.l = RasterLine{}
+    While RasterLine{} = lineNow
+    Wend
+  Next
+  Poke.w #PAULA_DMACON, #PAULA_DMA_AUDIO
+End Statement
+
+Statement SoundSetFilter{filterOn.w}
+  portNow.l = Peek.b($bfe001) AND 255
+  If filterOn <> False
+    Poke.b $bfe001, portNow AND $fd
+  Else
+    Poke.b $bfe001, portNow OR 2
+  EndIf
+End Statement
+
+;; The starting settings onto the hardware (after SoundStart{}): the pan layout and the filter, as
+;; the defaults or the settings file left them.
+Statement SoundApplySettings{}
+  SHARED soundPanNow, soundFilterChosen
+  SoundSetPan{soundPanNow}
+  SoundSetFilter{soundFilterChosen}
+End Statement
+
+; Stops the audio DMA (on leaving the game).
+Statement SoundStop{}
+  SHARED soundHardwareOn
+  If soundHardwareOn = False Then Statement Return
+  For paulaChannel.w = 0 To 3
+    Poke.w #PAULA_BASE + paulaChannel*16 + 8, 0
+  Next
+  Poke.w #PAULA_DMACON, $000f
+  soundHardwareOn = False
+End Statement
+
+;; Once per tick, after the frame's four clocks: each channel's average loudness, pitch
+;; and waveform onto its Paula channel. Only what changed is written.
+Statement UpdatePaula{}
+  SHARED apuState(), apuNoisePeriod(), soundPaulaChannel(), soundPaulaKey(), soundPaulaWave()
+  SHARED soundPaulaWords(), soundPaulaPeriod(), soundPaulaVolume(), soundPulseWaveOffset()
+  SHARED soundTriangleWaveOffset(), soundCycleLength(), soundWaveBlock, soundNoiseLongOffset
+  SHARED soundNoiseShortOffset, soundPlanSize, soundPlanPeriod, soundHardwareOn, soundVolumeScale()
+  For apuChannel.w = 0 To 3
+    channelBase.w = apuChannel*16
+    paulaChannel.w = soundPaulaChannel(apuChannel)
+    levelNow.w = apuState(channelBase + #AP_LEVEL)
+    If apuChannel < 2 Then volumeNow.w = levelNow*soundVolumeScale(0)
+    If apuChannel = 2 Then volumeNow.w = levelNow*soundVolumeScale(1)
+    If apuChannel = 3 Then volumeNow.w = levelNow*soundVolumeScale(2)
+    If volumeNow > 64 Then volumeNow = 64
+    If soundHardwareOn = True
+      If levelNow = 0
+        If soundPaulaVolume(paulaChannel) <> 0
+          Poke.w #PAULA_BASE + paulaChannel*16 + 8, 0
+          soundPaulaVolume(paulaChannel) = 0
+        EndIf
+      Else
+        If apuChannel < 2
+          dutyIndex.w = (apuState(channelBase + #AP_CONTROL)/64) AND 3
+          keyNow.l = apuState(channelBase + #AP_TIMER) + dutyIndex*4096
+        EndIf
+        If apuChannel = 2 Then keyNow.l = apuState(channelBase + #AP_TIMER)
+        If apuChannel = 3 Then keyNow.l = apuState(channelBase + #AP_NOISE_PERIOD) + apuState(channelBase + #AP_NOISE_MODE)*16
+        keyChanged.w = False
+        If keyNow <> soundPaulaKey(paulaChannel)
+          keyChanged.w = True
+          soundPaulaKey(paulaChannel) = keyNow
+          If apuChannel < 2
+            PlanSoundCycle{apuState(channelBase + #AP_TIMER), 317081}
+            soundPaulaWave(paulaChannel) = soundWaveBlock + soundPulseWaveOffset(dutyIndex*3 + soundPlanSize)
+            soundPaulaWords(paulaChannel) = soundCycleLength(soundPlanSize)/2
+            soundPaulaPeriod(paulaChannel) = soundPlanPeriod
+          EndIf
+          If apuChannel = 2
+            PlanSoundCycle{apuState(channelBase + #AP_TIMER), 634162}
+            soundPaulaWave(paulaChannel) = soundWaveBlock + soundTriangleWaveOffset(soundPlanSize)
+            soundPaulaWords(paulaChannel) = soundCycleLength(soundPlanSize)/2
+            soundPaulaPeriod(paulaChannel) = soundPlanPeriod
+          EndIf
+          If apuChannel = 3
+            periodNow.l = (apuNoisePeriod(apuState(channelBase + #AP_NOISE_PERIOD))*19818 + 5000)/10000
+            If periodNow < #PAULA_PERIOD_MIN Then periodNow = #PAULA_PERIOD_MIN
+            If apuState(channelBase + #AP_NOISE_MODE) = 0
+              soundPaulaWave(paulaChannel) = soundWaveBlock + soundNoiseLongOffset
+              soundPaulaWords(paulaChannel) = #SOUND_NOISE_LONG_BYTES/2
+            Else
+              soundPaulaWave(paulaChannel) = soundWaveBlock + soundNoiseShortOffset
+              soundPaulaWords(paulaChannel) = #SOUND_NOISE_SHORT_BYTES/2
+            EndIf
+            soundPaulaPeriod(paulaChannel) = periodNow
+          EndIf
+        EndIf
+        If keyChanged = True
+          PaulaSet{paulaChannel, soundPaulaWave(paulaChannel), soundPaulaWords(paulaChannel), soundPaulaPeriod(paulaChannel), volumeNow}
+        Else
+          If volumeNow <> soundPaulaVolume(paulaChannel) Then Poke.w #PAULA_BASE + paulaChannel*16 + 8, volumeNow
+        EndIf
+        soundPaulaVolume(paulaChannel) = volumeNow
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine: small helpers
+;; --------------------------------------------------------------------------
+
+;; Writes the timer for a note offset into the ROM's frequency table: the low byte
+;; into the timer low register, the high bits (with the length counter load) into the
+;; timer high register. A zero low byte is a rest: nothing is written and the result
+;; is False (the cartridge's Dump_Freq_Regs).
+Function.w DumpFrequency{apuChannel.w, noteOffset.w}
+  SHARED soundFreqTable()
+  lowByte.w = soundFreqTable(noteOffset + 1)
+  If lowByte = 0 Then Function Return False
+  ApuWriteReg{apuChannel, 2, lowByte}
+  ApuWriteReg{apuChannel, 3, soundFreqTable(noteOffset) OR 8}
+  Function Return True
+End Function
+
+; Square 1's control and sweep registers (the cartridge's Dump_Squ1_Regs).
+Statement DumpSquare1Regs{controlValue.w, sweepValue.w}
+  ApuWriteReg{0, 1, sweepValue}
+  ApuWriteReg{0, 0, controlValue}
+End Statement
+
+Statement DumpSquare2Regs{controlValue.w, sweepValue.w}
+  ApuWriteReg{1, 0, controlValue}
+  ApuWriteReg{1, 1, sweepValue}
+End Statement
+
+; Control and sweep, then the note: PlaySqu1Sfx and PlaySqu2Sfx.
+Statement PlaySquare1Sfx{noteOffset.w, controlValue.w, sweepValue.w}
+  DumpSquare1Regs{controlValue, sweepValue}
+  DumpFrequency{0, noteOffset}
+End Statement
+
+Statement PlaySquare2Sfx{noteOffset.w, controlValue.w, sweepValue.w}
+  DumpSquare2Regs{controlValue, sweepValue}
+  DumpFrequency{1, noteOffset}
+End Statement
+
+;; Ends square 1's effect: clears its buffer and cuts the channel (the cartridge's
+;; StopSquare1Sfx writes $0e and then $0f to the master register).
+Statement StopSquare1Sfx{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_BUFFER) = 0
+  ApuMaster{$0e}
+  ApuMaster{$0f}
+End Statement
+
+Statement StopSquare2Sfx{}
+  ApuMaster{$0d}
+  ApuMaster{$0f}
+End Statement
+
+Statement EmptySfx2Buffer{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_BUFFER) = 0
+  StopSquare2Sfx{}
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine: square 1 effects (smbdis 15231)
+;; --------------------------------------------------------------------------
+
+Statement DecrementSfx1Length{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = (soundState(#SS_SQUARE1_SFX_LENGTH) - 1) AND 255
+  If soundState(#SS_SQUARE1_SFX_LENGTH) = 0 Then StopSquare1Sfx{}
+End Statement
+
+; The jump sounds are three parts, picked by the length counter left.
+Statement ContinueSoundJump{}
+  SHARED soundState()
+  lengthLeft.w = soundState(#SS_SQUARE1_SFX_LENGTH)
+  If lengthLeft = $25
+    DumpSquare1Regs{$5f, $f6}
+  Else
+    If lengthLeft = $20 Then DumpSquare1Regs{$48, $bc}
+  EndIf
+  DecrementSfx1Length{}
+End Statement
+
+Statement PlayJump{noteOffset.w}
+  SHARED soundState()
+  PlaySquare1Sfx{noteOffset, $82, $a7}
+  soundState(#SS_SQUARE1_SFX_LENGTH) = $28
+  ContinueSoundJump{}
+End Statement
+
+Statement PlayFlagpoleSlide{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = $40
+  DumpFrequency{0, $62}
+  DumpSquare1Regs{$99, $bc}
+  DecrementSfx1Length{}
+End Statement
+
+Statement ContinueBumpThrow{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE1_SFX_LENGTH) = 6 Then ApuWriteReg{0, 1, $bb}
+  DecrementSfx1Length{}
+End Statement
+
+;; The bump and the fireball throw share their control register; lengthValue and the
+;; sweep register differ.
+Statement PlayBumpThrow{lengthValue.w, sweepValue.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = lengthValue
+  PlaySquare1Sfx{$0c, $9e, sweepValue}
+  ContinueBumpThrow{}
+End Statement
+
+Statement ContinueSwimStomp{}
+  SHARED soundState(), soundSwimStompEnvelope()
+  lengthLeft.w = soundState(#SS_SQUARE1_SFX_LENGTH)
+  ApuWriteReg{0, 0, soundSwimStompEnvelope(lengthLeft - 1)}
+  If lengthLeft = 6 Then ApuWriteReg{0, 2, $9e}
+  DecrementSfx1Length{}
+End Statement
+
+Statement PlaySwimStomp{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = $0e
+  PlaySquare1Sfx{$26, $9e, $9c}
+  ContinueSwimStomp{}
+End Statement
+
+Statement ContinueSmackEnemy{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE1_SFX_LENGTH) = 8
+    ApuWriteReg{0, 2, $a0}
+    ApuWriteReg{0, 0, $9f}
+  Else
+    ApuWriteReg{0, 0, $90}
+  EndIf
+  DecrementSfx1Length{}
+End Statement
+
+;; The smack plays its first part and only then counts; it does not run the continue
+;; step on the frame it starts.
+Statement PlaySmackEnemy{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = $0e
+  PlaySquare1Sfx{$28, $9f, $cb}
+  DecrementSfx1Length{}
+End Statement
+
+;; The pipe and the injury write their registers only when the length left has bits 1
+;; and 0 clear and bit 3 set.
+Statement ContinuePipeDownInjury{}
+  SHARED soundState()
+  lengthLeft.w = soundState(#SS_SQUARE1_SFX_LENGTH)
+  If (lengthLeft AND 3) = 0 AND (lengthLeft AND 8) <> 0
+    PlaySquare1Sfx{$44, $9a, $91}
+  EndIf
+  DecrementSfx1Length{}
+End Statement
+
+Statement PlayPipeDownInjury{}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_SFX_LENGTH) = $2f
+  ContinuePipeDownInjury{}
+End Statement
+
+Statement Square1SfxHandler{}
+  SHARED soundState()
+  queueNow.w = soundState(#SS_SQUARE1_QUEUE)
+  If queueNow <> 0
+    soundState(#SS_SQUARE1_BUFFER) = queueNow
+    If (queueNow AND 128) <> 0
+      PlayJump{$26}
+      Statement Return
+    EndIf
+    If (queueNow AND 1) <> 0
+      PlayJump{$18}
+      Statement Return
+    EndIf
+    If (queueNow AND 2) <> 0
+      PlayBumpThrow{$0a, $93}
+      Statement Return
+    EndIf
+    If (queueNow AND 4) <> 0
+      PlaySwimStomp{}
+      Statement Return
+    EndIf
+    If (queueNow AND 8) <> 0
+      PlaySmackEnemy{}
+      Statement Return
+    EndIf
+    If (queueNow AND 16) <> 0
+      PlayPipeDownInjury{}
+      Statement Return
+    EndIf
+    If (queueNow AND 32) <> 0
+      PlayBumpThrow{$05, $99}
+      Statement Return
+    EndIf
+    If (queueNow AND 64) <> 0
+      PlayFlagpoleSlide{}
+      Statement Return
+    EndIf
+  EndIf
+  bufferNow.w = soundState(#SS_SQUARE1_BUFFER)
+  If bufferNow = 0 Then Statement Return
+  If (bufferNow AND 128) <> 0
+    ContinueSoundJump{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 1) <> 0
+    ContinueSoundJump{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 2) <> 0
+    ContinueBumpThrow{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 4) <> 0
+    ContinueSwimStomp{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 8) <> 0
+    ContinueSmackEnemy{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 16) <> 0
+    ContinuePipeDownInjury{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 32) <> 0
+    ContinueBumpThrow{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 64) <> 0 Then DecrementSfx1Length{}
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine: square 2 effects (smbdis 15430)
+;; --------------------------------------------------------------------------
+
+Statement DecrementSfx2Length{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = (soundState(#SS_SQUARE2_SFX_LENGTH) - 1) AND 255
+  If soundState(#SS_SQUARE2_SFX_LENGTH) = 0 Then EmptySfx2Buffer{}
+End Statement
+
+; The coin and the timer tick: the same sound, a second tone at length $30.
+Statement ContinueCoinTimerTick{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE2_SFX_LENGTH) = $30 Then ApuWriteReg{1, 2, $54}
+  DecrementSfx2Length{}
+End Statement
+
+Statement PlayCoinTimerTick{lengthValue.w, controlValue.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = lengthValue
+  PlaySquare2Sfx{$42, controlValue, $7f}
+  ContinueCoinTimerTick{}
+End Statement
+
+; Fireworks and gunfire.
+Statement PlayBlast{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = $20
+  PlaySquare2Sfx{$5e, $9f, $94}
+  DecrementSfx2Length{}
+End Statement
+
+Statement ContinueBlast{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE2_SFX_LENGTH) = $18 Then PlaySquare2Sfx{$18, $9f, $93}
+  DecrementSfx2Length{}
+End Statement
+
+; The power-up grab: a new frequency every other frame from the table.
+Statement ContinuePowerUpGrab{}
+  SHARED soundState(), soundPowerUpGrabFreq()
+  lengthLeft.w = soundState(#SS_SQUARE2_SFX_LENGTH)
+  If (lengthLeft AND 1) = 0
+    PlaySquare2Sfx{soundPowerUpGrabFreq(lengthLeft/2 - 1), $5d, $7f}
+  EndIf
+  DecrementSfx2Length{}
+End Statement
+
+Statement PlayPowerUpGrab{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = $36
+  ContinuePowerUpGrab{}
+End Statement
+
+; The 1-up: a new tone every eight frames.
+Statement ContinueExtraLife{}
+  SHARED soundState(), soundExtraLifeFreq()
+  lengthLeft.w = soundState(#SS_SQUARE2_SFX_LENGTH)
+  If (lengthLeft AND 7) = 0
+    PlaySquare2Sfx{soundExtraLifeFreq(lengthLeft/8 - 1), $82, $7f}
+  EndIf
+  DecrementSfx2Length{}
+End Statement
+
+Statement PlayExtraLife{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = $30
+  ContinueExtraLife{}
+End Statement
+
+Statement ContinueBowserFall{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE2_SFX_LENGTH) = 8 Then PlaySquare2Sfx{$5a, $9f, $a4}
+  DecrementSfx2Length{}
+End Statement
+
+Statement PlayBowserFall{}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = $38
+  PlaySquare2Sfx{$18, $9f, $c4}
+  DecrementSfx2Length{}
+End Statement
+
+;; The power-up reveal and the vine: a secondary counter walks the frequency table and
+;; the effect ends when it reaches the length; the usual counter is not used.
+Statement ContinueGrowItems{}
+  SHARED soundState(), soundGrowFreq()
+  soundState(#SS_SFX_SECONDARY_COUNTER) = (soundState(#SS_SFX_SECONDARY_COUNTER) + 1) AND 255
+  tableIndex.w = soundState(#SS_SFX_SECONDARY_COUNTER)/2
+  If tableIndex = soundState(#SS_SQUARE2_SFX_LENGTH)
+    EmptySfx2Buffer{}
+    Statement Return
+  EndIf
+  ApuWriteReg{1, 0, $9d}
+  DumpFrequency{1, soundGrowFreq(tableIndex)}
+End Statement
+
+Statement PlayGrowItems{lengthValue.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_SFX_LENGTH) = lengthValue
+  ApuWriteReg{1, 1, $7f}
+  soundState(#SS_SFX_SECONDARY_COUNTER) = 0
+  ContinueGrowItems{}
+End Statement
+
+Statement Square2SfxHandler{}
+  SHARED soundState()
+  If (soundState(#SS_SQUARE2_BUFFER) AND #SFX_EXTRA_LIFE) <> 0
+    ContinueExtraLife{}
+    Statement Return
+  EndIf
+  queueNow.w = soundState(#SS_SQUARE2_QUEUE)
+  If queueNow <> 0
+    soundState(#SS_SQUARE2_BUFFER) = queueNow
+    If (queueNow AND 128) <> 0
+      PlayBowserFall{}
+      Statement Return
+    EndIf
+    If (queueNow AND 1) <> 0
+      PlayCoinTimerTick{$35, $8d}
+      Statement Return
+    EndIf
+    If (queueNow AND 2) <> 0
+      PlayGrowItems{$10}
+      Statement Return
+    EndIf
+    If (queueNow AND 4) <> 0
+      PlayGrowItems{$20}
+      Statement Return
+    EndIf
+    If (queueNow AND 8) <> 0
+      PlayBlast{}
+      Statement Return
+    EndIf
+    If (queueNow AND 16) <> 0
+      PlayCoinTimerTick{$06, $98}
+      Statement Return
+    EndIf
+    If (queueNow AND 32) <> 0
+      PlayPowerUpGrab{}
+      Statement Return
+    EndIf
+    If (queueNow AND 64) <> 0
+      PlayExtraLife{}
+      Statement Return
+    EndIf
+  EndIf
+  bufferNow.w = soundState(#SS_SQUARE2_BUFFER)
+  If bufferNow = 0 Then Statement Return
+  If (bufferNow AND 128) <> 0
+    ContinueBowserFall{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 1) <> 0
+    ContinueCoinTimerTick{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 2) <> 0
+    ContinueGrowItems{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 4) <> 0
+    ContinueGrowItems{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 8) <> 0
+    ContinueBlast{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 16) <> 0
+    ContinueCoinTimerTick{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 32) <> 0
+    ContinuePowerUpGrab{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 64) <> 0 Then ContinueExtraLife{}
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine: noise effects (smbdis 15575)
+;; --------------------------------------------------------------------------
+
+;; Writes the noise registers, then counts the effect down; at its end the channel is
+;; silenced and the buffer cleared (PlayNoiseSfx and DecrementSfx3Length).
+Statement PlayNoiseSfx{controlValue.w, periodValue.w}
+  SHARED soundState()
+  ApuWriteReg{3, 0, controlValue}
+  ApuWriteReg{3, 2, periodValue}
+  ApuWriteReg{3, 3, $18}
+End Statement
+
+Statement DecrementSfx3Length{}
+  SHARED soundState()
+  soundState(#SS_NOISE_SFX_LENGTH) = (soundState(#SS_NOISE_SFX_LENGTH) - 1) AND 255
+  If soundState(#SS_NOISE_SFX_LENGTH) = 0
+    ApuWriteReg{3, 0, $f0}
+    soundState(#SS_NOISE_BUFFER) = 0
+  EndIf
+End Statement
+
+; The brick shatter writes on odd lengths only.
+Statement ContinueBrickShatter{}
+  SHARED soundState(), soundBrickShatterFreq(), soundEnvelopeData()
+  lengthLeft.w = soundState(#SS_NOISE_SFX_LENGTH)
+  If (lengthLeft AND 1) <> 0
+    tableIndex.w = lengthLeft/2
+    PlayNoiseSfx{soundEnvelopeData(#SOUND_ENV_BRICK_SHATTER + tableIndex), soundBrickShatterFreq(tableIndex)}
+  EndIf
+  DecrementSfx3Length{}
+End Statement
+
+Statement ContinueBowserFlame{}
+  SHARED soundState(), soundEnvelopeData()
+  tableIndex.w = soundState(#SS_NOISE_SFX_LENGTH)/2
+  PlayNoiseSfx{soundEnvelopeData(#SOUND_ENV_BOWSER_FLAME + tableIndex - 1), $0f}
+  DecrementSfx3Length{}
+End Statement
+
+Statement NoiseSfxHandler{}
+  SHARED soundState()
+  queueNow.w = soundState(#SS_NOISE_QUEUE)
+  If queueNow <> 0
+    soundState(#SS_NOISE_BUFFER) = queueNow
+    If (queueNow AND 1) <> 0
+      soundState(#SS_NOISE_SFX_LENGTH) = $20
+      ContinueBrickShatter{}
+      Statement Return
+    EndIf
+    If (queueNow AND 2) <> 0
+      soundState(#SS_NOISE_SFX_LENGTH) = $40
+      ContinueBowserFlame{}
+      Statement Return
+    EndIf
+  EndIf
+  bufferNow.w = soundState(#SS_NOISE_BUFFER)
+  If bufferNow = 0 Then Statement Return
+  If (bufferNow AND 1) <> 0
+    ContinueBrickShatter{}
+    Statement Return
+  EndIf
+  If (bufferNow AND 2) <> 0 Then ContinueBowserFlame{}
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine: music (smbdis 15610)
+;; --------------------------------------------------------------------------
+
+;; A byte of the music data at the current song's base, indexed as the cartridge's
+;; 8-bit Y register (it wraps at 256).
+Function.w MusicByte{dataOffset.w}
+  SHARED soundState(), soundMusicData()
+  Function Return soundMusicData(soundState(#SS_MUSIC_DATA) + (dataOffset AND 255))
+End Function
+
+;; A note length from the length table: the three low bits of the value plus the
+;; header's length offset plus the faster-music adder (ProcessLengthData).
+Function.w ProcessLengthData{lengthValue.w}
+  SHARED soundState(), soundLengthTable()
+  Function Return soundLengthTable((lengthValue AND 7) + soundState(#SS_NOTE_LENGTH_OFFSET) + soundState(#SS_LENGTH_TABLE_ADDER))
+End Function
+
+; Square 1 and the noise pack their length into bits 0, 7 and 6 (AlternateLengthHandler).
+Function.w AlternateLengthHandler{lengthValue.w}
+  bitsNow.w = (lengthValue AND 1)*4 + ((lengthValue/128) AND 1)*2 + ((lengthValue/64) AND 1)
+  Function Return ProcessLengthData{bitsNow}
+End Function
+
+;; The envelope offset a new note starts from (LoadControlRegs; the control and sweep
+;; registers it also loads are always $82 and $7f).
+Function.w ControlRegsOffset{}
+  SHARED soundState()
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND #MUSIC_END_OF_CASTLE) <> 0 Then Function Return 4
+  If (soundState(#SS_AREA_MUSIC_BUFFER) AND%01111101) = 0 Then Function Return $28
+  Function Return 8
+End Function
+
+;; The control register value for a frame of a note (LoadEnvelopeData). The offset can
+;; run past one table into the next, as the cartridge's does.
+Function.w LoadEnvelopeData{envelopeIndex.w}
+  SHARED soundState(), soundEnvelopeData()
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND #MUSIC_END_OF_CASTLE) <> 0 Then Function Return soundEnvelopeData(#SOUND_ENV_END_OF_CASTLE + envelopeIndex)
+  If (soundState(#SS_AREA_MUSIC_BUFFER) AND%01111101) = 0 Then Function Return soundEnvelopeData(#SOUND_ENV_WATER_EVENT + envelopeIndex)
+  Function Return soundEnvelopeData(#SOUND_ENV_AREA + envelopeIndex)
+End Function
+
+;; The header for header index headerIndex (1-based, as the cartridge's Y): copies its
+;; bytes into the music state and resets the four channels' counters. Returns 4, the
+;; next phase (run the channels).
+Function.w MusicLoadHeader{headerIndex.w}
+  SHARED soundState(), soundMusicHeaders()
+  headerOffset.w = soundMusicHeaders(headerIndex - 1)
+  soundState(#SS_NOTE_LENGTH_OFFSET) = soundMusicHeaders(headerOffset)
+  soundState(#SS_MUSIC_DATA) = soundMusicHeaders(headerOffset + 1) + soundMusicHeaders(headerOffset + 2)*256
+  soundState(#SS_MUSIC_OFFSET_TRIANGLE) = soundMusicHeaders(headerOffset + 3)
+  soundState(#SS_MUSIC_OFFSET_SQUARE1) = soundMusicHeaders(headerOffset + 4)
+  soundState(#SS_MUSIC_OFFSET_NOISE) = soundMusicHeaders(headerOffset + 5)
+  soundState(#SS_NOISE_LOOPBACK_OFFSET) = soundMusicHeaders(headerOffset + 5)
+  soundState(#SS_SQUARE2_NOTE_LENGTH_COUNTER) = 1
+  soundState(#SS_SQUARE1_NOTE_LENGTH_COUNTER) = 1
+  soundState(#SS_TRIANGLE_NOTE_LENGTH_COUNTER) = 1
+  soundState(#SS_NOISE_BEAT_LENGTH_COUNTER) = 1
+  soundState(#SS_MUSIC_OFFSET_SQUARE2) = 0
+  soundState(#SS_ALT_REG_CONTENT_FLAG) = 0
+  ApuMaster{$0b}
+  ApuMaster{$0f}
+  Function Return 4
+End Function
+
+;; Event music (the queue holds one bit): the death music cuts both squares' effects;
+;; the area music is kept to be resumed; the time-running-out music uses the faster
+;; length table.
+Function.w MusicLoadEvent{}
+  SHARED soundState()
+  loadValue.w = soundState(#SS_LOAD_VALUE)
+  soundState(#SS_EVENT_MUSIC_BUFFER) = loadValue
+  If loadValue = #MUSIC_DEATH
+    StopSquare1Sfx{}
+    StopSquare2Sfx{}
+  EndIf
+  soundState(#SS_AREA_MUSIC_BUFFER_ALT) = soundState(#SS_AREA_MUSIC_BUFFER)
+  soundState(#SS_LENGTH_TABLE_ADDER) = 0
+  soundState(#SS_AREA_MUSIC_BUFFER) = 0
+  If loadValue = #MUSIC_TIME_RUNNING_OUT Then soundState(#SS_LENGTH_TABLE_ADDER) = 8
+  headerIndex.w = 0
+  bitsLeft.w = loadValue
+  carryFlag.w = False
+  While carryFlag = False AND headerIndex < 16
+    headerIndex = headerIndex + 1
+    carryFlag = bitsLeft AND 1
+    bitsLeft = bitsLeft/2
+  Wend
+  Function Return MusicLoadHeader{headerIndex}
+End Function
+
+;; Area music: the underground music cuts square 1's effect; the ground music starts
+;; its header walk at $10. Then the common loop-back code.
+Function.w MusicLoadArea{}
+  SHARED soundState()
+  If soundState(#SS_LOAD_VALUE) = #MUSIC_UNDERGROUND Then StopSquare1Sfx{}
+  soundState(#SS_GROUND_HEADER_OFFSET) = $10
+  Function Return 3
+End Function
+
+;; HandleAreaMusicLoopB: sets the area buffer, then finds the header. The ground music
+;; walks the layout table, one part per call, and wraps from $32 back to $12.
+Function.w MusicAreaLoopBack{}
+  SHARED soundState()
+  loadValue.w = soundState(#SS_LOAD_VALUE)
+  soundState(#SS_EVENT_MUSIC_BUFFER) = 0
+  soundState(#SS_AREA_MUSIC_BUFFER) = loadValue
+  If loadValue = #MUSIC_GROUND
+    soundState(#SS_GROUND_HEADER_OFFSET) = soundState(#SS_GROUND_HEADER_OFFSET) + 1
+    If soundState(#SS_GROUND_HEADER_OFFSET) = $32 Then soundState(#SS_GROUND_HEADER_OFFSET) = $12
+    Function Return MusicLoadHeader{soundState(#SS_GROUND_HEADER_OFFSET)}
+  EndIf
+  headerIndex.w = 8
+  bitsLeft.w = loadValue
+  carryFlag.w = False
+  While carryFlag = False AND headerIndex < 24
+    headerIndex = headerIndex + 1
+    carryFlag = bitsLeft AND 1
+    bitsLeft = bitsLeft/2
+  Wend
+  Function Return MusicLoadHeader{headerIndex}
+End Function
+
+;; The end of the music data: the song loops, or the next one starts, or the music
+;; stops. Returns the next phase: 0 done, 1 load an event song, 3 loop an area song
+;; (SS_LOAD_VALUE set for them).
+Function.w MusicEnd{}
+  SHARED soundState()
+  checkValue.w = soundState(#SS_EVENT_MUSIC_BUFFER)
+  If checkValue = #MUSIC_TIME_RUNNING_OUT
+    checkValue = soundState(#SS_AREA_MUSIC_BUFFER_ALT)
+    If checkValue <> 0
+      soundState(#SS_LOAD_VALUE) = checkValue
+      Function Return 3
+    EndIf
+  EndIf
+  If (checkValue AND #MUSIC_VICTORY) <> 0
+    soundState(#SS_LOAD_VALUE) = checkValue AND #MUSIC_VICTORY
+    Function Return 1
+  EndIf
+  checkValue = soundState(#SS_AREA_MUSIC_BUFFER) AND%01011111
+  If checkValue <> 0
+    soundState(#SS_LOAD_VALUE) = checkValue
+    Function Return 3
+  EndIf
+  soundState(#SS_AREA_MUSIC_BUFFER) = 0
+  soundState(#SS_EVENT_MUSIC_BUFFER) = 0
+  ApuWriteReg{2, 0, 0}
+  ApuWriteReg{0, 0, $90}
+  ApuWriteReg{1, 0, $90}
+  Function Return 0
+End Function
+
+;; A square 2 note (Squ2NoteHandler): if nothing owns the channel, the note's timer and
+;; the starting registers; a rest (a zero low byte) leaves the timer and writes the
+;; cartridge's register quirks (control 4, sweep the note offset).
+Statement MusicSquare2Note{noteOffset.w}
+  SHARED soundState()
+  If soundState(#SS_SQUARE2_BUFFER) = 0
+    If DumpFrequency{1, noteOffset} = True
+      soundState(#SS_SQUARE2_ENVELOPE_CONTROL) = ControlRegsOffset{}
+      DumpSquare2Regs{$82, $7f}
+    Else
+      soundState(#SS_SQUARE2_ENVELOPE_CONTROL) = 0
+      DumpSquare2Regs{4, noteOffset}
+    EndIf
+  EndIf
+  soundState(#SS_SQUARE2_NOTE_LENGTH_COUNTER) = soundState(#SS_SQUARE2_NOTE_LENGTH_BUFFER)
+End Statement
+
+; Square 2's per-frame envelope, unless an effect or the death music owns the channel.
+Statement MusicSquare2Envelope{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE2_BUFFER) <> 0 Then Statement Return
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND%10010001) <> 0 Then Statement Return
+  envelopeIndex.w = soundState(#SS_SQUARE2_ENVELOPE_CONTROL)
+  If envelopeIndex <> 0 Then soundState(#SS_SQUARE2_ENVELOPE_CONTROL) = envelopeIndex - 1
+  ApuWriteReg{1, 0, LoadEnvelopeData{envelopeIndex}}
+  ApuWriteReg{1, 1, $7f}
+End Statement
+
+; A square 1 note (Squ1NoteHandler): lengthValue is the whole data byte.
+Statement MusicSquare1Note{dataValue.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_NOTE_LENGTH_COUNTER) = AlternateLengthHandler{dataValue}
+  If soundState(#SS_SQUARE1_BUFFER) <> 0 Then Statement Return
+  noteOffset.w = dataValue AND%00111110
+  If DumpFrequency{0, noteOffset} = True
+    soundState(#SS_SQUARE1_ENVELOPE_CONTROL) = ControlRegsOffset{}
+    DumpSquare1Regs{$82, $7f}
+  Else
+    soundState(#SS_SQUARE1_ENVELOPE_CONTROL) = 0
+    DumpSquare1Regs{0, noteOffset}
+  EndIf
+End Statement
+
+; Square 1's per-frame envelope and sweep register.
+Statement MusicSquare1Envelope{}
+  SHARED soundState()
+  If soundState(#SS_SQUARE1_BUFFER) <> 0 Then Statement Return
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND%10010001) = 0
+    envelopeIndex.w = soundState(#SS_SQUARE1_ENVELOPE_CONTROL)
+    If envelopeIndex <> 0 Then soundState(#SS_SQUARE1_ENVELOPE_CONTROL) = envelopeIndex - 1
+    ApuWriteReg{0, 0, LoadEnvelopeData{envelopeIndex}}
+  EndIf
+  sweepValue.w = soundState(#SS_ALT_REG_CONTENT_FLAG)
+  If sweepValue = 0 Then sweepValue = $7f
+  ApuWriteReg{0, 1, sweepValue}
+End Statement
+
+;; The triangle's control register value for the note it just started
+;; (TriNoteHandler's tail), or -1 for no write.
+Function.w TriangleControlFor{noteLength.w}
+  SHARED soundState()
+  playsOther.w = False
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND%01101110) <> 0
+    playsOther = True
+  Else
+    If (soundState(#SS_AREA_MUSIC_BUFFER) AND%00001010) <> 0 Then playsOther = True
+  EndIf
+  If playsOther = False Then Function Return -1
+  If noteLength >= $12 Then Function Return $ff
+  If (soundState(#SS_EVENT_MUSIC_BUFFER) AND #MUSIC_END_OF_CASTLE) = 0 Then Function Return $1f
+  Function Return $0f
+End Function
+
+; The noise beat (NoiseBeatHandler): short, strong, long or silent, from bits 5 and 4.
+Statement MusicNoiseBeat{dataValue.w}
+  SHARED soundState()
+  soundState(#SS_NOISE_BEAT_LENGTH_COUNTER) = AlternateLengthHandler{dataValue}
+  beatType.w = dataValue AND%00111110
+  If beatType = 0
+    ApuWriteReg{3, 0, $10}
+    Statement Return
+  EndIf
+  If beatType = $30
+    ApuWriteReg{3, 0, $1c}
+    ApuWriteReg{3, 2, $03}
+    ApuWriteReg{3, 3, $58}
+    Statement Return
+  EndIf
+  If beatType = $20
+    ApuWriteReg{3, 0, $1c}
+    ApuWriteReg{3, 2, $0c}
+    ApuWriteReg{3, 3, $18}
+    Statement Return
+  EndIf
+  If (beatType AND $10) = 0
+    ApuWriteReg{3, 0, $10}
+    Statement Return
+  EndIf
+  ApuWriteReg{3, 0, $1c}
+  ApuWriteReg{3, 2, $03}
+  ApuWriteReg{3, 3, $18}
+End Statement
+
+;; Square 2, square 1, the triangle and the noise, one frame. Returns the next phase: 0
+;; done, 1 or 3 when the music ended and another song starts.
+Function.w MusicRunChannels{}
+  SHARED soundState()
+
+  ; Square 2 (also the null terminator for the whole song).
+  soundState(#SS_SQUARE2_NOTE_LENGTH_COUNTER) = (soundState(#SS_SQUARE2_NOTE_LENGTH_COUNTER) - 1) AND 255
+  If soundState(#SS_SQUARE2_NOTE_LENGTH_COUNTER) = 0
+    fetchOffset.w = soundState(#SS_MUSIC_OFFSET_SQUARE2)
+    soundState(#SS_MUSIC_OFFSET_SQUARE2) = (fetchOffset + 1) AND 255
+    dataValue.w = MusicByte{fetchOffset}
+    If dataValue = 0 Then Function Return MusicEnd{}
+    If dataValue >= 128
+      soundState(#SS_SQUARE2_NOTE_LENGTH_BUFFER) = ProcessLengthData{dataValue}
+      fetchOffset = soundState(#SS_MUSIC_OFFSET_SQUARE2)
+      soundState(#SS_MUSIC_OFFSET_SQUARE2) = (fetchOffset + 1) AND 255
+      dataValue = MusicByte{fetchOffset}
+    EndIf
+    MusicSquare2Note{dataValue}
+  EndIf
+  MusicSquare2Envelope{}
+
+  ; Square 1 (a zero offset means this song has no square 1).
+  If soundState(#SS_MUSIC_OFFSET_SQUARE1) <> 0
+    soundState(#SS_SQUARE1_NOTE_LENGTH_COUNTER) = (soundState(#SS_SQUARE1_NOTE_LENGTH_COUNTER) - 1) AND 255
+    If soundState(#SS_SQUARE1_NOTE_LENGTH_COUNTER) = 0
+      fetchedFlag.w = False
+      While fetchedFlag = False
+        fetchOffset.w = soundState(#SS_MUSIC_OFFSET_SQUARE1)
+        soundState(#SS_MUSIC_OFFSET_SQUARE1) = (fetchOffset + 1) AND 255
+        dataValue.w = MusicByte{fetchOffset}
+        If dataValue <> 0
+          fetchedFlag = True
+        Else
+          ; Death music's flag byte: other control register data for square 1.
+          ApuWriteReg{0, 0, $83}
+          ApuWriteReg{0, 1, $94}
+          soundState(#SS_ALT_REG_CONTENT_FLAG) = $94
+        EndIf
+      Wend
+      MusicSquare1Note{dataValue}
+    EndIf
+    MusicSquare1Envelope{}
+  EndIf
+
+  ; The triangle.
+  soundState(#SS_TRIANGLE_NOTE_LENGTH_COUNTER) = (soundState(#SS_TRIANGLE_NOTE_LENGTH_COUNTER) - 1) AND 255
+  If soundState(#SS_TRIANGLE_NOTE_LENGTH_COUNTER) = 0
+    fetchOffset.w = soundState(#SS_MUSIC_OFFSET_TRIANGLE)
+    soundState(#SS_MUSIC_OFFSET_TRIANGLE) = (fetchOffset + 1) AND 255
+    dataValue.w = MusicByte{fetchOffset}
+    controlWrite.w = -1
+    noteValue.w = -1
+    If dataValue = 0
+      controlWrite = 0
+    Else
+      If dataValue < 128
+        noteValue = dataValue
+      Else
+        soundState(#SS_TRIANGLE_NOTE_LENGTH_BUFFER) = ProcessLengthData{dataValue}
+        ApuWriteReg{2, 0, $1f}
+        fetchOffset = soundState(#SS_MUSIC_OFFSET_TRIANGLE)
+        soundState(#SS_MUSIC_OFFSET_TRIANGLE) = (fetchOffset + 1) AND 255
+        dataValue = MusicByte{fetchOffset}
+        If dataValue = 0 Then controlWrite = 0 Else noteValue = dataValue
+      EndIf
+    EndIf
+    If noteValue >= 0
+      DumpFrequency{2, noteValue}
+      soundState(#SS_TRIANGLE_NOTE_LENGTH_COUNTER) = soundState(#SS_TRIANGLE_NOTE_LENGTH_BUFFER)
+      controlWrite = TriangleControlFor{soundState(#SS_TRIANGLE_NOTE_LENGTH_BUFFER)}
+    EndIf
+    If controlWrite >= 0 Then ApuWriteReg{2, 0, controlWrite}
+  EndIf
+
+  ; The noise beat, not in the underground or castle music.
+  If (soundState(#SS_AREA_MUSIC_BUFFER) AND%11110011) <> 0
+    soundState(#SS_NOISE_BEAT_LENGTH_COUNTER) = (soundState(#SS_NOISE_BEAT_LENGTH_COUNTER) - 1) AND 255
+    If soundState(#SS_NOISE_BEAT_LENGTH_COUNTER) = 0
+      fetchedFlag.w = False
+      While fetchedFlag = False
+        fetchOffset.w = soundState(#SS_MUSIC_OFFSET_NOISE)
+        soundState(#SS_MUSIC_OFFSET_NOISE) = (fetchOffset + 1) AND 255
+        dataValue.w = MusicByte{fetchOffset}
+        If dataValue <> 0
+          fetchedFlag = True
+        Else
+          soundState(#SS_MUSIC_OFFSET_NOISE) = soundState(#SS_NOISE_LOOPBACK_OFFSET)
+        EndIf
+      Wend
+      MusicNoiseBeat{dataValue}
+    EndIf
+  EndIf
+  Function Return 0
+End Function
+
+;; The music handler: a new song from a queue, or the running song one more frame. The
+;; phases are the cartridge's jumps: 1 load an event song, 2 load an area song, 3 area
+;; song loop-back, 4 run the channels.
+Statement MusicHandler{}
+  SHARED soundState()
+  phaseNow.w = 0
+  If soundState(#SS_EVENT_MUSIC_QUEUE) <> 0
+    soundState(#SS_LOAD_VALUE) = soundState(#SS_EVENT_MUSIC_QUEUE)
+    phaseNow = 1
+  Else
+    If soundState(#SS_AREA_MUSIC_QUEUE) <> 0
+      soundState(#SS_LOAD_VALUE) = soundState(#SS_AREA_MUSIC_QUEUE)
+      phaseNow = 2
+    Else
+      If (soundState(#SS_EVENT_MUSIC_BUFFER) OR soundState(#SS_AREA_MUSIC_BUFFER)) <> 0 Then phaseNow = 4
+    EndIf
+  EndIf
+  While phaseNow <> 0
+    currentPhase.w = phaseNow
+    If currentPhase = 1 Then phaseNow = MusicLoadEvent{}
+    If currentPhase = 2 Then phaseNow = MusicLoadArea{}
+    If currentPhase = 3 Then phaseNow = MusicAreaLoopBack{}
+    If currentPhase = 4 Then phaseNow = MusicRunChannels{}
+  Wend
+End Statement
+
+;; --------------------------------------------------------------------------
+;; The engine and the tick
+;; --------------------------------------------------------------------------
+
+;; The area's own music (GetAreaMusic, smbdis 2793): the pipe intro's in a pipe intro (the header's entrance control 6 or 7), the
+;; cloud music under the cloud type override, else by the area's type (MusicSelectData: water, ground, underground; the castle's is
+;; not wired). The ROM asks for it when a level appears and when the star's music ends.
+Statement QueueAreaMusic{}
+  SHARED soundState(), currentAreaType, currentAreaCloud, areaIntroWalk
+  If areaIntroWalk <> False
+    soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_PIPE_INTRO
+    Statement Return
+  EndIf
+  ; The cloud type override has the cloud music (GetAreaMusic, smbdis 2806).
+  If currentAreaCloud <> 0
+    soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_CLOUD
+    Statement Return
+  EndIf
+  soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_GROUND
+  If currentAreaType = #AREA_TYPE_UNDERGROUND Then soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_UNDERGROUND
+  If currentAreaType = #AREA_TYPE_WATER Then soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_WATER
+  If currentAreaType = #AREA_TYPE_CASTLE Then soundState(#SS_AREA_MUSIC_QUEUE) = #MUSIC_CASTLE
+End Statement
+
+;; Every channel's volume to 0, at once. A cover goes up before a reload that stalls the
+;; main loop for several frames; with no tick to move it on, Paula would hold the note
+;; it was playing. The music's own notes set the volume again on the next tick.
+Statement SoundMute{}
+  SHARED soundHardwareOn, soundPaulaVolume()
+  If soundHardwareOn = False Then Statement Return
+  For paulaChannel.w = 0 To 3
+    Poke.w #PAULA_BASE + paulaChannel*16 + 8, 0
+    soundPaulaVolume(paulaChannel) = 0
+  Next
+End Statement
+
+;; The game's requests: set a queue (the cartridge overwrites the queue; the engine
+;; clears them all after each frame).
+Statement SoundSquare1{effectBit.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE1_QUEUE) = effectBit
+End Statement
+
+Statement SoundSquare2{effectBit.w}
+  SHARED soundState()
+  soundState(#SS_SQUARE2_QUEUE) = effectBit
+End Statement
+
+Statement SoundNoise{effectBit.w}
+  SHARED soundState()
+  soundState(#SS_NOISE_QUEUE) = effectBit
+End Statement
+
+Statement SoundAreaMusic{musicBit.w}
+  SHARED soundState()
+  soundState(#SS_AREA_MUSIC_QUEUE) = musicBit
+End Statement
+
+Statement SoundEventMusic{musicBit.w}
+  SHARED soundState()
+  soundState(#SS_EVENT_MUSIC_QUEUE) = musicBit
+End Statement
+
+;; The pause (smbdis 15050 to 15099). While the game is paused the sound engine is in
+;; pause mode: a two-note tone, 42 frames long, on square 1 at the start of a pause and
+;; again at its end, silence in between, and no effects or music run (their state is
+;; kept, so the music goes on where it stopped). SoundPause{} asks for the tone: 1 as the
+;; game pauses, 2 as it resumes. The tone counts on square 1's effect length, as the
+;; cartridge's does.
+Statement PauseSoundStep{}
+  SHARED soundState()
+  If soundState(#SS_PAUSE_BUFFER) = 0
+    If soundState(#SS_PAUSE_QUEUE) = 0 Then Statement Return
+    soundState(#SS_PAUSE_BUFFER) = soundState(#SS_PAUSE_QUEUE)
+    soundState(#SS_PAUSE_MODE) = soundState(#SS_PAUSE_QUEUE)
+    ApuMaster{0}
+    soundState(#SS_SQUARE1_BUFFER) = 0
+    soundState(#SS_SQUARE2_BUFFER) = 0
+    soundState(#SS_NOISE_BUFFER) = 0
+    ApuMaster{$0f}
+    soundState(#SS_SQUARE1_SFX_LENGTH) = $2a
+    PlaySquare1Sfx{$44, $84, $7f}
+  Else
+    toneLength.w = soundState(#SS_SQUARE1_SFX_LENGTH)
+    If toneLength = $24 OR toneLength = $18 Then PlaySquare1Sfx{$64, $84, $7f}
+    If toneLength = $1e Then PlaySquare1Sfx{$44, $84, $7f}
+  EndIf
+  soundState(#SS_SQUARE1_SFX_LENGTH) = (soundState(#SS_SQUARE1_SFX_LENGTH) - 1) AND 255
+  If soundState(#SS_SQUARE1_SFX_LENGTH) = 0
+    ApuMaster{0}
+    If soundState(#SS_PAUSE_BUFFER) = 2 Then soundState(#SS_PAUSE_MODE) = 0
+    soundState(#SS_PAUSE_BUFFER) = 0
+  EndIf
+End Statement
+
+Statement SoundPause{pauseKind.w}
+  SHARED soundState()
+  soundState(#SS_PAUSE_QUEUE) = pauseKind
+End Statement
+
+;; Ends a part of the sound tick for the frame time report: the lines since the last mark are
+;; added to soundPart (#SOUND_PART_*), or not counted for -1, the tick's start. Only when
+;; soundTimingOn (sparkydave.sound.ab3). The beam is read by RasterLine{} and SegmentLines{}
+;; (sparkydave.beam.blitz.ab3, which the standalone sound program includes too); soundFrameLines is set at
+;; start from the machine's standard, since the sound files cannot read videoIsNtsc.
+Statement SoundTimeMark{soundPart.w}
+  SHARED soundTimingOn, soundFrameLines, soundMarkLine, soundPartLines()
+  If soundTimingOn = False Then Statement Return
+  lineNow.l = RasterLine{}
+  If soundPart >= 0
+    soundPartLines(soundPart) = soundPartLines(soundPart) + SegmentLines{soundMarkLine, lineNow, soundFrameLines}
+  EndIf
+  soundMarkLine = lineNow
+End Statement
+
+;; SoundEngine (smbdis 15045): in pause mode the tone and nothing else, otherwise the
+;; effects, then the music, and the queues are cleared. The title screen is silent.
+Statement SoundEngine{}
+  SHARED soundState()
+  If soundState(#SS_ENABLED) = False
+    ApuMaster{0}
+    soundState(#SS_AREA_MUSIC_QUEUE) = 0
+    soundState(#SS_EVENT_MUSIC_QUEUE) = 0
+  Else
+    ApuMaster{$0f}
+    If soundState(#SS_PAUSE_MODE) <> 0 OR soundState(#SS_PAUSE_QUEUE) = 1
+      ; The music queues are kept through a pause, as the cartridge keeps them.
+      PauseSoundStep{}
+    Else
+      Square1SfxHandler{}
+      Square2SfxHandler{}
+      NoiseSfxHandler{}
+      SoundTimeMark{#SOUND_PART_SFX}
+      MusicHandler{}
+      SoundTimeMark{#SOUND_PART_MUSIC}
+      soundState(#SS_AREA_MUSIC_QUEUE) = 0
+      soundState(#SS_EVENT_MUSIC_QUEUE) = 0
+    EndIf
+  EndIf
+  soundState(#SS_SQUARE1_QUEUE) = 0
+  soundState(#SS_SQUARE2_QUEUE) = 0
+  soundState(#SS_NOISE_QUEUE) = 0
+  soundState(#SS_PAUSE_QUEUE) = 0
+End Statement
+
+;; Once per sim tick: the clock the cartridge's $4017 write gives at the start of a frame,
+;; the engine, the rest of the frame's clocks and each channel's loudness, then Paula.
+;; The marks give the frame time report the clocks (both, and the engine's own bookkeeping), the
+;; effects, the music and Paula (SoundTimeMark{}).
+Statement SoundTick{}
+  SoundTimeMark{-1}
+  ApuClockEarly{}
+  SoundTimeMark{#SOUND_PART_CLOCKS}
+  SoundEngine{}
+  ApuClockLate{}
+  SoundTimeMark{#SOUND_PART_CLOCKS}
+  UpdatePaula{}
+  SoundTimeMark{#SOUND_PART_PAULA}
+End Statement
+
+;; One sound tick, from RunSoundTicks{} (timing.ab3: #SOUND_HZ = 60 a second whatever the display and
+;; the sim's rate are, once or twice a frame), whatever the game is doing (the music plays
+;; through the covers, as the cartridge's does): the engine runs unless the title is
+;; up, which is silent.
+Statement SoundFrame{}
+  SHARED soundState(), coverKind, soundJukeboxOn
+  If #SOUND_ON = 0 Then Statement Return
+  soundState(#SS_ENABLED) = True
+  If coverKind = #COVER_TITLE AND soundJukeboxOn = False Then soundState(#SS_ENABLED) = False
+  SoundTick{}
+End Statement
+
+;; Clears the engine and the APU (a new game, a test). Sound stays enabled or not as the
+;; caller sets #SS_ENABLED.
+Statement SoundReset{}
+  SHARED soundState(), apuState(), soundJukeboxOn
+  ; A reset (F1, a new game) while the jukebox page is up ends it: nothing is put back.
+  soundJukeboxOn = False
+  For stateIndex.w = 0 To #SS_COUNT
+    soundState(stateIndex) = 0
+  Next
+  For stateIndex.w = 0 To 63
+    apuState(stateIndex) = 0
+  Next
+End Statement
+
+;; The jukebox page opens: the engine's state is kept, the engine started clean and
+;; enabled (a song or effect asked for now plays from the first tick, on the title too, and out of a
+;; pause), and the channels silenced. A second call while it is up does nothing.
+Statement SoundJukeboxBegin{}
+  SHARED soundState(), apuState(), soundSavedState(), soundSavedApu(), soundJukeboxOn
+  If soundJukeboxOn <> False Then Statement Return
+  For stateIndex.w = 0 To #SS_COUNT
+    soundSavedState(stateIndex) = soundState(stateIndex)
+  Next
+  For stateIndex.w = 0 To 63
+    soundSavedApu(stateIndex) = apuState(stateIndex)
+  Next
+  SoundReset{}
+  soundState(#SS_ENABLED) = True
+  soundJukeboxOn = True
+  SoundMute{}
+End Statement
+
+;; The page closes: the state kept at SoundJukeboxBegin{} comes back exactly (a pause that was on is still
+;; on, a song is where it was) and the channels are silenced until the next tick sets them.
+Statement SoundJukeboxEnd{}
+  SHARED soundState(), apuState(), soundSavedState(), soundSavedApu(), soundJukeboxOn
+  If soundJukeboxOn = False Then Statement Return
+  For stateIndex.w = 0 To #SS_COUNT
+    soundState(stateIndex) = soundSavedState(stateIndex)
+  Next
+  For stateIndex.w = 0 To 63
+    apuState(stateIndex) = soundSavedApu(stateIndex)
+  Next
+  soundJukeboxOn = False
+  SoundMute{}
+End Statement
+
+;; END OF SOUND (BLITZ MODE)

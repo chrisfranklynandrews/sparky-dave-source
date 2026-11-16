@@ -1,0 +1,26 @@
+;; =======================================================
+;; THE RASTER BEAM (BLITZ MODE)
+;; =======================================================
+;; The beam's line and the lines between two readings, for everything that times itself by the
+;; beam: the frame time report (sparkydave.timing-marks.blitz.ab3, .frametime.blitz.ab3), the
+;; sound's split of it (SoundTimeMark{}, sparkydave.sound.blitz.ab3) and the palette's wait. In a
+;; file of its own, included before the sound, so the standalone sound program (proofs/sound-engine.ab3), which
+;; compiles the sound files and little else, can include it too: one copy of the beam read.
+
+;; The raster beam's line: the custom chip VPOSR and VHPOSR read together, bit 16 is V8, bits 8
+;; to 15 are V0 to V7. Masked before dividing, because bit 31 is a flag and the long is negative.
+;; The frame time report's marks (here and sparkydave.frametime.blitz.ab3) and the palette's
+;; wait use it.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return(rawPosition AND $1ff00)/256
+End Function
+
+; Lines from one mark to the next, corrected for one beam wrap.
+Function.l SegmentLines{fromLine.l, toLine.l, frameLines.l}
+  segment.l = toLine - fromLine
+  If segment < 0 Then segment = segment + frameLines
+  Function Return segment
+End Function
+
+;; END OF THE RASTER BEAM (BLITZ MODE)

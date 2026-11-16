@@ -1,0 +1,299 @@
+;; area-pack.ab3 -- proof for reading packed area files (tools/area_bin.py, SDAREA02) before the game's loader takes them.
+;; Compile in UAE (execute sparky-dave:S/run-proof). Not part of the game.
+;;
+;; A level change on a floppy is slow (the A500 Mini, 2026-11-14): 1-2 reads four area files, 59 KB, and they are mostly sky
+;; and rows of one tile. Packed as runs (a repeat count, the word repeated, a literal count, the literal words; each section,
+;; the gids, the classes and the objects, packed on its own) the four are 6.3 KB. This answers:
+;;   1. Does UnpackAreaWords{} (the loop the game will use, Poke.w through &array, as proofs/area-load.ab3 proved) give back
+;;      exactly the words of the plain file? Every word of the gids, the classes and the objects is compared with the plain
+;;      file's, read as the game reads it now, and the checksum with the header's.
+;;   2. Does it end exactly at the end of the packed body, and refuse a body that is cut short?
+;;   3. What does it cost: the read of each kind, and the unpack itself (20 unpacks of 1-2 from memory)?
+;;
+;; The files: python tools/area_bin.py --proof-files writes game/proofs/area-pack-data/<id>.bin (packed) and <id>.plain.bin.
+;; It runs in Amiga mode, with no display of its own. A host folder under UAE is not a floppy: the read figures here are the
+;; code path's; the floppy's own cost is in the bytes (the results print both sizes).
+;; Results: game/proofs/results/area-pack-results.txt.
+
+WBStartup
+
+#AREA_COUNT        = 4
+#STRIDE            = 240
+#ROWS              = 15
+#MAP_WORDS         = 3600
+#OBJECT_WORDS      = 6
+#MAX_OBJECTS       = 128
+#MAX_OBJECT_WORDS  = 768
+#HEADER_BYTES      = 32
+#PACK_EXTRA_WORDS  = 9
+#PACKED_MAX_WORDS  = 7977
+#REPEAT_UNPACKS    = 20
+
+Dim plainGids.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim plainClasses.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim plainObjects.w(#AREA_COUNT*#MAX_OBJECT_WORDS - 1)
+Dim packGids.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim packClasses.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim packObjects.w(#AREA_COUNT*#MAX_OBJECT_WORDS - 1)
+; The packed body as read, before it is unpacked: the plain body's most (two maps and the most objects) and the packing's extra.
+Dim packedWords.w(#PACKED_MAX_WORDS - 1)
+Dim headerWords.w(15)
+Dim scratchWords.w(#MAP_WORDS - 1)
+
+Dim areaName$(#AREA_COUNT - 1)
+Dim plainStatus.w(#AREA_COUNT - 1)
+Dim packStatus.w(#AREA_COUNT - 1)
+Dim plainFrames.l(#AREA_COUNT - 1)
+Dim packReadFrames.l(#AREA_COUNT - 1)
+Dim unpackFrames.l(#AREA_COUNT - 1)
+Dim plainBytes.l(#AREA_COUNT - 1)
+Dim packBytes.l(#AREA_COUNT - 1)
+Dim areaObjectCount.w(#AREA_COUNT - 1)
+Dim checksumFile.l(#AREA_COUNT - 1)
+Dim checkLog$(80)
+checkCount.w = 0
+checkFailed.w = 0
+repeatFrames.l = 0
+repeatEnd.l = 0
+packedWordCount.l = 0
+
+areaName$(0) = "world1-2-pipe-intro"
+areaName$(1) = "world1-2"
+areaName$(2) = "bonus-room-2"
+areaName$(3) = "world1-1"
+
+; Record one named self-check for the results file.
+Statement Check{label$, conditionNow.w}
+  SHARED checkCount, checkFailed, checkLog$()
+  checkCount = checkCount + 1
+  If conditionNow <> False
+    checkLog$(checkCount) = "PASS  " + label$
+  Else
+    checkLog$(checkCount) = "FAIL  " + label$
+    checkFailed = checkFailed + 1
+  EndIf
+End Statement
+
+; CIA-A's time of day, in frames. The high byte is read first, which latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+; The header's long at word index wordIndex (high word first, as the file has it).
+Function.l HeaderLong{wordIndex.w}
+  SHARED headerWords()
+  Function Return (headerWords(wordIndex) AND $ffff)*65536 + (headerWords(wordIndex + 1) AND $ffff)
+End Function
+
+;; One section of a packed area, from packedWords() at readIndex into wordCount words at targetAddress: runs of a repeat
+;; count, the word repeated, a literal count and the literal words, until wordCount words are written. Returns the index after
+;; the section, or -1 when a run does not fit (it reads past readEnd, or writes more than wordCount words).
+Function.l UnpackAreaWords{readIndex.l, readEnd.l, targetAddress.l, wordCount.l}
+  SHARED packedWords()
+  writtenWords.l = 0
+  While writtenWords < wordCount
+    If readIndex + 3 > readEnd Then Function Return -1
+    repeatCount.l = packedWords(readIndex) AND $ffff
+    repeatedWord.w = packedWords(readIndex + 1)
+    literalCount.l = packedWords(readIndex + 2) AND $ffff
+    readIndex = readIndex + 3
+    If writtenWords + repeatCount + literalCount > wordCount Then Function Return -1
+    If readIndex + literalCount > readEnd Then Function Return -1
+    runEnd.l = targetAddress + repeatCount*2
+    While targetAddress < runEnd
+      Poke.w targetAddress, repeatedWord
+      targetAddress = targetAddress + 2
+    Wend
+    literalEnd.l = readIndex + literalCount
+    While readIndex < literalEnd
+      Poke.w targetAddress, packedWords(readIndex)
+      targetAddress = targetAddress + 2
+      readIndex = readIndex + 1
+    Wend
+    writtenWords = writtenWords + repeatCount + literalCount
+  Wend
+  Function Return readIndex
+End Function
+
+;; The three sections of the packed body now in packedWords() (packedWordCount words) into area areaIndex's arrays. 0 if good,
+;; -5 if a section does not unpack, -6 if words are left over after the last.
+Function.w UnpackArea{areaIndex.w, objectWords.l}
+  SHARED packGids(), packClasses(), packObjects(), packedWordCount
+  gidBase.l = areaIndex*#MAP_WORDS
+  readIndex.l = UnpackAreaWords{0, packedWordCount, &packGids(gidBase), #MAP_WORDS}
+  If readIndex < 0 Then Function Return -5
+  readIndex = UnpackAreaWords{readIndex, packedWordCount, &packClasses(gidBase), #MAP_WORDS}
+  If readIndex < 0 Then Function Return -5
+  ; A section of no words packs to nothing (pack_words([]) is []), and UnpackAreaWords{} then reads nothing.
+  readIndex = UnpackAreaWords{readIndex, packedWordCount, &packObjects(areaIndex*#MAX_OBJECT_WORDS), objectWords}
+  If readIndex < 0 Then Function Return -5
+  If readIndex <> packedWordCount Then Function Return -6
+  Function Return 0
+End Function
+
+;; The header just read: 0 if it is an area file of this layout with the magic's last word magicEnd ($3031 plain, $3032
+;; packed), else -3 (not an area file) or -4 (a layout that does not fit).
+Function.w CheckHeader{magicEnd.w}
+  SHARED headerWords()
+  If headerWords(0) <> $5344 OR headerWords(1) <> $4152 OR headerWords(2) <> $4541 OR headerWords(3) <> magicEnd Then Function Return -3
+  If headerWords(5) <> #ROWS OR headerWords(6) <> #STRIDE Then Function Return -4
+  If HeaderLong{8} <> #MAP_WORDS OR HeaderLong{10} <> #MAP_WORDS Then Function Return -4
+  If HeaderLong{12} <> headerWords(7)*#OBJECT_WORDS OR headerWords(7) > #MAX_OBJECTS Then Function Return -4
+  Function Return 0
+End Function
+
+; The plain file, as the game reads it now: ReadMem straight into the arrays.
+Function.w ReadPlain{areaIndex.w, path$}
+  SHARED headerWords(), plainGids(), plainClasses(), plainObjects(), plainBytes()
+  fileLength.l = Exists(path$)
+  If fileLength = 0 Then Function Return -1
+  If ReadFile(0, path$) = 0 Then Function Return -2
+  ReadMem 0, &headerWords(0), #HEADER_BYTES
+  headerStatus.w = CheckHeader{$3031}
+  If headerStatus <> 0
+    CloseFile 0
+    Function Return headerStatus
+  EndIf
+  plainBytes(areaIndex) = fileLength
+  gidBase.l = areaIndex*#MAP_WORDS
+  ReadMem 0, &plainGids(gidBase), #MAP_WORDS*2
+  ReadMem 0, &plainClasses(gidBase), #MAP_WORDS*2
+  objectWords.l = HeaderLong{12}
+  If objectWords > 0 Then ReadMem 0, &plainObjects(areaIndex*#MAX_OBJECT_WORDS), objectWords*2
+  CloseFile 0
+  Function Return 0
+End Function
+
+; The packed file: its header, then the whole body into packedWords() in one ReadMem (not yet unpacked).
+Function.w ReadPacked{areaIndex.w, path$}
+  SHARED headerWords(), packedWords(), packedWordCount, packBytes(), areaObjectCount(), checksumFile()
+  fileLength.l = Exists(path$)
+  If fileLength = 0 Then Function Return -1
+  bodyBytes.l = fileLength - #HEADER_BYTES
+  If bodyBytes < 0 OR bodyBytes > #PACKED_MAX_WORDS*2 OR (bodyBytes AND 1) <> 0 Then Function Return -4
+  If ReadFile(0, path$) = 0 Then Function Return -2
+  ReadMem 0, &headerWords(0), #HEADER_BYTES
+  headerStatus.w = CheckHeader{$3032}
+  If headerStatus <> 0
+    CloseFile 0
+    Function Return headerStatus
+  EndIf
+  ReadMem 0, &packedWords(0), bodyBytes
+  CloseFile 0
+  packedWordCount = bodyBytes/2
+  packBytes(areaIndex) = fileLength
+  areaObjectCount(areaIndex) = headerWords(7)
+  checksumFile(areaIndex) = HeaderLong{14}
+  Function Return 0
+End Function
+
+;; The checksum tools/area_bin.py computes: acc = (acc*31 + word) mod 2^24 over the gids, then the classes, then the
+;; objects, here of the unpacked arrays.
+Function.l ChecksumPacked{areaIndex.w}
+  SHARED packGids(), packClasses(), packObjects(), areaObjectCount()
+  accumulator.l = 0
+  gidBase.l = areaIndex*#MAP_WORDS
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    accumulator = (accumulator*31 + (packGids(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    accumulator = (accumulator*31 + (packClasses(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  objectBase.l = areaIndex*#MAX_OBJECT_WORDS
+  For objectWordIndex.l = 0 To areaObjectCount(areaIndex)*#OBJECT_WORDS - 1
+    accumulator = (accumulator*31 + (packObjects(objectBase + objectWordIndex) AND $ffff)) AND $ffffff
+  Next
+  Function Return accumulator
+End Function
+
+; How many words of area areaIndex differ between the plain read and the unpacked one.
+Function.l CountDifferences{areaIndex.w}
+  SHARED plainGids(), plainClasses(), plainObjects(), packGids(), packClasses(), packObjects(), areaObjectCount()
+  differences.l = 0
+  gidBase.l = areaIndex*#MAP_WORDS
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    If plainGids(gidBase + cellIndex) <> packGids(gidBase + cellIndex) Then differences = differences + 1
+    If plainClasses(gidBase + cellIndex) <> packClasses(gidBase + cellIndex) Then differences = differences + 1
+  Next
+  objectBase.l = areaIndex*#MAX_OBJECT_WORDS
+  For objectWordIndex.l = 0 To areaObjectCount(areaIndex)*#OBJECT_WORDS - 1
+    If plainObjects(objectBase + objectWordIndex) <> packObjects(objectBase + objectWordIndex) Then differences = differences + 1
+  Next
+  Function Return differences
+End Function
+
+;; ---- every area, both ways ----
+;; The unpacked arrays start full of a value no file has, so a word the unpack missed shows as a difference.
+For cellIndex.l = 0 To #AREA_COUNT*#MAP_WORDS - 1
+  packGids(cellIndex) = -12345
+  packClasses(cellIndex) = -12345
+Next
+For objectWordIndex.l = 0 To #AREA_COUNT*#MAX_OBJECT_WORDS - 1
+  packObjects(objectWordIndex) = -12345
+Next
+
+For areaIndex.w = 0 To #AREA_COUNT - 1
+  dataPath$ = "sparky-dave:game/proofs/area-pack-data/" + areaName$(areaIndex)
+  startTime.l = ReadTimeOfDay{}
+  plainStatus(areaIndex) = ReadPlain{areaIndex, dataPath$ + ".plain.bin"}
+  plainFrames(areaIndex) = ReadTimeOfDay{} - startTime
+  startTime = ReadTimeOfDay{}
+  packStatus(areaIndex) = ReadPacked{areaIndex, dataPath$ + ".bin"}
+  packReadFrames(areaIndex) = ReadTimeOfDay{} - startTime
+  If packStatus(areaIndex) = 0
+    startTime = ReadTimeOfDay{}
+    packStatus(areaIndex) = UnpackArea{areaIndex, areaObjectCount(areaIndex)*#OBJECT_WORDS}
+    unpackFrames(areaIndex) = ReadTimeOfDay{} - startTime
+  EndIf
+  Check{areaName$(areaIndex) + ": the plain file read (status " + Str$(plainStatus(areaIndex)) + ")", plainStatus(areaIndex) = 0}
+  Check{areaName$(areaIndex) + ": the packed file read and unpacked to its end exactly (status " + Str$(packStatus(areaIndex)) + ")", packStatus(areaIndex) = 0}
+  If packStatus(areaIndex) = 0 AND plainStatus(areaIndex) = 0
+    checksumNow.l = ChecksumPacked{areaIndex}
+    Check{areaName$(areaIndex) + ": the unpacked checksum $" + Hex$(checksumNow) + " is the file's $" + Hex$(checksumFile(areaIndex)), checksumNow = checksumFile(areaIndex)}
+    differences.l = CountDifferences{areaIndex}
+    Check{areaName$(areaIndex) + ": every word is the plain file's (" + Str$(differences) + " differ)", differences = 0}
+  EndIf
+Next
+
+;; ---- the cost of the unpack alone: 1-2 (the biggest) from memory, many times ----
+repeatStatus.w = ReadPacked{1, "sparky-dave:game/proofs/area-pack-data/world1-2.bin"}
+startTime = ReadTimeOfDay{}
+For repeatIndex.w = 1 To #REPEAT_UNPACKS
+  repeatStatus = UnpackArea{1, areaObjectCount(1)*#OBJECT_WORDS}
+Next
+repeatFrames = ReadTimeOfDay{} - startTime
+Check{"the repeated unpacks of world1-2 all succeeded (status " + Str$(repeatStatus) + ")", repeatStatus = 0}
+
+;; ---- a body cut short is refused, not read past ----
+cutEnd.l = UnpackAreaWords{0, 10, &scratchWords(0), #MAP_WORDS}
+Check{"a body cut to 10 words is refused (-1, got " + Str$(cutEnd) + ")", cutEnd = -1}
+cutEnd = UnpackAreaWords{0, packedWordCount, &scratchWords(0), 5}
+Check{"a section asked for fewer words than its first run gives is refused (-1, got " + Str$(cutEnd) + ")", cutEnd = -1}
+
+If WriteFile(0, "sparky-dave:game/proofs/results/area-pack-results.txt")
+  FileOutput 0
+  NPrint "area-pack"
+  NPrint ""
+  NPrint "SELF-CHECKS (", checkCount, ", failed ", checkFailed, ")"
+  For index.w = 1 To checkCount
+    NPrint checkLog$(index)
+  Next
+  NPrint ""
+  NPrint "SIZES AND COST, in frames (CIA-A time of day: 1 frame is 20 ms on PAL, 16.7 ms on NTSC; 0 means under a frame)"
+  totalPlain.l = 0
+  totalPacked.l = 0
+  For areaIndex.w = 0 To #AREA_COUNT - 1
+    NPrint "  ", areaName$(areaIndex), ": plain ", plainBytes(areaIndex), " bytes read in ", plainFrames(areaIndex), "; packed ", packBytes(areaIndex), " bytes read in ", packReadFrames(areaIndex), ", unpacked in ", unpackFrames(areaIndex)
+    totalPlain = totalPlain + plainBytes(areaIndex)
+    totalPacked = totalPacked + packBytes(areaIndex)
+  Next
+  NPrint "  the level's four: plain ", totalPlain, " bytes, packed ", totalPacked
+  NPrint "  ", #REPEAT_UNPACKS, " unpacks of world1-2 from memory: ", repeatFrames, " frames, about ", repeatFrames*20/#REPEAT_UNPACKS, " ms each on PAL"
+  NPrint ""
+  NPrint "A host folder under UAE is not a floppy: there, the time is the bytes (a floppy reads about 10 to 25 KB a second)."
+  CloseFile 0
+EndIf
+End

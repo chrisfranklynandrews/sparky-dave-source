@@ -1,0 +1,146 @@
+;; =======================================================
+;; LIFE CYCLE (BLITZ MODE)
+;; =======================================================
+
+;; Damage, death and lives. The numbers are in constants.ab3; the rules below are the cartridge's.
+;; UpdateDeath{} is in player.blitz (it needs MovePlayerVertical{}); the reload is in restart.blitz.
+;;
+;; The sim never reloads the level itself. It sets lifeEvent and the main loop acts on it, because a reload
+;; re-stamps both bitmaps and refreshes the bob buffers, which only the main loop may do.
+;;
+;; The rules, in short:
+;;   - A Goomba touching Mario while he is not falling onto it hurts him. Big Mario shrinks and is
+;;     invulnerable for #INJURY_INTERVALS intervals; small Mario dies. Contact is tested only in the
+;;     normal player state.
+;;   - Death: held, then a hop and a fall through the floor. A pit is the same fall without the hop.
+;;     Time up is a death.
+;;   - A death costs a life. Below zero lives is game over; otherwise the level restarts from the start,
+;;     or from the halfway point if the camera had passed it.
+
+;; Kind is #DEATH_HOP (killed by an enemy or by time up: freeze, then jump) or
+;; #DEATH_PIT (fell out of the world: no freeze, no jump). Dies small either way.
+Statement StartPlayerDeath{kind.w}
+  SHARED playerState, playerSpeedX, playerSpeedY, playerMoveForceY, playerFractionY
+  SHARED playerOnGround, playerIsBig, playerFrame, deathKind, deathTimer
+  SHARED playerInjuryIntervals, playerFire, playerStarIntervals
+  playerState = #PLAYER_ST_DYING
+  SoundEventMusic{#MUSIC_DEATH}
+  deathKind = kind
+  deathTimer = 0
+  playerIsBig = False
+  playerFire = False
+  playerStarIntervals = 0
+  playerInjuryIntervals = 0
+  playerSpeedX = 0
+  playerOnGround = False
+  If kind = #DEATH_HOP
+    playerSpeedY = #DEATH_SPEED_Y
+    playerMoveForceY = 0
+    playerFractionY = 0
+    playerFrame = #MARIO_F_DEATH
+  EndIf
+End Statement
+
+;; ForceInjury (smbdis 11405): nothing while invulnerable or outside the normal
+;; state; big Mario shrinks through the resize state and is invulnerable for the
+;; interval count; small Mario dies.
+Statement InjurePlayer{}
+  SHARED playerState, playerInjuryIntervals, playerIsBig, debugMode, debugInvincible, allLevelsOpen
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  ; The test invincibility (F7, in debug mode or with the LEVELS argument).
+  If debugInvincible <> False
+    If debugMode <> False OR allLevelsOpen <> False Then Statement Return
+  EndIf
+  If playerInjuryIntervals > 0 Then Statement Return
+  If playerIsBig = True
+    StartResize{False}
+    SoundSquare1{#SFX_PIPE_DOWN_INJURY}
+    playerInjuryIntervals = #INJURY_INTERVALS
+  Else
+    StartPlayerDeath{#DEATH_HOP}
+  EndIf
+End Statement
+
+; A pit: his top has passed the bottom of the world.
+Statement CheckPitDeath{}
+  SHARED playerY, playerState, currentAreaCloud
+  If playerState = #PLAYER_ST_DYING Then Statement Return
+  ; Falling out of a cloud area is the way out of it, not a death (PlayerHole, smbdis 5644).
+  If currentAreaCloud <> 0 Then Statement Return
+  If playerY >= #PIT_DEATH_Y Then StartPlayerDeath{#DEATH_PIT}
+End Statement
+
+;; PlayerLoseLife (smbdis 2906): a life gone, then game over or a restart. Notes
+;; where the restart puts the camera: the halfway point if the camera had reached
+;; it, else the start.
+Statement ResolveLifeLost{}
+  SHARED playerLives, lifeEvent, lifeStartCameraX, cameraX, levelHalfwayX
+  lifeStartCameraX = 0
+  If cameraX >= levelHalfwayX Then lifeStartCameraX = levelHalfwayX
+  ; PlayerLoseLife silences the music (smbdis 2911).
+  SoundEventMusic{#MUSIC_SILENCE}
+  playerLives = playerLives - 1
+  If playerLives < 0
+    lifeEvent = #LIFE_GAMEOVER
+  Else
+    lifeEvent = #LIFE_RESPAWN
+  EndIf
+End Statement
+
+;; Continues (not the cartridge's): how many this game has left, #CONTINUES_INFINITE (-1) for no limit, else the
+;; options page's number less those used, never below 0. Counted from the ones used, so a choice changed mid-game counts at once.
+Function.w ContinuesLeft{}
+  SHARED continuesChoice, continuesUsed, continuesAllowed()
+  allowedNow.w = continuesAllowed(continuesChoice)
+  If allowedNow = #CONTINUES_INFINITE Then Function Return #CONTINUES_INFINITE
+  leftNow.w = allowedNow - continuesUsed
+  If leftNow < 0 Then leftNow = 0
+  Function Return leftNow
+End Function
+
+;; A continue taken at game over: one more used and the lives a new game's. Nothing else: the score, the coins and the restart point
+;; (lifeStartCameraX, from ResolveLifeLost{}) stand as the death left them, so the respawn that follows goes on from the death point.
+Statement ContinueGame{}
+  SHARED continuesUsed, playerLives
+  continuesUsed = continuesUsed + 1
+  playerLives = #LIVES_START
+End Statement
+
+;; The pause (PauseRoutine, smbdis 851), once per sim tick with the state of the PAUSE key.
+;; A fresh press toggles the pause: the sim stops (RunSimTicks{} skips it while gamePaused),
+;; and the sound engine plays its pause tone (SoundPause{}). The cartridge takes it only
+;; while the game is running, not on its screens, and then not again for
+;; #PAUSE_LOCKOUT_TICKS ticks. A PAUSE key held from before, from the title or a cover, is not a
+;; press.
+Statement UpdatePause{startNow.w}
+  SHARED gamePaused, pauseTimer, pauseStartHeld, coverKind, lifeEvent, areaEvent
+  SHARED overlayScreenWanted, redefineActive, pauseMenuResume
+  pressed.w = False
+  If startNow <> False AND pauseStartHeld = False Then pressed = True
+  pauseStartHeld = False
+  If startNow <> False Then pauseStartHeld = True
+  If pauseTimer > 0
+    pauseTimer = pauseTimer - 1
+    Statement Return
+  EndIf
+  If pressed = False Then Statement Return
+  ;; On the pause menu a fresh press resumes, as RESUME does (UpdatePauseMenu{}, the same tick). Not on a page opened from it, nor on
+  ;; the redefine screen, where the key may be one being chosen.
+  If coverKind = #COVER_MENU AND overlayScreenWanted = #SCREEN_PAUSE AND redefineActive = False
+    pauseMenuResume = True
+    Statement Return
+  EndIf
+  If coverKind <> #COVER_NONE Then Statement Return
+  If lifeEvent <> #LIFE_NONE Then Statement Return
+  If areaEvent <> 0 Then Statement Return
+  pauseTimer = #PAUSE_LOCKOUT_TICKS
+  If gamePaused = True
+    gamePaused = False
+    SoundPause{2}
+  Else
+    gamePaused = True
+    SoundPause{1}
+  EndIf
+End Statement
+
+;; END OF LIFE CYCLE (BLITZ MODE)

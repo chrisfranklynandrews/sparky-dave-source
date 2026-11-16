@@ -1,0 +1,134 @@
+;; =======================================================
+;; PLAYER SETUP (AMIGA MODE)
+;; =======================================================
+
+BitMap #MARIO_BM, #MARIO_SHEET_W, #TILE, #PLAYFIELD_PLANES
+
+; Big Mario, for the debug size view. Same sprite slot family, different sheet.
+BitMap #MARIO_BIG_BM, #MARIO_BIG_W, #MARIO_BIG_H, #PLAYFIELD_PLANES
+
+marioIff$ = dataDir$ + "mario-small.iff"
+marioBigIff$ = dataDir$ + "mario-big.iff"
+
+; The All-Stars look's sprite sheets, 4 planes whatever the playfield's (the pens are his colours, 1 to 13): the sprites are cut from them.
+If #MARIO_SPRITE_COLOURS = 15
+  BitMap #SPRITE_SMALL_BM, #SPRITE_SMALL_SHEET_W, #TILE, 4
+  BitMap #SPRITE_BIG_BM, #SPRITE_BIG_SHEET_W, #MARIO_BIG_H, 4
+  BitMap #SPRITE_SWIM_BM, #SPRITE_SWIM_SHEET_W, #MARIO_BIG_H, 4
+EndIf
+marioSpriteIff$ = dataDir$ + "mario-small-all-stars.iff"
+marioSpriteBigIff$ = dataDir$ + "mario-big-all-stars.iff"
+marioSpriteSwimIff$ = dataDir$ + "mario-big-swim-all-stars.iff"
+
+Statement LoadMario{}
+  SHARED marioIff$, marioBigIff$, marioSpriteIff$, marioSpriteBigIff$, marioSpriteSwimIff$
+  LoadBitMap #MARIO_BM, marioIff$
+  LoadBitMap #MARIO_BIG_BM, marioBigIff$
+  If #MARIO_SPRITE_COLOURS = 15
+    LoadBitMap #SPRITE_SMALL_BM, marioSpriteIff$
+    LoadBitMap #SPRITE_BIG_BM, marioSpriteBigIff$
+    LoadBitMap #SPRITE_SWIM_BM, marioSpriteSwimIff$
+  EndIf
+End Statement
+
+;; The flag at the top of the loaded area's pole, not yet sliding. World coordinates, like everything the draw path uses:
+;; the playfield is stamped once at full map width and the display is hardware-scrolled by scrollX, so nothing here is
+;; offset by cameraX. The flag's right edge lands on the shaft line, and it starts just under the ball. An area with no
+;; flagpole parks the flag where nothing shows it (the draw path blits it every frame). InitPlayer{} does this, and so does
+;; an arrival in another area by a pipe, which InitPlayer{} does not run for (1-2's exit comes out in 1-1's area).
+Statement PlaceFlag{}
+  SHARED areaFlagpoleX, areaFlagpoleY, flagState, flagX, flagY
+  flagState = #FLAG_ST_IDLE
+  flagX = (areaFlagpoleX/#TILE)*#TILE + #FLAGPOLE_SHAFT_X - #FLAG_W + 1
+  flagY = areaFlagpoleY + #FLAG_TOP_DY
+  If areaFlagpoleX = #AREA_BOX_NONE
+    flagX = #FLAG_PARKED_X
+    flagY = 0
+  EndIf
+End Statement
+
+Statement InitPlayer{}
+  SHARED jumpSwimTimer, whirlpoolFlag
+  SHARED areaMarioStartX, areaMarioStartY, areaFlagpoleX, areaFlagpoleY
+  SHARED playerX, playerY, playerFacing, playerFrame, playerAnimTimer, playerAnimPeriod, playerOnGround
+  SHARED flagpoleSoundDelay
+  SHARED playerButtons, playerButtonsLast, playerSpeedX, playerMoveForceX, playerFractionX, cameraFractionX
+  SHARED playerSpeedY, playerMoveForceY, playerFractionY, playerVerticalForce, playerFallForce
+  SHARED playerSpeedAbsolute, playerRunningTimer, playerRunningSpeed
+  SHARED playerMovingDirection, playerFacingDirection, playerScreenX, playerJumpOriginY
+  SHARED sideCollisionTimer, blockBounceTimer, cameraX
+  SHARED blockBumpActive, blockBumpCell, blockBumpClass, blockBumpGid
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerPoleTimer, flagState, flagX, flagY
+  SHARED playerIsBig, playerCrouching
+  SHARED playerResizeToBig, playerResizeTimer, headProbeY
+  SHARED worldFreezeTicks, playerSizeAnimTicks, playerSizeAnimGrow
+  SHARED playerFire, playerResizeFire, playerThrowTimer, jumpBufferTimer, coyoteTimer
+  playerX = areaMarioStartX
+  playerY = areaMarioStartY
+  playerFacing = #MARIO_FACE_RIGHT
+  playerFrame = #MARIO_F_IDLE
+  playerAnimTimer = 0
+  playerAnimPeriod = #MARIO_ANIM_SLOW
+  playerOnGround = True
+  playerButtons = 0
+  playerButtonsLast = 0
+  jumpBufferTimer = 0
+  coyoteTimer = 0
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  playerFractionX = 0
+  cameraFractionX = 0
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  playerVerticalForce = 0
+  ; What a Mario who walks off a ledge before his first jump falls with (smbdis 2837).
+  playerFallForce = #MARIO_GRAV_FALL_INIT
+  jumpSwimTimer = 0
+  whirlpoolFlag = False
+  playerSpeedAbsolute = 0
+  playerRunningTimer = 0
+  playerRunningSpeed = 0
+  playerMovingDirection = #MARIO_BTN_RIGHT
+  playerFacingDirection = #MARIO_BTN_RIGHT
+  playerScreenX = areaMarioStartX
+  playerJumpOriginY = areaMarioStartY
+  sideCollisionTimer = 0
+  blockBounceTimer = 0
+  ;; The bump state with it: an F1 mid-bob otherwise leaves blockBumpActive set
+  ;; over the timer that is now 0, and the next UpdateBlockBump{} finalizes a
+  ;; cell the reset just restored -- spending a `?` and spawning its mushroom
+  ;; in a level nobody bumped.
+  blockBumpActive = False
+  blockBumpCell = 0
+  blockBumpClass = 0
+  blockBumpGid = 0
+  cameraX = 0
+  playerState = #PLAYER_ST_FREE
+  playerPoleTimer = 0
+  flagpoleSoundDelay = 0
+  flagState = #FLAG_ST_IDLE
+  ; F1 reset also drops the size, or a level restart would leave Mario mid-grow.
+  playerIsBig = False
+  playerCrouching = False
+  playerFire = False
+  playerResizeFire = False
+  playerThrowTimer = 0
+  playerResizeToBig = False
+  playerResizeTimer = 0
+  worldFreezeTicks = 0
+  playerSizeAnimTicks = 0
+  playerSizeAnimGrow = False
+  headProbeY = #PROBE_TOP_Y
+  ;; After playerIsBig, not before: the box follows the size, and this is a
+  ;; repeat-reset path as much as the first one. Same numbers as the small branch
+  ;; of UpdatePlayerBoundBox{}, which cannot be called from AMIGA mode.
+  boundBoxLeft = playerX + #BOUND_LEFT
+  boundBoxTop = playerY + #BOUND_TOP
+  boundBoxRight = playerX + #BOUND_RIGHT
+  boundBoxBottom = playerY + #BOUND_BOTTOM
+  PlaceFlag{}
+End Statement
+
+;; END OF PLAYER SETUP (AMIGA MODE)

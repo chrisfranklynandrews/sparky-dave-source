@@ -1,0 +1,374 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "VertSwingProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: the swing about a centre (the worlds-1-and-2 plan, step 3). 1-3's platform that moves up and down ($25: InitVertPlatform
+;; 8914, YMovingPlatform 10896) and its Red Paratroopa ($0f: InitRedPTroopa 8214, ProcMoveRedPTroopa 9377), as the routine they will
+;; become in the engine, on the cartridge's own terms. Both move by ImposeGravity (7704) the same way: while one has no speed and no
+;; force and is above its top it creeps down a pixel every eighth frame; otherwise it is pulled down while above its centre (the down
+;; force only) and up from its centre on (the down force, then the up force, twice it, taken off). The speed is whole pixels and its
+;; 256ths (the force) one 16-bit number; the position has 256ths of its own (the dummy), which take the force each frame.
+;;
+;; The numbers: the platform down 5, up 10, a cap of 3; the Paratroopa 3, 6 and 2. The platform's top is its start and its centre 64
+;; below (a start of 128 or more: the top is its two's complement and the centre 64 above); the Paratroopa's top is its start and its
+;; centre 48 below (from 128: 32 above). PAL (ours, scaled to the same swing in seconds): the platform 7 and 14, the Paratroopa 4 and 8.
+;;
+;; Keys: ESC quits and writes the results. The six traces swing side by side, each with its top (grey) and centre (purple) marked:
+;; three Paratroopas (red, 16x24), three platforms (orange, 48x8); the last platform starts 4 px above its top, still, to show the creep.
+;;
+;; The results file (proofs/vert-swing-results.txt), to check with python tools/record/swing_model.py --check: each trace's y and its speed
+;; (in 256ths, the speed times 256 and the force) every tick for 960 ticks from its start.
+
+OPTIMIZE 1
+
+WBStartup
+
+;; The proof's own display: names of its own, since constants.ab3 has the game's #COPPER_FLAGS (smooth scrolling and fetch mode 3). As
+;; tall as the bitmaps, from the standard window's top line (an NTSC screen's 200 lines fit too).
+#VS_COP_FLAGS = $10004
+#VS_COP_COLORS = 16
+#VS_COP_YPOS = 44
+#WORLD_ROWS = 256
+
+#VS_PLATFORM = 0
+#VS_PARATROOPA = 1
+#VS_TRACES = 6
+#VS_TICKS = 960
+#VS_CREEP_MASK = 7
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+
+;; By kind: the down force, the up force (256ths a frame) and the speed cap (whole pixels).
+Dim vsDown.w(1)
+Dim vsUp.w(1)
+Dim vsCap.w(1)
+;; The traces (tools/record/swing_model.py's TRACES): the kind, the start y, and a y set after the start (-1 for none).
+Dim traceKind.w(#VS_TRACES - 1)
+Dim traceStartY.w(#VS_TRACES - 1)
+Dim traceSetY.w(#VS_TRACES - 1)
+;; Each swinger: its kind, y, top and centre, its speed (whole pixels, signed), force (its 256ths, 0 to 255) and the y's own 256ths.
+Dim swKind.w(#VS_TRACES - 1)
+Dim swY.w(#VS_TRACES - 1)
+Dim swTop.w(#VS_TRACES - 1)
+Dim swCentre.w(#VS_TRACES - 1)
+Dim swSpeed.w(#VS_TRACES - 1)
+Dim swForce.w(#VS_TRACES - 1)
+Dim swDummy.w(#VS_TRACES - 1)
+Dim traceY.w(#VS_TRACES*#VS_TICKS - 1)
+Dim traceV.w(#VS_TRACES*#VS_TICKS - 1)
+
+If #SIM_HZ = 50
+  vsDown(#VS_PLATFORM) = 7
+  vsUp(#VS_PLATFORM) = 14
+  vsDown(#VS_PARATROOPA) = 4
+  vsUp(#VS_PARATROOPA) = 8
+Else
+  vsDown(#VS_PLATFORM) = 5
+  vsUp(#VS_PLATFORM) = 10
+  vsDown(#VS_PARATROOPA) = 3
+  vsUp(#VS_PARATROOPA) = 6
+EndIf
+vsCap(#VS_PLATFORM) = 3
+vsCap(#VS_PARATROOPA) = 2
+traceKind(0) = #VS_PARATROOPA
+traceStartY(0) = 56
+traceSetY(0) = -1
+traceKind(1) = #VS_PARATROOPA
+traceStartY(1) = 72
+traceSetY(1) = -1
+traceKind(2) = #VS_PARATROOPA
+traceStartY(2) = 136
+traceSetY(2) = -1
+traceKind(3) = #VS_PLATFORM
+traceStartY(3) = 96
+traceSetY(3) = -1
+traceKind(4) = #VS_PLATFORM
+traceStartY(4) = 160
+traceSetY(4) = -1
+traceKind(5) = #VS_PLATFORM
+traceStartY(5) = 96
+traceSetY(5) = 92
+
+quitFlag.w = False
+screenHeight.w = DispHeight
+drawBitmap.w = 0
+liveTick.w = 0
+
+InitPalette 0, #VS_COP_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 120, 120, 120
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 252, 252, 252
+AGAPalRGB 0, 4, 30, 30, 120
+AGAPalRGB 0, 5, 252, 152, 56
+AGAPalRGB 0, 6, 200, 0, 200
+AGAPalRGB 0, 7, 0, 0, 0
+BitMap 0, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+BLITZ
+InitCopList 0, #VS_COP_YPOS, screenHeight, #VS_COP_FLAGS, 0, #VS_COP_COLORS, 0
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+;; ---------------------------------------------------------------
+;; The swing
+;; ---------------------------------------------------------------
+
+;; ImposeGravity: the y moves by the speed and the carry of its own 256ths (which take the force); the force takes the down force,
+;; carrying into the speed, which is held at the cap once its 256ths are past a half. Going up, the up force comes off the force,
+;; borrowing from the speed, which is held at minus the cap (its 256ths 255) once they are under a half.
+Statement SwingGravity{index.w, downForce.w, upForce.w, maxSpeed.w, upward.w}
+  SHARED swY(), swSpeed(), swForce(), swDummy()
+  swDummy(index) = swDummy(index) + swForce(index)
+  positionCarry.w = 0
+  If swDummy(index) >= 256
+    swDummy(index) = swDummy(index) - 256
+    positionCarry = 1
+  EndIf
+  swY(index) = swY(index) + swSpeed(index) + positionCarry
+  swForce(index) = swForce(index) + downForce
+  If swForce(index) >= 256
+    swForce(index) = swForce(index) - 256
+    swSpeed(index) = swSpeed(index) + 1
+  EndIf
+  If swSpeed(index) >= maxSpeed AND swForce(index) >= 128
+    swSpeed(index) = maxSpeed
+    swForce(index) = 0
+  EndIf
+  If upward = False Then Statement Return
+  swForce(index) = swForce(index) - upForce
+  If swForce(index) < 0
+    swForce(index) = swForce(index) + 256
+    swSpeed(index) = swSpeed(index) - 1
+  EndIf
+  If swSpeed(index) < -maxSpeed AND swForce(index) < 128
+    swSpeed(index) = -maxSpeed
+    swForce(index) = 255
+  EndIf
+End Statement
+
+;; A swinger built at startY (InitRedPTroopa, InitVertPlatform): still, its top and centre from its y as the cartridge's bytes.
+Statement StartSwinger{index.w, kind.w, startY.w}
+  SHARED swKind(), swY(), swTop(), swCentre(), swSpeed(), swForce(), swDummy()
+  swKind(index) = kind
+  swY(index) = startY
+  swSpeed(index) = 0
+  swForce(index) = 0
+  swDummy(index) = 0
+  If kind = #VS_PARATROOPA
+    swTop(index) = startY
+    If startY < 128
+      swCentre(index) = (startY + 48) AND 255
+    Else
+      swCentre(index) = (startY + 224) AND 255
+    EndIf
+  Else
+    If startY < 128
+      swTop(index) = startY
+      swCentre(index) = (startY + 64) AND 255
+    Else
+      swTop(index) = (256 - startY) AND 255
+      swCentre(index) = (startY + 192) AND 255
+    EndIf
+  EndIf
+End Statement
+
+;; One frame (YMovingPlatform, ProcMoveRedPTroopa): still and above its top, the creep (and its 256ths cleared); else the pull, down
+;; while above its centre and up from it on.
+Statement StepSwinger{index.w, tick.w}
+  SHARED swKind(), swY(), swTop(), swCentre(), swSpeed(), swForce(), swDummy(), vsDown(), vsUp(), vsCap()
+  If swSpeed(index) = 0 AND swForce(index) = 0
+    swDummy(index) = 0
+    If (swY(index) AND 255) < swTop(index)
+      If (tick AND #VS_CREEP_MASK) = 0 Then swY(index) = swY(index) + 1
+      Statement Return
+    EndIf
+  EndIf
+  kind.w = swKind(index)
+  goingUp.w = False
+  If (swY(index) AND 255) >= swCentre(index) Then goingUp = True
+  SwingGravity{index, vsDown(kind), vsUp(kind), vsCap(kind), goingUp}
+End Statement
+
+;; Each swinger at its trace's start (and the creep trace's y set above its top).
+Statement StartAll{}
+  SHARED traceKind(), traceStartY(), traceSetY(), swY()
+  For traceIndex.w = 0 To #VS_TRACES - 1
+    StartSwinger{traceIndex, traceKind(traceIndex), traceStartY(traceIndex)}
+    If traceSetY(traceIndex) >= 0 Then swY(traceIndex) = traceSetY(traceIndex)
+  Next
+End Statement
+
+;; Each trace from its start, then the swingers started again for the screen.
+Statement RunTraces{}
+  SHARED swY(), swSpeed(), swForce(), traceY(), traceV()
+  StartAll{}
+  For traceIndex.w = 0 To #VS_TRACES - 1
+    For traceTick.w = 0 To #VS_TICKS - 1
+      StepSwinger{traceIndex, traceTick}
+      traceY(traceIndex*#VS_TICKS + traceTick) = swY(traceIndex)
+      traceV(traceIndex*#VS_TICKS + traceTick) = swSpeed(traceIndex)*256 + swForce(traceIndex)
+    Next
+  Next
+  StartAll{}
+End Statement
+
+;; ---------------------------------------------------------------
+;; The screen
+;; ---------------------------------------------------------------
+
+;; A box in world rows, squeezed to the screen's height and cut to it.
+Statement WorldBox{boxX.w, boxY.w, boxW.w, boxH.w, colour.w}
+  SHARED screenHeight
+  boxLeft.w = boxX
+  boxRight.w = boxX + boxW - 1
+  If boxLeft < 0 Then boxLeft = 0
+  If boxRight > #VIEW_W - 1 Then boxRight = #VIEW_W - 1
+  If boxRight < boxLeft Then Statement Return
+  ; In longs: a y of 300 times 256 lines is past a word.
+  scaledTop.l = boxY
+  scaledTop = (scaledTop*screenHeight)/#WORLD_ROWS
+  scaledBottom.l = boxY + boxH
+  scaledBottom = (scaledBottom*screenHeight)/#WORLD_ROWS - 1
+  boxTop.w = scaledTop
+  boxBottom.w = scaledBottom
+  If boxTop < 0 Then boxTop = 0
+  If boxBottom > screenHeight - 1 Then boxBottom = screenHeight - 1
+  If boxBottom < boxTop Then Statement Return
+  Boxf boxLeft, boxTop, boxRight, boxBottom, colour
+End Statement
+
+Statement DrawSwingFrame{}
+  SHARED drawBitmap, swKind(), swY(), swTop(), swCentre()
+  Use BitMap drawBitmap
+  Cls 0
+  For traceIndex.w = 0 To #VS_TRACES - 1
+    columnX.w = 4 + traceIndex*52
+    WorldBox{columnX, swTop(traceIndex), 48, 1, 1}
+    WorldBox{columnX, swCentre(traceIndex), 48, 1, 6}
+    If swKind(traceIndex) = #VS_PARATROOPA
+      WorldBox{columnX + 16, swY(traceIndex), 16, 24, 2}
+    Else
+      WorldBox{columnX, swY(traceIndex), 48, 8, 5}
+    EndIf
+  Next
+End Statement
+
+;; ---------------------------------------------------------------
+;; Run
+;; ---------------------------------------------------------------
+
+RunTraces{}
+While quitFlag = False
+  For traceIndex.w = 0 To #VS_TRACES - 1
+    StepSwinger{traceIndex, liveTick}
+  Next
+  liveTick = (liveTick + 1) AND 255
+  DrawSwingFrame{}
+  VWait
+  DisplayBitMap 0, drawBitmap
+  drawBitmap = 1 - drawBitmap
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/vert-swing-results.txt")
+  FileOutput 0
+  NPrint "Swing proof results"
+  NPrint "Physics variant: ", #SIM_HZ, " ticks a second"
+  For traceReport.w = 0 To #VS_TRACES - 1
+    Print "  trace ", traceReport, " y:"
+    For tickReport.w = 0 To #VS_TICKS - 1
+      Print " ", traceY(traceReport*#VS_TICKS + tickReport)
+    Next
+    NPrint ""
+    Print "  trace ", traceReport, " v:"
+    For tickReport = 0 To #VS_TICKS - 1
+      Print " ", traceV(traceReport*#VS_TICKS + tickReport)
+    Next
+    NPrint ""
+  Next
+  CloseFile 0
+EndIf
+End

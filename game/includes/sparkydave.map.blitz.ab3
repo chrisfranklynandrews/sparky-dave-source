@@ -1,0 +1,829 @@
+;; =======================================================
+;; MAP DRAW (BLITZ MODE)
+;; =======================================================
+;; StampPlayfield{} runs once per playfield bitmap, from InitLevel{}, and nothing re-reads mapBuffer after that, so a change to
+;; mapBuffer during play is seen by later readers but not on screen. QueueMetatileRedraw{} and RedrawMetatileCells{} put such changes
+;; on screen: a list of changed cells, drawn into both playfield bitmaps.
+
+;; Cut tile tileNow from the atlas into #TILE_SHAPE. The caller then Uses its own bitmap and Blocks or Blits it.
+;; WaitBlitter first, here and before every GetaShape of a shape a blit may still be reading: GetaShape frees the shape's memory and
+;; allocates it again cleared (MEMF_CLEAR, by the CPU) before it waits for the blitter (shapeslib.ab3, do_GetaShape; bitmaplib.ab3,
+;; extbitmap), and a Block returns as soon as the blitter starts. Without the wait, a Block of a shape followed by a GetaShape of it
+;; turns the planes the blitter has not yet read into 0: one plane of one cell missing in one bitmap, a flickering block or stray rows.
+Statement CutAtlasTile{tileNow.w}
+  Use BitMap #ATLAS_BM
+  ; The last Block may still be reading #TILE_SHAPE (above).
+  WaitBlitter
+  GetaShape #TILE_SHAPE, (tileNow MOD #LOOK_ATLAS_COLS)*#TILE, (tileNow/#LOOK_ATLAS_COLS)*#TILE, #TILE, #TILE
+End Statement
+
+;; Stamp one map cell into drawBitmap, from mapBuffer.
+;;
+;; GID 0 paints sky rather than doing nothing. The full playfield gets its sky
+;; from the Cls in StampPlayfield{}, but a per-cell repaint has no Cls, so a cell
+;; that goes empty -- a shattered brick -- has to be cleared explicitly.
+Statement StampMetatileCell{cellIndex.w}
+  SHARED mapBuffer(), mapWidth, drawBitmap
+  SHARED mapGid, mapPixelX, mapPixelY
+  mapGid = mapBuffer(cellIndex)
+  mapPixelX = (cellIndex MOD mapWidth)*#TILE
+  mapPixelY = (cellIndex/mapWidth)*#TILE
+  If mapGid = 0
+    Boxf mapPixelX, mapPixelY, mapPixelX + #TILE - 1, mapPixelY + #TILE - 1, 0
+    Statement Return
+  EndIf
+  CutAtlasTile{mapGid - 1}
+  Use BitMap drawBitmap
+  Block #TILE_SHAPE, mapPixelX, mapPixelY
+End Statement
+
+;; The cells of the map grouped by tile: stampHead(gid) is the first cell holding that GID and
+;; stampNext(cell) the next one, -1 at the end. Empty cells (GID 0) are in no list. Built once
+;; for both bitmaps.
+Statement BuildStampLists{}
+  SHARED mapBuffer(), stampHead(), stampNext(), stampSkipped
+  stampSkipped = 0
+  For gidIndex.w = 0 To #STAMP_GID_MAX
+    stampHead(gidIndex) = -1
+  Next
+  For cellIndex.w = #MAP_CELLS - 1 To 0 Step -1
+    gidNow.w = mapBuffer(cellIndex)
+    If gidNow > #LOOK_FRONT_TILES Then stampSkipped = stampSkipped + 1
+    If gidNow > 0 AND gidNow <= #LOOK_FRONT_TILES
+      stampNext(cellIndex) = stampHead(gidNow)
+      stampHead(gidNow) = cellIndex
+    EndIf
+  Next
+End Statement
+
+;; The map into drawBitmap from the lists: sky by the Cls, then each tile cut from the atlas once per bitmap
+;; and blocked into every cell that holds it (the main project's TIMING note).
+Statement StampPlayfield{}
+  SHARED mapWidth, drawBitmap, stampHead(), stampNext()
+  Use BitMap drawBitmap
+  Cls 0
+  For gidIndex.w = 1 To #STAMP_GID_MAX
+    cellNow.w = stampHead(gidIndex)
+    If cellNow >= 0
+      tileNow.w = gidIndex - 1
+      CutAtlasTile{tileNow}
+      Use BitMap drawBitmap
+      While cellNow >= 0
+        Block #TILE_SHAPE, (cellNow MOD mapWidth)*#TILE, (cellNow/mapWidth)*#TILE
+        cellNow = stampNext(cellNow)
+      Wend
+    EndIf
+  Next
+End Statement
+
+;; What the back bitmap holds, as a number: the scenery kind, and in the All-Stars look the tile set's, which has its own strip of that kind (the hills' in the
+;; overground, the cave wall in the underground). The NES look's is the kind alone (its tile set is always 0).
+Function.w BackKindOf{sceneryNow.w, setNow.w}
+  If sceneryNow = #SCENERY_NONE Then Function Return(sceneryNow)
+  Function Return(sceneryNow + setNow*8)
+End Function
+
+;; The GID of one cell of a scenery kind's back strip. The NES look has its three strips in the area table (backStrip()). The All-Stars look has the
+;; one the user composed (allstarsBackStrip(), sparkydave.allstars-palette.data.ab3: hills and clouds on one strip, one speed) and gives it to the
+;; hills kind, the main level's; the other kinds show no back yet.
+Function.w BackStripGid{stripKind.w, stripCell.w}
+  SHARED backStrip(), allstarsBackStrip(), allstarsBackStripUnder(), allstarsBackStripWater(), allstarsBackStripCastle()
+  If #LOOK_ALLSTARS = 1
+    ; The overground's strip is every ground area's: 1-1's hills and clouds, and the clouds and trees kinds of 1-3, 2-1 and 2-3 (their NES strips are the cartridge's own pictures).
+    If stripKind = #SCENERY_HILLS OR stripKind = #SCENERY_CLOUDS OR stripKind = #SCENERY_TREES Then Function Return allstarsBackStrip(stripCell)
+    If stripKind = BackKindOf{#SCENERY_HILLS, #TILE_SET_UNDERGROUND} Then Function Return allstarsBackStripUnder(stripCell)
+    If stripKind = BackKindOf{#SCENERY_WATER, #TILE_SET_WATER} Then Function Return allstarsBackStripWater(stripCell)
+    If stripKind = BackKindOf{#SCENERY_CLOUDS, #TILE_SET_CASTLE} Then Function Return allstarsBackStripCastle(stripCell)
+    Function Return 0
+  EndIf
+  Function Return backStrip(stripKind*#BACK_CELLS + stripCell)
+End Function
+
+;; The back playfield: the strip of a scenery kind from backStrip() (the area table), sky by the
+;; palette's pen 0 as everywhere else, stamped into the back bitmap and again after the strip's own width on, so a view that
+;; starts near the strip's end reads on into the copy. The kinds: clouds, hills, trees (#SCENERY_*; the main project's AMIGA_RENDERER note,
+;; "The back playfield by scenery"). A visible, not-yet-stamped kind is a few frames' work (a tile cut for each cell), so it is
+;; done behind a cover.
+Statement StampBackPlayfield{kind.w}
+  SHARED backStampedKind, hudMirrorStale, pageScreenDrawn(), backStampHead(), backStampNext()
+  Use BitMap #BACK_BM
+  Cls 0
+  ; The back bitmap is cleared: whatever the overlay's pages held is gone (TakeBackAsCanvas{} does it too, and comes first when an overlay leaves).
+  pageScreenDrawn(0) = #SCREEN_NONE
+  pageScreenDrawn(1) = #SCREEN_NONE
+  ;; The cells are grouped by tile first, as the map's stamp does (BuildStampLists{}), so each tile is cut from the atlas once. Cutting
+  ;; at each change of tile along the strip costs 37 to 62 frames at a pipe for the All-Stars cave wall, which has a different tile in
+  ;; nearly every cell.
+  ;; The strip's first #BACK_HUD_ROWS rows are never stamped, whatever a strip holds there: while Mario is above the view the tall list
+  ;; shows the HUD's copy in the back bitmap's rows 0 to 15 and two empty rows after it (HudEnd strings, lines 16 and 17), so a picture
+  ;; there would show round the HUD.
+  For gidIndex.w = 0 To #STAMP_GID_MAX
+    backStampHead(gidIndex) = -1
+  Next
+  For backCell.w = #BACK_CELLS - 1 To #BACK_STRIP_W*#BACK_HUD_ROWS Step -1
+    backGid.w = BackStripGid{kind, backCell}
+    If backGid > 0 AND backGid <= #LOOK_ATLAS_TILES AND backGid <= #STAMP_GID_MAX
+      backStampNext(backCell) = backStampHead(backGid)
+      backStampHead(backGid) = backCell
+    EndIf
+  Next
+  ; Each tile cut once and blocked into every cell that holds it, and again one strip on where the view's wrap reads it.
+  For gidIndex.w = 1 To #STAMP_GID_MAX
+    backCell = backStampHead(gidIndex)
+    If backCell >= 0
+      CutAtlasTile{gidIndex - 1}
+      Use BitMap #BACK_BM
+      While backCell >= 0
+        backX.w = (backCell MOD #BACK_STRIP_W)*#TILE
+        backY.w = (backCell/#BACK_STRIP_W)*#TILE
+        Block #TILE_SHAPE, backX, backY
+        If backX < #VIEW_W + #FETCH_GUARD Then Block #TILE_SHAPE, backX + #BACK_STRIP_W*#TILE, backY
+        backCell = backStampNext(backCell)
+      Wend
+    EndIf
+  Next
+  backStampedKind = kind
+  ; The Cls took the HUD's copy in rows 0 to 15 with it (UpdateHudMirror{} makes it again).
+  hudMirrorStale = True
+End Statement
+
+;; Whether the back needs stamping for an area of this scenery when it holds that of `stamped`: only for a kind that shows
+;; (an area with none shows no back, the palette hides it, and the bitmap is left as it is: a trip to a bonus room does not
+;; cost a restamp of the hills on the way back).
+Function.w BackStripNeeded{scenery.w, stamped.w}
+  If scenery = #SCENERY_NONE Then Function Return False
+  If scenery = stamped Then Function Return False
+  Function Return True
+End Function
+
+;; The area on show has its strip in the back bitmap. Called from StampBothPlayfields{} (every area change and restart) and at
+;; start.
+Statement EnsureBackStrip{}
+  SHARED currentAreaScenery, backStampedKind, tileSetShown, currentAreaType
+  ; The All-Stars sky bonus (a ground area with no scenery) has the main level's sky bands, which the back would show through (its pens are one colour): its back is left blank.
+  If #LOOK_ALLSTARS = 1 AND currentAreaScenery = #SCENERY_NONE AND currentAreaType = #AREA_TYPE_GROUND AND backStampedKind <> 0
+    StampBackPlayfield{0}
+    Statement Return
+  EndIf
+  backKindWanted.w = BackKindOf{currentAreaScenery, tileSetShown}
+  If BackStripNeeded{backKindWanted, backStampedKind} = True
+    StampBackPlayfield{backKindWanted}
+    MarkTransition{"EnsureBackStrip: the back strip stamped"}
+  EndIf
+End Statement
+
+;; The one place the rule lives: whatever uses the back bitmap as a canvas (the title and pause overlays) calls this, and the bitmap no
+;; longer holds any kind's strip, so the next area to show one stamps it. (Called from the places that draw an overlay into it.)
+Statement TakeBackAsCanvas{}
+  SHARED backStampedKind, hudMirrorStale, pageScreenDrawn()
+  backStampedKind = -1
+  ; Whatever the overlay's pages held is not on them now (or is about to go): both are drawn whole next.
+  pageScreenDrawn(0) = #SCREEN_NONE
+  pageScreenDrawn(1) = #SCREEN_NONE
+  hudMirrorStale = True
+End Statement
+
+;; The title or pause overlay has been used the back as its canvas and goes: the area's strip back over it, behind the cover (or,
+;; for an area that shows none, the bitmap is left and counted as holding no kind).
+Statement RestoreBackStrip{}
+  TakeBackAsCanvas{}
+  EnsureBackStrip{}
+End Statement
+
+;; The attract mode's scenery: while the title is up the back
+;; playfield is the title's canvas, so the clouds and hills are stamped into the world bitmaps
+;; instead, in the map's empty cells, repeated every #BACK_STRIP_W columns along the level, as the
+;; cartridge's own 1-1 has them. Into both bitmaps, after a fresh StampBothPlayfields{}; the game's
+;; reload (RestartLevel{}) stamps them plain again.
+Statement StampAttractScenery{}
+  SHARED mapBuffer(), mapWidth, areaColumns
+  ; The All-Stars strip's cells are pens for the back playfield, not the front's: no scenery in the attract mode's front under that look yet.
+  If #LOOK_ALLSTARS = 1 Then Statement Return
+  AutoCookie Off
+  lastTile.w = -1
+  For backCell.w = 0 To #BACK_CELLS - 1
+    backGid.w = BackStripGid{#SCENERY_HILLS, backCell}
+    backRow.w = backCell/#BACK_STRIP_W
+    If backGid > 0 AND backGid <= #LOOK_ATLAS_TILES AND backRow < #MAP_H
+      backTile.w = backGid - 1
+      If backTile <> lastTile
+        CutAtlasTile{backTile}
+        lastTile = backTile
+      EndIf
+      Use BitMap #PLAY_BM_A
+      For mapColumn.w = backCell MOD #BACK_STRIP_W To areaColumns - 1 Step #BACK_STRIP_W
+        If mapBuffer(backRow*mapWidth + mapColumn) = 0 Then Block #TILE_SHAPE, mapColumn*#TILE, backRow*#TILE
+      Next
+      Use BitMap #PLAY_BM_B
+      For mapColumn.w = backCell MOD #BACK_STRIP_W To areaColumns - 1 Step #BACK_STRIP_W
+        If mapBuffer(backRow*mapWidth + mapColumn) = 0 Then Block #TILE_SHAPE, mapColumn*#TILE, backRow*#TILE
+      Next
+    EndIf
+  Next
+  AutoCookie On
+End Statement
+
+;; The word the stamp writes at one 16 px word of the world: the atlas tile's word for that pixel row and plane, or 0 for an
+;; empty cell and for one the stamp does not draw (a GID past #LOOK_FRONT_TILES, which only the Cls has written).
+Function.w StampWantedWord{wordColumn.w, pixelRow.w, wordPlane.w}
+  SHARED mapBuffer(), mapWidth
+  wantedGid.w = mapBuffer((pixelRow/#TILE)*mapWidth + wordColumn)
+  If wantedGid < 1 OR wantedGid > #LOOK_FRONT_TILES Then Function Return 0
+  atlasStruct.l = Addr BitMap(#ATLAS_BM)
+  atlasPlane.l = Peek.l(atlasStruct + 8 + wordPlane*4)
+  atlasRow.l = ((wantedGid - 1)/#LOOK_ATLAS_COLS)*#TILE + (pixelRow MOD #TILE)
+  Function Return Peek.w(atlasPlane + atlasRow*Peek.w(atlasStruct) + ((wantedGid - 1) MOD #LOOK_ATLAS_COLS)*2)
+End Function
+
+; Debug mode: one repaired word kept for the bitmap check report, with what each world bitmap held there before the repair.
+Statement KeepStampRepair{wordColumn.w, pixelRow.w, wordPlane.w, wantedNow.w, wordA.w, wordB.w}
+  SHARED debugMode, mapBuffer(), mapWidth, stampCheckTotal, stampWordCount, stampWordStamp(), stampWordColumn(), stampWordRow()
+  SHARED stampWordPlane(), stampWordKnown(), stampWordWanted(), stampWordFoundA(), stampWordFoundB()
+  If debugMode = False Then Statement Return
+  If stampWordCount >= #STAMP_CHECK_WORDS Then Statement Return
+  stampWordStamp(stampWordCount) = stampCheckTotal
+  stampWordColumn(stampWordCount) = wordColumn
+  stampWordRow(stampWordCount) = pixelRow
+  stampWordPlane(stampWordCount) = wordPlane
+  stampWordKnown(stampWordCount) = True
+  If mapBuffer((pixelRow/#TILE)*mapWidth + wordColumn) > #LOOK_FRONT_TILES Then stampWordKnown(stampWordCount) = False
+  stampWordWanted(stampWordCount) = wantedNow
+  stampWordFoundA(stampWordCount) = wordA
+  stampWordFoundB(stampWordCount) = wordB
+  stampWordCount = stampWordCount + 1
+End Statement
+
+;; A word missing at missingAddress went out with another high word (RepairStampedBitmaps{} says why), so its copy is a whole
+;; multiple of 64 KB away. Each such address inside either world bitmap, in the rows and columns the stamp draws, is set to what
+;; the stamp wants there if it holds anything else. Returns how many words it put right.
+Function.w RepairMovedCopies{missingAddress.l, lastColumn.w}
+  worldBytesPerRow.l = Peek.w(Addr BitMap(#PLAY_BM_A))
+  planeBytes.l = #WATCH_PIXEL_ROWS*worldBytesPerRow
+  repairedCount.w = 0
+  For copyStep.w = -32 To 32
+    If copyStep <> 0
+      stepBytes.l = copyStep
+      copyAddress.l = missingAddress + stepBytes*65536
+      For copyPlane.w = 0 To #PLAYFIELD_PLANES - 1
+        planeStartA.l = Peek.l(Addr BitMap(#PLAY_BM_A) + 8 + copyPlane*4)
+        planeStartB.l = Peek.l(Addr BitMap(#PLAY_BM_B) + 8 + copyPlane*4)
+        copyOffset.l = -1
+        If copyAddress >= planeStartA AND copyAddress < planeStartA + planeBytes Then copyOffset = copyAddress - planeStartA
+        If copyAddress >= planeStartB AND copyAddress < planeStartB + planeBytes Then copyOffset = copyAddress - planeStartB
+        If copyOffset >= 0
+          copyRow.w = copyOffset/worldBytesPerRow
+          copyColumn.w = (copyOffset MOD worldBytesPerRow)/2
+          If copyColumn <= lastColumn
+            wantedNow.w = StampWantedWord{copyColumn, copyRow, copyPlane}
+            If Peek.w(copyAddress) <> wantedNow
+              KeepStampRepair{copyColumn, copyRow, copyPlane, wantedNow, Peek.w(planeStartA + copyOffset), Peek.w(planeStartB + copyOffset)}
+              Poke.w copyAddress, wantedNow
+              repairedCount = repairedCount + 1
+            EndIf
+          EndIf
+        EndIf
+      Next
+    EndIf
+  Next
+  Function Return repairedCount
+End Function
+
+;; After every stamp, in every build: repair stray one-pixel rows. A blit's last D write can land between the two halves of the next
+;; blit's long write to BLTDPT (the 68020 writes the high word first), so it goes out with the next plane's high word: the word is
+;; missing where it belongs and turns up a whole multiple of 64 KB away. It is rare, and was caught by the stamp check. A Block's blit
+;; of a plane ends at its tile's last row, so a moved word is always missing from a cell's row 15: only those rows are compared, both
+;; bitmaps a long at a time (right after a stamp they are the same), each word that differs is set to what the stamp wants, and its
+;; copy is looked for and put right (RepairMovedCopies{}). Checking every row of the whole area takes 65 to 69 frames a stamp; this is
+;; a sixteenth of the reads. Not repaired: a word of 0 moved (nothing is missing where it belongs; where it lands on a stamped tile, a
+;; hole), a word wrong the same way in both bitmaps, and a copy outside the bitmaps, in other Chip RAM. In debug mode each repair is
+;; kept for the bitmap check report.
+Statement RepairStampedBitmaps{}
+  SHARED debugMode, mapWidth, areaColumns, currentLevel, currentArea, currentAreaType, tileSetJustChanged
+  SHARED stampCheckTotal, stampBadCount, stampBadNumber(), stampBadLevel(), stampBadArea(), stampBadType()
+  SHARED stampBadSetChanged(), stampBadWords()
+  ; The stamp's last Block may still be writing: read only what it has finished.
+  WaitBlitter
+  stampCheckTotal = stampCheckTotal + 1
+  setChanged.w = tileSetJustChanged
+  tileSetJustChanged = False
+  differCount.l = 0
+  lastColumn.w = areaColumns - 1
+  If lastColumn > mapWidth - 1 Then lastColumn = mapWidth - 1
+  worldBytesPerRow.l = Peek.w(Addr BitMap(#PLAY_BM_A))
+  For checkPlane.w = 0 To #PLAYFIELD_PLANES - 1
+    planeA.l = Peek.l(Addr BitMap(#PLAY_BM_A) + 8 + checkPlane*4)
+    planeB.l = Peek.l(Addr BitMap(#PLAY_BM_B) + 8 + checkPlane*4)
+    For cellRow.w = 0 To #MAP_H - 1
+      pixelRow.w = cellRow*#TILE + #TILE - 1
+      rowA.l = planeA + pixelRow*worldBytesPerRow
+      rowB.l = planeB + pixelRow*worldBytesPerRow
+      For pairColumn.w = 0 To lastColumn Step 2
+        If Peek.l(rowA + pairColumn*2) <> Peek.l(rowB + pairColumn*2)
+          For wordColumn.w = pairColumn To pairColumn + 1
+            wordA.w = Peek.w(rowA + wordColumn*2)
+            wordB.w = Peek.w(rowB + wordColumn*2)
+            If wordColumn <= lastColumn AND wordA <> wordB
+              wantedNow.w = StampWantedWord{wordColumn, pixelRow, checkPlane}
+              KeepStampRepair{wordColumn, pixelRow, checkPlane, wantedNow, wordA, wordB}
+              differCount = differCount + 1
+              If wordA <> wantedNow
+                Poke.w rowA + wordColumn*2, wantedNow
+                differCount = differCount + RepairMovedCopies{rowA + wordColumn*2, lastColumn}
+              EndIf
+              If wordB <> wantedNow
+                Poke.w rowB + wordColumn*2, wantedNow
+                differCount = differCount + RepairMovedCopies{rowB + wordColumn*2, lastColumn}
+              EndIf
+            EndIf
+          Next
+        EndIf
+      Next
+    Next
+  Next
+  If differCount = 0 OR debugMode = False Then Statement Return
+  If stampBadCount >= #STAMP_CHECK_STAMPS Then Statement Return
+  stampBadNumber(stampBadCount) = stampCheckTotal
+  stampBadLevel(stampBadCount) = currentLevel
+  stampBadArea(stampBadCount) = currentArea
+  stampBadType(stampBadCount) = currentAreaType
+  stampBadSetChanged(stampBadCount) = setChanged
+  stampBadWords(stampBadCount) = differCount
+  stampBadCount = stampBadCount + 1
+End Statement
+
+;; Stamp both playfield bitmaps from the current mapBuffer, pairing drawBuffer
+;; with drawBitmap so UnBuffer operates on the correct bob buffer. Shared by
+;; init.blitz.ab3 (load time) and ResetLevel{} (F1 restore) so the protocol
+;; cannot drift between the two paths. After stamping, re-initialises both
+;; bob buffers so UnBuffer{} does not restore stale pre-reset backgrounds.
+Statement StampBothPlayfields{}
+  SHARED drawBitmap, drawBuffer, warpZoneState, warpCameraLocked, scrollLockLifted, castleTextDrawnA, castleTextDrawnB
+  ; The area's back strip first (an unchanged kind costs nothing), all behind the cover the caller has up.
+  EnsureBackStrip{}
+  ;; A stamp paints the text over, so the warp zone's is drawn again when the screen next reaches it (and its camera lock is
+  ;; taken again then).
+  warpZoneState = 0
+  warpCameraLocked = False
+  ; A castle's scroll lock is on again (a restart is before the axe).
+  scrollLockLifted = False
+  ; The stamp has painted over the castle's messages: drawn again if still wanted.
+  castleTextDrawnA = 0
+  castleTextDrawnB = 0
+  AutoCookie Off
+  BuildStampLists{}
+  MarkTransition{"StampBothPlayfields: tile lists built"}
+  drawBitmap = #PLAY_BM_A
+  drawBuffer = #BOB_BUF_A
+  StampPlayfield{}
+  MarkTransition{"StampBothPlayfields: first bitmap stamped"}
+  drawBitmap = #PLAY_BM_B
+  drawBuffer = #BOB_BUF_B
+  StampPlayfield{}
+  MarkTransition{"StampBothPlayfields: second bitmap stamped"}
+  ;; Re-seed both bob buffers with the freshly stamped background. Buffer{}
+  ;; copies the current bitmap contents into the bob buffer, so any stale
+  ;; saved sprites or pre-reset tiles are discarded -- without this, UnBuffer
+  ;; in the next DrawFrame{} restores old art over the reset map.
+  Buffer #BOB_BUF_A, #BOB_BYTES
+  Buffer #BOB_BUF_B, #BOB_BYTES
+  AutoCookie On
+  MarkTransition{"StampBothPlayfields: bob buffers seeded"}
+  ; The two bitmaps compared and any stray repaired, whole area (after the buffers, which allocate Chip RAM, so they are covered too).
+  RepairStampedBitmaps{}
+  MarkTransition{"StampBothPlayfields: stamp repaired"}
+End Statement
+
+;; Mark a map cell for repaint. Deduped, so a cell queued twice in one round
+;; drains once: the bump path queues its cell on the clear and again on the
+;; settle, 16 frames apart, and nothing else should queue the same cell twice
+;; either. This list is small, so the dedupe is cheap insurance.
+;; Over-full is dropped rather than wrapped: a stale tile is a better failure than
+;; losing the frame.
+Statement QueueMetatileRedraw{cellIndex.w}
+  SHARED redrawCell(), redrawCount, redrawDoneA, redrawDoneB
+  If redrawCount >= #MAX_REDRAW_CELLS Then Statement Return
+  If redrawCount > 0
+    For queueIndex = 0 To redrawCount - 1
+      If redrawCell(queueIndex) = cellIndex Then Statement Return
+    Next
+  EndIf
+  redrawCell(redrawCount) = cellIndex
+  redrawCount = redrawCount + 1
+  ;; A new cell invalidates whatever the bitmaps were already owed, so neither
+  ;; counts as done until it has been repainted in this round.
+  redrawDoneA = False
+  redrawDoneB = False
+End Statement
+
+;; Repaints the queued cells into the CURRENT bitmap only, and keeps the queue until both bitmaps have had it.
+;; Painting both and forgetting would leave the other bitmap's bob buffer holding stale saved art. Its
+;; UnBuffer would later restore that art over the repainted cell, leaving a block fragment in the sky.
+;;
+;; Repainting lazily, into whichever bitmap is about to be drawn into, cannot
+;; flicker: the other bitmap is not on screen while it is stale, and by the time
+;; it is displayed it has been repainted. And it cannot go stale, because
+;; UnBuffer runs BEFORE this and DrawPlayer runs after, so the stale restore is
+;; covered immediately and the cookie is re-saved fresh on top of it.
+Statement RedrawMetatileCells{}
+  SHARED redrawCell(), redrawCount, drawBitmap, redrawDoneA, redrawDoneB
+  If redrawCount = 0 Then Statement Return
+  Use BitMap drawBitmap
+  AutoCookie Off
+  For drainIndex = 0 To redrawCount - 1
+    StampMetatileCell{redrawCell(drainIndex)}
+  Next
+  AutoCookie On
+  If drawBitmap = #PLAY_BM_A
+    redrawDoneA = True
+  Else
+    redrawDoneB = True
+  EndIf
+  If redrawDoneA = True
+    If redrawDoneB = True
+      redrawCount = 0
+      redrawDoneA = False
+      redrawDoneB = False
+    EndIf
+  EndIf
+End Statement
+
+;; Whether a word of $FFFF in one world bitmap is a stray: the other bitmap's word there (otherWord) is what the map wants, and the
+;; other planes agree in both bitmaps at that word (a bob differs in more than one). The word wanted is left in strayWanted. A cell
+;; StampPlayfield{} does not stamp (a GID past #LOOK_FRONT_TILES), or a column past the map, is never one.
+Function.w IsStrayWord{wordColumn.w, pixelRow.w, wordPlane.w, otherWord.w}
+  SHARED mapBuffer(), mapWidth, strayWanted
+  If wordColumn > mapWidth - 1 Then Function Return False
+  suspectGid.w = mapBuffer((pixelRow/#TILE)*mapWidth + wordColumn)
+  If suspectGid > #LOOK_FRONT_TILES Then Function Return False
+  strayWanted = 0
+  If suspectGid > 0
+    atlasPlane.l = Peek.l(Addr BitMap(#ATLAS_BM) + 8 + wordPlane*4)
+    atlasRow.l = ((suspectGid - 1)/#LOOK_ATLAS_COLS)*#TILE + (pixelRow MOD #TILE)
+    strayWanted = Peek.w(atlasPlane + atlasRow*Peek.w(Addr BitMap(#ATLAS_BM)) + ((suspectGid - 1) MOD #LOOK_ATLAS_COLS)*2)
+  EndIf
+  If otherWord <> strayWanted Then Function Return False
+  worldOffset.l = pixelRow*Peek.w(Addr BitMap(#PLAY_BM_A)) + wordColumn*2
+  For planeIndex.w = 0 To #PLAYFIELD_PLANES - 1
+    If planeIndex <> wordPlane
+      wordA.w = Peek.w(Peek.l(Addr BitMap(#PLAY_BM_A) + 8 + planeIndex*4) + worldOffset)
+      wordB.w = Peek.w(Peek.l(Addr BitMap(#PLAY_BM_B) + 8 + planeIndex*4) + worldOffset)
+      If wordA <> wordB Then Function Return False
+    EndIf
+  Next
+  Function Return True
+End Function
+
+;; F10 in debug mode, two checks (the hunt for the stray one-pixel rows, the main project's candidates notes). The view's cells in both world bitmaps
+;; against the atlas tiles mapBuffer says they hold, word by word: a cell is 16 px wide from x 0, so each of its rows in a plane is
+;; exactly one word, and the word wanted is the atlas's at the tile's place (0 for an empty cell). Anything drawn on the world
+;; differs too: an enemy, a coin, the bumped block, the warp zone's text, a cell still queued for its repaint. Then the whole area,
+;; both bitmaps compared a long at a time, for strays (IsStrayWord{}) anywhere in it, in view or not. Read through the Blitz BitMap
+;; objects: bytes a row at 0, the plane pointers from 8 (InitBand{} reads the back's the same way). All kept for the report at exit
+;; (WriteBitmapCheckReport{}). A cell StampPlayfield{} does not stamp (a GID past #LOOK_FRONT_TILES) is not checked, and only counted.
+Statement CheckWorldBitmaps{}
+  SHARED mapBuffer(), mapWidth, areaColumns, cameraX, currentLevel, currentArea, drawBitmap, redrawCount, strayWanted
+  SHARED checkPressCount, checkWordCount, checkPressLevel(), checkPressArea(), checkPressCamera(), checkPressDrawBitmap()
+  SHARED checkPressQueued(), checkPressWords(), checkPressSkipped(), checkWordPress(), checkWordBitmap(), checkWordColumn()
+  SHARED checkWordRow(), checkWordPlane(), checkWordWanted(), checkWordFound()
+  SHARED checkPressStrays(), checkStrayCount, checkStrayPress(), checkStrayBitmap(), checkStrayColumn(), checkStrayRow()
+  SHARED checkStrayPlane(), checkStrayWanted()
+  If checkPressCount >= #BITMAP_CHECK_PRESSES Then Statement Return
+  pressIndex.w = checkPressCount
+  checkPressCount = checkPressCount + 1
+  checkPressLevel(pressIndex) = currentLevel
+  checkPressArea(pressIndex) = currentArea
+  checkPressCamera(pressIndex) = Int(cameraX)
+  checkPressDrawBitmap(pressIndex) = drawBitmap
+  checkPressQueued(pressIndex) = redrawCount
+  differCount.l = 0
+  skippedCount.w = 0
+  atlasBytesPerRow.l = Peek.w(Addr BitMap(#ATLAS_BM))
+  firstColumn.w = Int(cameraX)/#TILE
+  lastColumn.w = firstColumn + #VIEW_W/#TILE
+  If lastColumn > mapWidth - 1 Then lastColumn = mapWidth - 1
+  For checkBitmap.w = #PLAY_BM_A To #PLAY_BM_B
+    worldBytesPerRow.l = Peek.w(Addr BitMap(checkBitmap))
+    For checkPlane.w = 0 To #PLAYFIELD_PLANES - 1
+      worldPlane.l = Peek.l(Addr BitMap(checkBitmap) + 8 + checkPlane*4)
+      atlasPlane.l = Peek.l(Addr BitMap(#ATLAS_BM) + 8 + checkPlane*4)
+      For checkRow.w = 0 To #MAP_H - 1
+        For checkColumn.w = firstColumn To lastColumn
+          checkGid.w = mapBuffer(checkRow*mapWidth + checkColumn)
+          If checkGid > #LOOK_FRONT_TILES
+            If checkBitmap = #PLAY_BM_A AND checkPlane = 0 Then skippedCount = skippedCount + 1
+          Else
+            atlasWord.l = 0
+            If checkGid > 0
+              atlasWord = atlasPlane + (((checkGid - 1)/#LOOK_ATLAS_COLS)*#TILE)*atlasBytesPerRow + ((checkGid - 1) MOD #LOOK_ATLAS_COLS)*2
+            EndIf
+            worldWord.l = worldPlane + (checkRow*#TILE)*worldBytesPerRow + checkColumn*2
+            For cellRow.w = 0 To #TILE - 1
+              wantedNow.w = 0
+              If atlasWord <> 0 Then wantedNow = Peek.w(atlasWord + cellRow*atlasBytesPerRow)
+              foundNow.w = Peek.w(worldWord + cellRow*worldBytesPerRow)
+              If foundNow <> wantedNow
+                differCount = differCount + 1
+                If checkWordCount < #BITMAP_CHECK_MAX
+                  checkWordPress(checkWordCount) = pressIndex
+                  checkWordBitmap(checkWordCount) = checkBitmap
+                  checkWordColumn(checkWordCount) = checkColumn
+                  checkWordRow(checkWordCount) = checkRow*#TILE + cellRow
+                  checkWordPlane(checkWordCount) = checkPlane
+                  checkWordWanted(checkWordCount) = wantedNow
+                  checkWordFound(checkWordCount) = foundNow
+                  checkWordCount = checkWordCount + 1
+                EndIf
+              EndIf
+            Next
+          EndIf
+        Next
+      Next
+    Next
+  Next
+  checkPressWords(pressIndex) = differCount
+  checkPressSkipped(pressIndex) = skippedCount
+  ; The whole area, for strays.
+  strayCount.w = 0
+  lastColumn = areaColumns - 1
+  If lastColumn > mapWidth - 1 Then lastColumn = mapWidth - 1
+  worldBytesPerRow = Peek.w(Addr BitMap(#PLAY_BM_A))
+  For pixelRow.w = 0 To #WATCH_PIXEL_ROWS - 1
+    For checkPlane = 0 To #PLAYFIELD_PLANES - 1
+      rowA.l = Peek.l(Addr BitMap(#PLAY_BM_A) + 8 + checkPlane*4) + pixelRow*worldBytesPerRow
+      rowB.l = Peek.l(Addr BitMap(#PLAY_BM_B) + 8 + checkPlane*4) + pixelRow*worldBytesPerRow
+      For pairColumn.w = 0 To lastColumn Step 2
+        If Peek.l(rowA + pairColumn*2) <> Peek.l(rowB + pairColumn*2)
+          For wordColumn.w = pairColumn To pairColumn + 1
+            wordA.w = Peek.w(rowA + wordColumn*2)
+            wordB.w = Peek.w(rowB + wordColumn*2)
+            strayBitmap.w = -1
+            If wordA = -1 AND wordB <> -1
+              If IsStrayWord{wordColumn, pixelRow, checkPlane, wordB} = True Then strayBitmap = #PLAY_BM_A
+            EndIf
+            If wordB = -1 AND wordA <> -1
+              If IsStrayWord{wordColumn, pixelRow, checkPlane, wordA} = True Then strayBitmap = #PLAY_BM_B
+            EndIf
+            If strayBitmap >= 0
+              strayCount = strayCount + 1
+              If checkStrayCount < #BITMAP_CHECK_STRAYS
+                checkStrayPress(checkStrayCount) = pressIndex
+                checkStrayBitmap(checkStrayCount) = strayBitmap
+                checkStrayColumn(checkStrayCount) = wordColumn
+                checkStrayRow(checkStrayCount) = pixelRow
+                checkStrayPlane(checkStrayCount) = checkPlane
+                checkStrayWanted(checkStrayCount) = strayWanted
+                checkStrayCount = checkStrayCount + 1
+              EndIf
+            EndIf
+          Next
+        EndIf
+      Next
+    Next
+  Next
+  checkPressStrays(pressIndex) = strayCount
+End Statement
+
+;; A word of $FFFF that WatchWorldBitmaps{} found in one world bitmap and not the other, and IsStrayWord{} passes: a candidate. A
+;; moving object with a row of one colour passes that too (1-2's lifts, for one), so a candidate is a stray only when it is
+;; seen again in the same place a sweep later: a stray stays until it is scrolled off, a moving row has gone. A new candidate is
+;; kept with the frame its row was last seen clean (-1: its row not looked at since the watch went on; -2: looked at, but not
+;; this column) and a copy of the ring, oldest frame first, in a free slot or one whose candidate was not seen again within two
+;; sweeps.
+Statement WatchSuspect{suspectBitmap.w, wordColumn.w, pixelRow.w, wordPlane.w, otherWord.w}
+  SHARED cameraX, watchFrame, watchRing(), watchFoundCount, watchFoundTotal, watchFoundFrame(), strayWanted
+  SHARED watchFoundSince(), watchFoundBitmap(), watchFoundColumn(), watchFoundRow(), watchFoundPlane(), watchFoundWanted()
+  SHARED watchFoundCamera(), watchFoundRing(), watchFoundConfirmed(), watchConfirmedTotal
+  SHARED watchRowFrame(), watchRowFirst(), watchRowLast()
+  If IsStrayWord{wordColumn, pixelRow, wordPlane, otherWord} = False Then Statement Return
+  ; Already a candidate here: seen again on a later sweep, it is a stray.
+  foundIndex.w = 0
+  If watchFoundCount > 0
+    For foundIndex = 0 To watchFoundCount - 1
+      If watchFoundBitmap(foundIndex) = suspectBitmap AND watchFoundColumn(foundIndex) = wordColumn
+        If watchFoundRow(foundIndex) = pixelRow AND watchFoundPlane(foundIndex) = wordPlane
+          If watchFoundConfirmed(foundIndex) = 0 AND watchFoundFrame(foundIndex) < watchFrame
+            watchFoundConfirmed(foundIndex) = watchFrame
+            watchConfirmedTotal = watchConfirmedTotal + 1
+          EndIf
+          Statement Return
+        EndIf
+      EndIf
+    Next
+  EndIf
+  watchFoundTotal = watchFoundTotal + 1
+  ; A free slot, else one whose candidate was not seen again within two sweeps.
+  slotIndex.w = -1
+  If watchFoundCount < #WATCH_MAX
+    slotIndex = watchFoundCount
+    watchFoundCount = watchFoundCount + 1
+  Else
+    For foundIndex = 0 To #WATCH_MAX - 1
+      If slotIndex < 0 AND watchFoundConfirmed(foundIndex) = 0
+        If watchFrame - watchFoundFrame(foundIndex) > 2*#WATCH_PIXEL_ROWS/#WATCH_ROWS_A_FRAME Then slotIndex = foundIndex
+      EndIf
+    Next
+  EndIf
+  If slotIndex < 0 Then Statement Return
+  foundIndex = slotIndex
+  sinceFrame.l = watchRowFrame(pixelRow)
+  If sinceFrame >= 0
+    If wordColumn < watchRowFirst(pixelRow) OR wordColumn > watchRowLast(pixelRow) Then sinceFrame = -2
+  EndIf
+  watchFoundConfirmed(foundIndex) = 0
+  watchFoundFrame(foundIndex) = watchFrame
+  watchFoundSince(foundIndex) = sinceFrame
+  watchFoundBitmap(foundIndex) = suspectBitmap
+  watchFoundColumn(foundIndex) = wordColumn
+  watchFoundRow(foundIndex) = pixelRow
+  watchFoundPlane(foundIndex) = wordPlane
+  watchFoundWanted(foundIndex) = strayWanted
+  watchFoundCamera(foundIndex) = Int(cameraX)
+  For ringIndex.w = 0 To #WATCH_RING - 1
+    ringFrom.l = ((watchFrame + 1 + ringIndex) MOD #WATCH_RING)*#WATCH_FIELDS
+    ringTo.l = (foundIndex*#WATCH_RING + ringIndex)*#WATCH_FIELDS
+    For fieldIndex.w = 0 To #WATCH_FIELDS - 1
+      watchFoundRing(ringTo + fieldIndex) = watchRing(ringFrom + fieldIndex)
+    Next
+  Next
+End Statement
+
+;; Once a frame from the main loop while the watch is on (F10 in debug mode): the frame's state into the ring, then
+;; #WATCH_ROWS_A_FRAME of the world's pixel rows, both bitmaps compared a long at a time, from the view's left across the view and
+;; #WATCH_AHEAD_COLUMNS more (a stray can be written ahead of the view and first seen as it scrolls in). Where
+;; they differ, a word of $FFFF in one of them goes to WatchSuspect{}. So a stray in that span is first seen within a sweep (120
+;; frames) of being written, and the ring holds what happened in between. Each row keeps the frame it was looked at and the columns
+;; it covered. The ring's numbers, in order: the frame, the camera, Mario's x and y, his state, big, lifeEvent, the area, the bitmap
+;; drawn into, the bump (on, its cell), and the objects, debris sets, fireballs and floaters active, and the cells queued for a
+;; repaint.
+Statement WatchWorldBitmaps{}
+  SHARED watchOn, watchFrame, watchFramesOn, watchNextRow, watchRowFrame(), watchRowFirst(), watchRowLast(), watchRing()
+  SHARED mapWidth, cameraX, coverKind
+  SHARED playerX, playerY, playerState, playerIsBig, lifeEvent, currentArea, drawBitmap, blockBumpActive, blockBumpCell
+  SHARED objActive(), debrisActive(), fireballActive(), floaterActive(), redrawCount
+  If watchOn = False Then Statement Return
+  watchFrame = watchFrame + 1
+  watchFramesOn = watchFramesOn + 1
+  ringAt.w = (watchFrame MOD #WATCH_RING)*#WATCH_FIELDS
+  watchRing(ringAt) = watchFrame
+  watchRing(ringAt + 1) = Int(cameraX)
+  watchRing(ringAt + 2) = playerX
+  watchRing(ringAt + 3) = playerY
+  watchRing(ringAt + 4) = playerState
+  watchRing(ringAt + 5) = playerIsBig
+  watchRing(ringAt + 6) = lifeEvent
+  watchRing(ringAt + 7) = currentArea
+  watchRing(ringAt + 8) = drawBitmap
+  watchRing(ringAt + 9) = blockBumpActive
+  watchRing(ringAt + 10) = blockBumpCell
+  activeCount.w = 0
+  For slotIndex.w = 0 To #MAX_OBJECTS - 1
+    If objActive(slotIndex) <> False Then activeCount = activeCount + 1
+  Next
+  watchRing(ringAt + 11) = activeCount
+  activeCount = 0
+  For slotIndex = 0 To #DEBRIS_SETS - 1
+    If debrisActive(slotIndex) <> False Then activeCount = activeCount + 1
+  Next
+  watchRing(ringAt + 12) = activeCount
+  activeCount = 0
+  For slotIndex = 0 To #FIREBALL_SLOTS - 1
+    If fireballActive(slotIndex) <> 0 Then activeCount = activeCount + 1
+  Next
+  watchRing(ringAt + 13) = activeCount
+  activeCount = 0
+  For slotIndex = 0 To #FLOATER_SLOTS - 1
+    If floaterActive(slotIndex) <> False Then activeCount = activeCount + 1
+  Next
+  watchRing(ringAt + 14) = activeCount
+  watchRing(ringAt + 15) = redrawCount
+  If coverKind <> #COVER_NONE Then Statement Return
+  firstColumn.w = Int(cameraX)/#TILE
+  firstColumn = firstColumn - (firstColumn MOD 2)
+  lastColumn.w = firstColumn + #VIEW_W/#TILE + #WATCH_AHEAD_COLUMNS + 1
+  If lastColumn > mapWidth - 1 Then lastColumn = mapWidth - 1
+  worldBytesPerRow.l = Peek.w(Addr BitMap(#PLAY_BM_A))
+  For rowStep.w = 0 To #WATCH_ROWS_A_FRAME - 1
+    pixelRow.w = watchNextRow
+    watchNextRow = watchNextRow + 1
+    If watchNextRow >= #WATCH_PIXEL_ROWS Then watchNextRow = 0
+    For planeIndex.w = 0 To #PLAYFIELD_PLANES - 1
+      rowA.l = Peek.l(Addr BitMap(#PLAY_BM_A) + 8 + planeIndex*4) + pixelRow*worldBytesPerRow
+      rowB.l = Peek.l(Addr BitMap(#PLAY_BM_B) + 8 + planeIndex*4) + pixelRow*worldBytesPerRow
+      For pairColumn.w = firstColumn To lastColumn Step 2
+        If Peek.l(rowA + pairColumn*2) <> Peek.l(rowB + pairColumn*2)
+          For wordColumn.w = pairColumn To pairColumn + 1
+            wordA.w = Peek.w(rowA + wordColumn*2)
+            wordB.w = Peek.w(rowB + wordColumn*2)
+            If wordA <> wordB
+              If wordA = -1 Then WatchSuspect{#PLAY_BM_A, wordColumn, pixelRow, planeIndex, wordB}
+              If wordB = -1 Then WatchSuspect{#PLAY_BM_B, wordColumn, pixelRow, planeIndex, wordA}
+            EndIf
+          Next
+        EndIf
+      Next
+    Next
+    watchRowFrame(pixelRow) = watchFrame
+    watchRowFirst(pixelRow) = firstColumn
+    watchRowLast(pixelRow) = lastColumn + 1
+  Next
+End Statement
+
+;; Restore the level to its initial state: blocks, items, player position.
+;; Called from ReadControls{} on F1. The buffers were snapshotted at startup in
+;; sparkydave.init.blitz.ab3, so this copies them back and re-stamps the
+;; playfields. The caller is responsible for re-drawing the player afterwards,
+;; because DrawPlayer{} lives in sparkydave.player.blitz.ab3 which is included
+;; after this file -- calling it here would be a forward reference.
+Statement ResetLevel{}
+  SHARED mapBuffer(), mapBufferBackup(), metatileBuffer(), metatileBufferBackup()
+  SHARED objActive(), objType(), objVelY(), objRiseRemaining(), objRiseStep()
+  SHARED objRiseTarget(), objFractionY(), objSourceCell(), objPopTimer()
+  SHARED cameraX, debrisActive(), debrisNextSet, floaterActive(), stompChain
+  SHARED multiCoinStarted(), multiCoinIntervals(), intervalPhase
+  SHARED hiddenBlockLive(), hiddenOneUpFlag, fireballActive(), fireballCounter, playerThrowTimer
+  SHARED playerStarIntervals, playerHidden, poleNumberShown, endTask, fireworkActive()
+  SHARED currentArea, areaEvent, pipeOccludeCols, currentAreaType, startAreaType, currentAreaScenery, startAreaScenery
+  SHARED drawBitmap, drawBuffer, redrawCount, redrawDoneA, redrawDoneB
+  SHARED vineColumnX, playerClimbing, climbAutoUp, climbAreaChange, vineWalkOut, playerCrouching, castleEndTask, bridgeCollapseStep
+  SHARED castleWalkReady, castleTextWanted, castleMessageTicks, warpPipeTaken, warpLevelTarget
+  MarkTransition{"ResetLevel: begin"}
+  warpPipeTaken = -1
+  warpLevelTarget = -1
+  ; No vine, and not on one (the area is made again): the sky bonus's own is started after, by its way in.
+  vineColumnX = -1
+  ;; Not crouching: the cartridge clears its RAM when an area starts (InitializeArea), and the crouch only follows Down while he is on the
+  ;; ground, so a big Mario who went down a pipe crouching fell into the bonus room still crouched.
+  playerCrouching = False
+  playerClimbing = False
+  climbAutoUp = False
+  climbAreaChange = False
+  vineWalkOut = False
+  For copyCell = 0 To #MAP_CELLS - 1
+    mapBuffer(copyCell) = mapBufferBackup(copyCell)
+    metatileBuffer(copyCell) = metatileBufferBackup(copyCell)
+  Next
+  redrawCount = 0
+  redrawDoneA = False
+  redrawDoneB = False
+  For copyCell = 0 To #DEBRIS_SETS - 1
+    debrisActive(copyCell) = False
+  Next
+  debrisNextSet = 0
+  stompChain = 0
+  For copyCell = 0 To #FLOATER_SLOTS - 1
+    floaterActive(copyCell) = False
+  Next
+  For copyCell = 0 To #MAX_MULTI_COINS - 1
+    multiCoinStarted(copyCell) = False
+    multiCoinIntervals(copyCell) = 0
+  Next
+  intervalPhase = #INTERVAL_PERIOD - 1
+  For copyCell = 0 To #FIREBALL_SLOTS - 1
+    fireballActive(copyCell) = 0
+  Next
+  fireballCounter = 0
+  playerThrowTimer = 0
+  ;; The Starman is not cleared here: a pipe or a vine to another area keeps it (the cartridge clears StarInvincibleTimer only when a new
+  ;; level's timer is fetched, Entrance_GameTimerSetup, smbdis 2873); a restart, a death and the title clear it themselves.
+  playerHidden = False
+  currentArea = #AREA_MAIN
+  currentAreaType = startAreaType
+  currentAreaScenery = startAreaScenery
+  areaEvent = 0
+  pipeOccludeCols = 0
+  poleNumberShown = False
+  endTask = 0
+  castleEndTask = 0
+  bridgeCollapseStep = 0
+  castleWalkReady = False
+  castleTextWanted = 0
+  castleMessageTicks = 0
+  For copyCell = 0 To #FIREWORK_SLOTS - 1
+    fireworkActive(copyCell) = False
+  Next
+  ; Hidden blocks are built again as the screen reaches them, if the flag allows.
+  For copyCell = 0 To #MAX_HIDDEN_BLOCKS - 1
+    hiddenBlockLive(copyCell) = False
+  Next
+  If #HIDDEN_ONEUP_ONCE = 0 Then hiddenOneUpFlag = True
+  ; Clear all pool slots
+  For copyCell = 0 To #MAX_OBJECTS - 1
+    objActive(copyCell) = False
+    objType(copyCell) = #OBJ_NONE
+    objVelY(copyCell) = 0
+    objRiseRemaining(copyCell) = 0
+    objRiseStep(copyCell) = 0
+    objRiseTarget(copyCell) = 0
+    objFractionY(copyCell) = 0
+    objSourceCell(copyCell) = 0
+    objPopTimer(copyCell) = 0
+  Next
+  cameraX = 0
+  MarkTransition{"ResetLevel: cells and objects cleared"}
+  ;; The state only: the caller stamps the playfields (StampBothPlayfields{}) when it is done
+  ;; with the map, so the way into the bonus room, which loads another map, does not stamp the
+  ;; main level for nothing. Then DrawPlayer{} runs in DrawFrame{} next tick, so the reset
+  ;; buffer is ready before the player is drawn into it.
+End Statement
+
+;; END OF MAP DRAW (BLITZ MODE)

@@ -1,0 +1,320 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; hw-scroll.ab3 -- hardware-scroll proof. Compile in UAE. Not part of the game.
+;;
+;; One 4-plane bitmap, 213 tiles wide (3408 px). The display window moves with
+;; DisplayBitMap x (a quick). Tiles are stamped once. The actor is a bob:
+;; UnBuffer then BBlit, no full-screen copy, no hardware sprite.
+;;
+;; Keys
+;;   Left / Right   move 2 px
+;;   Up / Down      move 16 px
+;;   1              smooth-scroll flag only (DisplayAdjust 0,0,0,0,0)
+;;   2              widen:  fetch +2, DDFSTRT -8, DIWSTRT -16
+;;   3              narrow: fetch -2, DDFSTRT +8, DIWSTRT +16
+;;   A / Z          fetch width +2 / -2 bytes (16 px)
+;;   S / X          DDFSTRT -8 / +8
+;;   D / C          DIWSTRT -16 / +16
+;;   Esc            quit
+;; 1, 2, 3 and the nudge keys rebuild the coplist. The picture may flicker.
+;;
+;; What to look at
+;; Color 0 is magenta and is never written into the bitmap. Magenta on screen
+;; is the border, outside the display window.
+;; White pillars sit on tile columns 0, 10, 20, ... Coloured bricks between
+;; them are digits 1..9. At camX = 0 a 320-wide window shows columns 0..19:
+;; two white pillars, ending on the grey digit-9 brick, and no third pillar.
+;; A third white pillar means the picture is wider than 320. Ending inside
+;; the second group of bricks means it is narrower.
+;; Hold Up until scrolling stops. camX max is 3072, so a 320-wide window ends
+;; on the last yellow pixel (x = 3391). A red column after the yellow means
+;; the window is wider than 320 (it has reached the poison column at x = 3392).
+;; The bob's corners are pen 0 (transparent). Moving must not leave a trail.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_1     = $01
+#RAW_KEY_2     = $02
+#RAW_KEY_3     = $03
+#RAW_KEY_A     = $20
+#RAW_KEY_S     = $21
+#RAW_KEY_D     = $22
+#RAW_KEY_Z     = $31
+#RAW_KEY_X     = $32
+#RAW_KEY_C     = $33
+#RAW_KEY_UP    = $4c
+#RAW_KEY_DOWN  = $4d
+#RAW_KEY_ESC   = $45
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_LEFT  = $4f
+
+;; $4 + $10 + $10000 = 4 planes, smooth scroll, AGA palette.
+#COPPER_COLORS = 16
+#COPPER_YPOS   = 44
+#COPPER_H      = 256
+#COPPER_FLAGS  = $10014
+
+#TILE     = 16
+#COLS     = 213
+#VIEW_W   = 320
+#BM_H     = 256
+#ANCHOR   = 80
+#BOB_Y    = 72
+#STEP     = 2
+#STEP_FAST = 16
+;; 213*16 = 3408. Max cam keeps a 336-wide fetch inside the bitmap.
+;; 3072+320 = 3392 (first poison pixel). 3072+336 = 3408 (end).
+#CAM_MAX  = 3072
+#BM_W     = 3408
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+adjLock.w = False
+adjNew.w = False
+adjHit.w = 0
+adjFetch.w = 0
+adjDdfS.w = 0
+adjDdfE.w = 0
+adjDiwS.w = 0
+adjDiwE.w = 0
+camX.q = 0
+camMax.q = #CAM_MAX
+bobX.w = #ANCHOR
+col.w = 0
+tileX.w = 0
+pen.w = 0
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap 0, #BM_W, #BM_H, 4
+BitMap 1, #TILE, #TILE, 4
+InitPalette 0, #COPPER_COLORS
+;; 0 border (not used on the bitmap). 1 sky. 2 white pillar. 3 yellow end.
+;; 4 red poison. 5 green left edge. 6..14 digit bricks. 15 bob and ground.
+AGAPalRGB 0, 0, 255, 0, 255
+AGAPalRGB 0, 1, 92, 148, 252
+AGAPalRGB 0, 2, 255, 255, 255
+AGAPalRGB 0, 3, 255, 220, 0
+AGAPalRGB 0, 4, 220, 0, 0
+AGAPalRGB 0, 5, 0, 200, 0
+AGAPalRGB 0, 6, 0, 70, 170
+AGAPalRGB 0, 7, 0, 150, 40
+AGAPalRGB 0, 8, 170, 70, 0
+AGAPalRGB 0, 9, 160, 0, 160
+AGAPalRGB 0, 10, 0, 160, 160
+AGAPalRGB 0, 11, 170, 170, 0
+AGAPalRGB 0, 12, 70, 70, 220
+AGAPalRGB 0, 13, 230, 120, 0
+AGAPalRGB 0, 14, 190, 190, 190
+AGAPalRGB 0, 15, 255, 60, 60
+InitShape 0, #TILE, #TILE, 4
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, 4096
+
+Statement ApplyCopper{}
+  SHARED camX, adjFetch, adjDdfS, adjDdfE, adjDiwS, adjDiwE
+  InitCopList 0, #COPPER_YPOS, #COPPER_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+  DisplayAdjust 0, adjFetch, adjDdfS, adjDdfE, adjDiwS, adjDiwE
+  CreateDisplay 0
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, 0, camX, 0
+End Statement
+
+Statement ReadAdjust{}
+  SHARED adjLock, adjNew, adjHit
+  SHARED adjFetch, adjDdfS, adjDdfE, adjDiwS, adjDiwE
+  adjNew = False
+  adjHit = 0
+  If RawStatus(#RAW_KEY_1) Then adjHit = 1
+  If RawStatus(#RAW_KEY_2) Then adjHit = 2
+  If RawStatus(#RAW_KEY_3) Then adjHit = 3
+  If RawStatus(#RAW_KEY_A) Then adjHit = 4
+  If RawStatus(#RAW_KEY_Z) Then adjHit = 5
+  If RawStatus(#RAW_KEY_S) Then adjHit = 6
+  If RawStatus(#RAW_KEY_X) Then adjHit = 7
+  If RawStatus(#RAW_KEY_D) Then adjHit = 8
+  If RawStatus(#RAW_KEY_C) Then adjHit = 9
+  If adjHit = 0
+    adjLock = False
+  Else
+    If adjLock = False
+      adjLock = True
+      adjNew = True
+      If adjHit = 1
+        adjFetch = 0
+        adjDdfS = 0
+        adjDdfE = 0
+        adjDiwS = 0
+        adjDiwE = 0
+      EndIf
+      If adjHit = 2
+        adjFetch = 2
+        adjDdfS = -8
+        adjDdfE = 0
+        adjDiwS = -16
+        adjDiwE = 0
+      EndIf
+      If adjHit = 3
+        adjFetch = -2
+        adjDdfS = 8
+        adjDdfE = 0
+        adjDiwS = 16
+        adjDiwE = 0
+      EndIf
+      If adjHit = 4 Then adjFetch = adjFetch + 2
+      If adjHit = 5 Then adjFetch = adjFetch - 2
+      If adjHit = 6 Then adjDdfS = adjDdfS - 8
+      If adjHit = 7 Then adjDdfS = adjDdfS + 8
+      If adjHit = 8 Then adjDiwS = adjDiwS - 16
+      If adjHit = 9 Then adjDiwS = adjDiwS + 16
+    EndIf
+  EndIf
+End Statement
+
+;; Sky is pen 1. Pen 0 stays the magenta border only.
+Use BitMap 0
+Cls 1
+For col = 0 To #COLS - 1
+  tileX = col*#TILE
+  If (col MOD 10) = 0
+    Boxf tileX, 0, tileX + 15, 120, 2
+  Else
+    pen = 5 + (col MOD 10)
+    Boxf tileX + 1, 64, tileX + 14, 96, pen
+  EndIf
+  pen = 6
+  If (col MOD 2) = 1 Then pen = 15
+  Boxf tileX, 220, tileX + 15, #BM_H - 1, pen
+Next
+;; Yellow end cap, then the red poison column past a 320-wide window.
+Boxf 3360, 0, 3391, #BM_H - 1, 3
+Boxf 3392, 0, #BM_W - 1, #BM_H - 1, 4
+Boxf 0, 0, 3, #BM_H - 1, 5
+
+Use BitMap 1
+Cls 0
+Boxf 2, 0, 13, 15, 15
+Boxf 0, 2, 15, 13, 15
+Boxf 5, 5, 10, 10, 12
+GetaShape 0, 0, 0, #TILE, #TILE
+
+Use BitMap 0
+BBlitMode CookieMode
+ApplyCopper{}
+BBlit 0, 0, bobX, #BOB_Y
+
+While quitFlag = False
+  ReadAdjust{}
+  If adjNew = True
+    ApplyCopper{}
+  EndIf
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  UnBuffer 0
+  If RawStatus(#RAW_KEY_RIGHT) Then camX = camX + #STEP
+  If RawStatus(#RAW_KEY_LEFT) Then camX = camX - #STEP
+  If RawStatus(#RAW_KEY_UP) Then camX = camX + #STEP_FAST
+  If RawStatus(#RAW_KEY_DOWN) Then camX = camX - #STEP_FAST
+  If camX < 0 Then camX = 0
+  If camX > camMax Then camX = camMax
+  bobX = camX + #ANCHOR
+  Use BitMap 0
+  BBlit 0, 0, bobX, #BOB_Y
+  VWait
+  DisplayBitMap 0, 0, camX, 0
+Wend
+
+AMIGA
+End

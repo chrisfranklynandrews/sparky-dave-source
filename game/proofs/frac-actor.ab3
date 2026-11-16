@@ -1,0 +1,395 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; frac-actor.ab3 -- does a fractional camera make a locked-on actor wobble?
+;; Compile in UAE. Not part of the game. Phase 4 proof for
+;; the renderer-engine-architecture-reset plan (git history) and the main project's RENDERER_CONTRACT note.
+;;
+;; Same two-list display as hud-split.ab3 (HUD on top, wide world below). A
+;; 16x16 bob runs right through the sky at the game scroll maths: speed in
+;; 1/16 px per frame, a separate 1/256 fraction accumulator for player and camera,
+;; the camera locked on once the bob reaches screen x 112. The bob is blitted at
+;; whole world pixels into the world bitmap, like the game does.
+;;
+;; The display origin is the only thing that changes:
+;;   integer mode    DisplayBitMap x = cameraX
+;;   fractional mode DisplayBitMap x = cameraX + fraction/256
+;;
+;; Two white ticks on the HUD, at screen x 112 and 127, mark where a locked bob
+;; should sit. A green block on the HUD means integer mode, red means fractional.
+;;
+;; Keys
+;;   1   speed 8   (0.5 px per frame)
+;;   2   speed 24  (1.5 px per frame, SMB walk)
+;;   3   speed 40  (2.5 px per frame, SMB run)
+;;   4   speed 12  (0.75 px per frame)
+;;   0   stop
+;;   M   switch integer / fractional display origin
+;;   Esc quit
+;;
+;; What to look at
+;; 1. Run at speed 2 in integer mode. The bob left edge should sit on the left
+;;    tick and its right edge on the right tick, steady.
+;; 2. Press M for fractional. Does the bob now creep or shimmer against the ticks
+;;    (a slow sawtooth drift of under a pixel) or stay steady?
+;; 3. Does the world itself scroll more smoothly in fractional mode, enough to
+;;    be worth any actor wobble? Try 0.5 and 0.75 px per frame, where whole-pixel
+;;    scrolling steps unevenly.
+;; 4. Camera reaches its end, the bob runs on to the right edge, then restarts.
+;; On exit the proof writes frac-actor-results.txt: Chip RAM at launch, after
+;; the bitmaps, and live with the display up (frame 100), plus the final mode.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_0     = $0a
+#RAW_KEY_1     = $01
+#RAW_KEY_2     = $02
+#RAW_KEY_3     = $03
+#RAW_KEY_4     = $04
+#RAW_KEY_M     = $37
+#RAW_KEY_ESC   = $45
+
+#COPPER_COLORS = 16
+#COPPER_FLAGS  = $10014
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#WORLD_YPOS = 63
+#WORLD_H    = 240
+
+#TILE     = 16
+#COLS     = 213
+#VIEW_W   = 320
+#BM_W     = 3408
+#CAM_MAX  = 3072
+#LOCK_X   = 112
+#BOB_Y    = 140
+#START_X  = 112
+#END_X    = 3376
+#BOB_BYTES = 16384
+#MEM_FRAME = 100
+
+;; Bitmaps: 0 and 1 world pair, 2 HUD, 3 bob source.
+#BM_A   = 0
+#BM_B   = 1
+#BM_HUD = 2
+#BM_BOB = 3
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+mLock.w = False
+fracMode.w = False
+playerX.w = #START_X
+playerFrac.w = 0
+playerSpeed.w = 24
+camX.w = 0
+camFrac.w = 0
+viewX.q = 0
+drawBm.w = #BM_B
+drawBuf.w = 1
+dispBm.w = #BM_A
+frame.w = 0
+col.w = 0
+tileX.w = 0
+pen.w = 0
+memStart.l = 0
+memAlloc.l = 0
+memLive.l = 0
+memStartBig.l = 0
+memAllocBig.l = 0
+memLiveBig.l = 0
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+memStart = AvailMem_(2)
+memStartBig = AvailMem_($20002)
+BitMap #BM_A, #BM_W, #WORLD_H, 4
+BitMap #BM_B, #BM_W, #WORLD_H, 4
+BitMap #BM_HUD, #VIEW_W, #HUD_H, 4
+BitMap #BM_BOB, #TILE, #TILE, 4
+memAlloc = AvailMem_(2)
+memAllocBig = AvailMem_($20002)
+InitPalette 0, #COPPER_COLORS
+;; Pen 0 is the sky blue, so the seam between the lists blends in.
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 92, 148, 252
+AGAPalRGB 0, 2, 255, 255, 255
+AGAPalRGB 0, 3, 255, 220, 0
+AGAPalRGB 0, 4, 220, 0, 0
+AGAPalRGB 0, 5, 0, 200, 0
+AGAPalRGB 0, 6, 0, 70, 170
+AGAPalRGB 0, 7, 0, 150, 40
+AGAPalRGB 0, 8, 170, 70, 0
+AGAPalRGB 0, 9, 160, 0, 160
+AGAPalRGB 0, 10, 0, 160, 160
+AGAPalRGB 0, 11, 170, 170, 0
+AGAPalRGB 0, 12, 70, 70, 220
+AGAPalRGB 0, 13, 230, 120, 0
+AGAPalRGB 0, 14, 190, 190, 190
+AGAPalRGB 0, 15, 255, 60, 60
+InitShape 0, #TILE, #TILE, 4
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+Statement ApplyDisplay{}
+  InitCopList 0, #HUD_YPOS, #HUD_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+  InitCopList 1, #WORLD_YPOS, #WORLD_H, #COPPER_FLAGS, 8, 0, 0
+  CreateDisplay 0, 1
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, #BM_HUD, 0, 0
+  DisplayBitMap 1, #BM_A, 0, 0
+End Statement
+
+;; Same backdrop as hud-split.ab3 so the scroll is easy to judge.
+Statement StampWorld{bm.w}
+  SHARED col, tileX, pen
+  Use BitMap bm
+  Cls 1
+  For col = 0 To #COLS - 1
+    tileX = col*#TILE
+    If (col MOD 10) = 0
+      Boxf tileX, 0, tileX + 15, 120, 2
+    Else
+      pen = 5 + (col MOD 10)
+      Boxf tileX + 1, 64, tileX + 14, 96, pen
+    EndIf
+    pen = 6
+    If (col MOD 2) = 1 Then pen = 15
+    Boxf tileX, 204, tileX + 15, #WORLD_H - 1, pen
+  Next
+  Boxf 3360, 0, 3391, #WORLD_H - 1, 3
+  Boxf 0, 0, 3, #WORLD_H - 1, 5
+End Statement
+
+;; HUD: fixed ticks at the lock position and a mode block.
+Statement DrawHud{}
+  SHARED fracMode
+  Use BitMap #BM_HUD
+  Cls 1
+  Boxf #LOCK_X, 0, #LOCK_X, #HUD_H - 1, 2
+  Boxf #LOCK_X + 15, 0, #LOCK_X + 15, #HUD_H - 1, 2
+  For tickX.w = 2 To 17
+    Boxf tickX*16, 12, tickX*16, #HUD_H - 1, 2
+  Next
+  If fracMode = True
+    Boxf 224, 2, 255, 13, 4
+  Else
+    Boxf 224, 2, 255, 13, 5
+  EndIf
+End Statement
+
+;; One tick of the game scroll maths: speed in 1/16 px, 1/256 fraction.
+Statement StepSim{}
+  SHARED playerX, playerFrac, playerSpeed, camX, camFrac
+  fracAdd.w = (playerSpeed AND $0f)*16
+  pixAdd.w = playerSpeed/16
+  playerFrac = playerFrac + fracAdd
+  carry.w = 0
+  If playerFrac >= 256
+    playerFrac = playerFrac - 256
+    carry = 1
+  EndIf
+  playerX = playerX + pixAdd + carry
+  If playerX - camX >= #LOCK_X
+    camFrac = camFrac + fracAdd
+    camCarry.w = 0
+    If camFrac >= 256
+      camFrac = camFrac - 256
+      camCarry = 1
+    EndIf
+    camX = camX + pixAdd + camCarry
+  EndIf
+  If camX >= #CAM_MAX
+    camX = #CAM_MAX
+    camFrac = 0
+  EndIf
+  If playerX >= #END_X
+    playerX = #START_X
+    playerFrac = 0
+    camX = 0
+    camFrac = 0
+  EndIf
+End Statement
+
+;; Bob source: white edge columns, blue core, transparent corners (pen 0).
+Use BitMap #BM_BOB
+Cls 0
+Boxf 2, 0, 13, 15, 15
+Boxf 0, 2, 15, 13, 15
+Boxf 0, 2, 0, 13, 2
+Boxf 15, 2, 15, 13, 2
+Boxf 5, 5, 10, 10, 12
+GetaShape 0, 0, 0, #TILE, #TILE
+
+StampWorld{#BM_A}
+StampWorld{#BM_B}
+DrawHud{}
+ApplyDisplay{}
+BBlitMode CookieMode
+Use BitMap #BM_A
+BBlit 0, 0, playerX, #BOB_Y
+Use BitMap #BM_B
+BBlit 1, 0, playerX, #BOB_Y
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_1) Then playerSpeed = 8
+  If RawStatus(#RAW_KEY_2) Then playerSpeed = 24
+  If RawStatus(#RAW_KEY_3) Then playerSpeed = 40
+  If RawStatus(#RAW_KEY_4) Then playerSpeed = 12
+  If RawStatus(#RAW_KEY_0) Then playerSpeed = 0
+
+  If RawStatus(#RAW_KEY_M)
+    If mLock = False
+      mLock = True
+      If fracMode = True
+        fracMode = False
+      Else
+        fracMode = True
+      EndIf
+      DrawHud{}
+    EndIf
+  Else
+    mLock = False
+  EndIf
+
+  StepSim{}
+  viewX = camX
+  If fracMode = True Then viewX = camX + camFrac*0.00390625
+
+  Use BitMap drawBm
+  UnBuffer drawBuf
+  BBlit drawBuf, 0, playerX, #BOB_Y
+
+  VWait
+  DisplayBitMap 1, drawBm, viewX, 0
+  dispBm = drawBm
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+
+  frame = frame + 1
+  If frame = #MEM_FRAME
+    memLive = AvailMem_(2)
+    memLiveBig = AvailMem_($20002)
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/frac-actor-results.txt")
+  FileOutput 0
+  NPrint "frac-actor chip RAM (bytes)"
+  NPrint ""
+  NPrint "                 free chip   largest block"
+  NPrint "launch          ", memStart, "  ", memStartBig
+  NPrint "after bitmaps   ", memAlloc, "  ", memAllocBig
+  NPrint "live, frame 100 ", memLive, "  ", memLiveBig
+  NPrint ""
+  NPrint "bitmaps cost    ", memStart - memAlloc
+  NPrint "display lists   ", memAlloc - memLive
+  If fracMode = True
+    NPrint "fractional mode on at exit"
+  Else
+    NPrint "integer mode on at exit"
+  EndIf
+  NPrint "speed at exit: ", playerSpeed
+  CloseFile 0
+EndIf
+End

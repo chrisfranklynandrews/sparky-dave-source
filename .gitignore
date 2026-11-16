@@ -1,0 +1,35 @@
+# The graphics and the level files come from the released lha (S/get-graphics): never commit them.
+game/assets/*
+!game/assets/README.md
+*.iff
+*.lha
+*.lzx
+*.adf
+
+# ROMs and dumps
+*.nes
+*.sfc
+*.smc
+
+# Built programs and what the compile and test scripts write
+compiled/
+game/*.log
+game/tests/*.log
+game/tests/*-results*.txt
+game/*-report*.txt
+game/SparkyDave.settings
+game/proofs/*-results*.txt
+game/proofs/results/
+
+# WinUAE's sidecar files
+*.uaem
+
+# Third-party manuals
+game/docs/*.guide
+
+# OS and Python
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+desktop.ini

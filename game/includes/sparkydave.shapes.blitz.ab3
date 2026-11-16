@@ -1,0 +1,212 @@
+;; =======================================================
+;; ACTOR SHAPES (BLITZ MODE)
+;; =======================================================
+
+;; Every animation frame of Mario, the Goomba, the mushroom, the coin and the flag is cut once into its own
+;; shape slot at start, and the draw routines only BBlit from those slots; cutting every frame costs far more
+;; raster time. The slots are the #PRE_* constants; init.ab3 allocates them.
+;; Left-facing Mario is a second set, cut and flipped once.
+;; Each statement needs its sheet bitmap loaded, so a program that has only some of
+;; the sheets calls only the matching statements.
+
+Statement CutSmallMarioShapes{}
+  SHARED preFrame
+  Use BitMap #MARIO_BM
+  For preFrame = 0 To #PRE_SMALL_FRAMES - 1
+    GetaShape #PRE_SMALL_R + preFrame, preFrame*#TILE, 0, #TILE, #TILE
+    GetaShape #PRE_SMALL_L + preFrame, preFrame*#TILE, 0, #TILE, #TILE
+    XFlip #PRE_SMALL_L + preFrame
+  Next
+End Statement
+
+Statement CutBigMarioShapes{}
+  SHARED preFrame
+  Use BitMap #MARIO_BIG_BM
+  For preFrame = 0 To #PRE_BIG_FRAMES - 1
+    GetaShape #PRE_BIG_R + preFrame, preFrame*#TILE, 0, #TILE, #MARIO_BIG_H
+    GetaShape #PRE_BIG_L + preFrame, preFrame*#TILE, 0, #TILE, #MARIO_BIG_H
+    XFlip #PRE_BIG_L + preFrame
+  Next
+End Statement
+
+;; Goomba frames 0 and 1 are the walk, 2 the squash; the art is the bottom half of
+;; the 32 px cell, so y is 16.
+Statement CutEnemyShapes{}
+  SHARED preFrame
+  Use BitMap #ENEMIES_BM
+  For preFrame = 0 To #PRE_GOOMBA_FRAMES - 1
+    GetaShape #PRE_GOOMBA + preFrame, preFrame*#GOOMBA_W, 16, #GOOMBA_W, #GOOMBA_H
+  Next
+  ; The Goomba upside down, for one thrown off by a shell.
+  GetaShape #PRE_GOOMBA_FLIP, 0, 16, #GOOMBA_W, #GOOMBA_H
+  YFlip #PRE_GOOMBA_FLIP
+  ;; The Koopa: the art faces left, so the first two shapes are the sheet's two
+  ;; walk frames and the next two the same turned for walking right. Art is the
+  ;; bottom 24 of the 32 px cell.
+  For preFrame = 0 To 1
+    GetaShape #PRE_KOOPA + preFrame, (#KOOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    GetaShape #PRE_KOOPA + 2 + preFrame, (#KOOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    XFlip #PRE_KOOPA + 2 + preFrame
+  Next
+  ; The shell, the bottom 16, and upside down.
+  GetaShape #PRE_SHELL, #SHELL_SHEET_CELL*#KOOPA_W, 16, #TILE, #TILE
+  GetaShape #PRE_SHELL_FLIP, #SHELL_SHEET_CELL*#KOOPA_W, 16, #TILE, #TILE
+  YFlip #PRE_SHELL_FLIP
+  ; The Red Koopa, the same cuts from the red cells appended to the sheet.
+  For preFrame = 0 To 1
+    GetaShape #PRE_RED_KOOPA + preFrame, (#RED_KOOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    GetaShape #PRE_RED_KOOPA + 2 + preFrame, (#RED_KOOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    XFlip #PRE_RED_KOOPA + 2 + preFrame
+  Next
+  GetaShape #PRE_RED_SHELL, #RED_SHELL_SHEET_CELL*#KOOPA_W, 16, #TILE, #TILE
+  GetaShape #PRE_RED_SHELL_FLIP, #RED_SHELL_SHEET_CELL*#KOOPA_W, 16, #TILE, #TILE
+  YFlip #PRE_RED_SHELL_FLIP
+  ; The Green Paratroopa, the winged Koopa's two frames from the sheet's own cells, facing left then right.
+  For preFrame = 0 To 1
+    GetaShape #PRE_PARATROOPA + preFrame, (#PARATROOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    GetaShape #PRE_PARATROOPA + 2 + preFrame, (#PARATROOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    XFlip #PRE_PARATROOPA + 2 + preFrame
+  Next
+  ; The large lift, one shape from the appended copies of the platform segment (the items sheet is the bitmap in use below).
+  Use BitMap #ITEMS_BM
+  GetaShape #PRE_LIFT, #LIFT_SHEET_X, 0, #LIFT_W, #LIFT_H
+  GetaShape #PRE_CLOUD_LIFT, #CLOUD_LIFT_SHEET_X, 0, #LIFT_W, #LIFT_H
+  GetaShape #PRE_SMALL_LIFT, #SMALL_LIFT_SHEET_X, 0, #SMALL_LIFT_W, #LIFT_H
+  GetaShape #PRE_CASTLE_LIFT, #CASTLE_LIFT_SHEET_X, 0, #CASTLE_LIFT_W, #LIFT_H
+  ; The jumpspring's five pictures: the sheet's first five cells.
+  For preFrame = 0 To #SPRING_FRAMES - 1
+    GetaShape #PRE_SPRING + preFrame, preFrame*#TILE, 0, #TILE, #TILE
+  Next
+  ; The vine's two pictures, the curled top and the body.
+  GetaShape #PRE_VINE, #VINE_SHEET_TOP_X, #VINE_SHEET_Y, #TILE, #TILE
+  GetaShape #PRE_VINE + 1, #VINE_SHEET_BODY_X, #VINE_SHEET_Y, #TILE, #TILE
+  Use BitMap #ENEMIES_BM
+  ; The Piranha Plant's two frames, the bottom 24 of the 32 px cells.
+  For preFrame = 0 To 1
+    GetaShape #PRE_PIRANHA + preFrame, (#PIRANHA_SHEET_CELL + preFrame)*#PLANT_W, 8, #PLANT_W, #PLANT_H
+  Next
+  ; Knocked off: the first frame upside down.
+  GetaShape #PRE_PIRANHA + 2, #PIRANHA_SHEET_CELL*#PLANT_W, 8, #PLANT_W, #PLANT_H
+  YFlip #PRE_PIRANHA + 2
+  ;; The Bloober: squeezed (the top 24 rows of its cell, the cartridge's frame with its blank top row) and stretched (the bottom
+  ;; 24), and beaten, squeezed upside down.
+  GetaShape #PRE_BLOOBER, #BLOOBER_SQUEEZED_CELL*#BLOOBER_W, 0, #BLOOBER_W, #BLOOBER_H
+  GetaShape #PRE_BLOOBER + 1, #BLOOBER_STRETCHED_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  GetaShape #PRE_BLOOBER + 2, #BLOOBER_SQUEEZED_CELL*#BLOOBER_W, 0, #BLOOBER_W, #BLOOBER_H
+  YFlip #PRE_BLOOBER + 2
+  ;; The Cheep-Cheep: grey's two frames, red's two (the bottom 24 rows of the cells: the cartridge's figure, its top row blank), then
+  ;; grey's and red's first upside down.
+  For preFrame = 0 To 1
+    GetaShape #PRE_CHEEP + preFrame, (#CHEEP_GREY_CELL + preFrame)*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+    GetaShape #PRE_CHEEP + 2 + preFrame, (#CHEEP_RED_CELL + preFrame)*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  Next
+  GetaShape #PRE_CHEEP + 4, #CHEEP_GREY_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  YFlip #PRE_CHEEP + 4
+  GetaShape #PRE_CHEEP + 5, #CHEEP_RED_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  YFlip #PRE_CHEEP + 5
+  ; The flying Cheep-Cheep facing right: red's two frames flipped, and its first upside down.
+  For preFrame = 0 To 1
+    GetaShape #PRE_FLY_CHEEP + preFrame, (#CHEEP_RED_CELL + preFrame)*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+    XFlip #PRE_FLY_CHEEP + preFrame
+  Next
+  GetaShape #PRE_FLY_CHEEP + 2, #CHEEP_RED_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  XFlip #PRE_FLY_CHEEP + 2
+  YFlip #PRE_FLY_CHEEP + 2
+  ;; The Podoboo: upright, then flipped (falling or knocked); the bottom 24 rows of its cell, as the Cheep-Cheep's.
+  ;; Bowser: front mouth open, rear feet one way, the other, front mouth shut (cells #BOWSER_CELL on), facing left; the same facing right;
+  ;; then upside down the front shut and the rear, facing left, then right; then his flame's two pictures (24 x 8).
+  For preFrame = 0 To 3
+    GetaShape #PRE_BOWSER + preFrame, (#BOWSER_CELL + preFrame)*16, 0, 16, 32
+    GetaShape #PRE_BOWSER + 4 + preFrame, (#BOWSER_CELL + preFrame)*16, 0, 16, 32
+    XFlip #PRE_BOWSER + 4 + preFrame
+  Next
+  GetaShape #PRE_BOWSER + 8, (#BOWSER_CELL + 3)*16, 0, 16, 32
+  YFlip #PRE_BOWSER + 8
+  GetaShape #PRE_BOWSER + 9, (#BOWSER_CELL + 1)*16, 0, 16, 32
+  YFlip #PRE_BOWSER + 9
+  GetaShape #PRE_BOWSER + 10, (#BOWSER_CELL + 3)*16, 0, 16, 32
+  XFlip #PRE_BOWSER + 10
+  YFlip #PRE_BOWSER + 10
+  GetaShape #PRE_BOWSER + 11, (#BOWSER_CELL + 1)*16, 0, 16, 32
+  XFlip #PRE_BOWSER + 11
+  YFlip #PRE_BOWSER + 11
+  GetaShape #PRE_BOWSER + 12, (#BOWSER_CELL + 4)*16, 0, 24, 8
+  GetaShape #PRE_BOWSER + 13, (#BOWSER_CELL + 4)*16, 8, 24, 8
+  ; The castles' retainers: Robocod (world 1) and Zool (world 2).
+  GetaShape #PRE_RETAINER, #RETAINER_CELL*16, 0, 16, 32
+  GetaShape #PRE_RETAINER_ZOOL, #RETAINER_ZOOL_CELL*16, 0, 16, 32
+  ; The Red Paratroopa, the green one's cuts from the red cells appended to the sheet.
+  For preFrame = 0 To 1
+    GetaShape #PRE_RED_PARATROOPA + preFrame, (#RED_PARATROOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    GetaShape #PRE_RED_PARATROOPA + 2 + preFrame, (#RED_PARATROOPA_SHEET_CELL + preFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    XFlip #PRE_RED_PARATROOPA + 2 + preFrame
+  Next
+  GetaShape #PRE_PODOBOO, #PODOBOO_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  GetaShape #PRE_PODOBOO + 1, #PODOBOO_CELL*#BLOOBER_W, 8, #BLOOBER_W, #BLOOBER_H
+  YFlip #PRE_PODOBOO + 1
+End Statement
+
+; Only the cells the game draws: the mushroom's and the coin's.
+Statement CutItemShapes{}
+  SHARED preFrame
+  Use BitMap #ITEMS_BM
+  For preFrame = 0 To #PRE_MUSHROOM_FRAMES - 1
+    GetaShape #PRE_MUSHROOM + preFrame, (#PRE_MUSHROOM_CELL + preFrame)*#TILE, 0, #ITEM_W, #ITEM_H
+  Next
+  ;; The fireball: the four quadrants of one cell. Its burst: three cells, small to
+  ;; large, which sit in the sheet in the opposite order.
+  For preFrame = 0 To 3
+    GetaShape #PRE_FIREBALL + preFrame, #FIREBALL_SHEET_CELL*#TILE + (preFrame AND 1)*#FIREBALL_SIZE, (preFrame/2)*#FIREBALL_SIZE, #FIREBALL_SIZE, #FIREBALL_SIZE
+  Next
+  For preFrame = 0 To 2
+    GetaShape #PRE_BLAST + preFrame, (#BLAST_SHEET_CELL - preFrame)*#TILE, 0, #TILE, #TILE
+  Next
+  For preFrame = 1 To #TILE - 2
+    GetaShape #PRE_STAR_FLAG + preFrame - 1, #STAR_FLAG_SHEET_CELL*#TILE, 0, #TILE, preFrame
+  Next
+  For preFrame = 0 To #STAR_FRAMES - 1
+    GetaShape #PRE_STAR + preFrame, (#STAR_SPRITE_BASE + preFrame)*#TILE, 0, #ITEM_W, #ITEM_H
+  Next
+  For preFrame = 0 To #FLOWER_FRAMES - 1
+    GetaShape #PRE_FLOWER + preFrame, (#FLOWER_SPRITE_BASE + preFrame)*#TILE, 0, #ITEM_W, #ITEM_H
+  Next
+  For preFrame = 0 To #PRE_COIN_FRAMES - 1
+    GetaShape #PRE_COIN + preFrame, (#COIN_SPRITE_BASE + preFrame)*#TILE, 0, #COIN_W, #COIN_H
+  Next
+  ; The air bubble, the 8x8 after the cloud platform's ball.
+  Use BitMap #ITEMS_BM
+  GetaShape #PRE_BUBBLE, #BUBBLE_SHEET_X, 0, #BUBBLE_SIZE, #BUBBLE_SIZE
+End Statement
+
+Statement CutFlagShape{}
+  Use BitMap #OBJ_BM
+  GetaShape #FLAG_SHAPE, #OBJ_FLAG*#TILE, 0, #FLAG_W, #FLAG_H
+End Statement
+
+; The title panel's nine tiles, once, after LoadPanel{} (before LoadLogo{} takes the bitmap over).
+Statement CutPanelShapes{}
+  Use BitMap #LOGO_BM
+  For panelTile = 0 To #PANEL_TILES - 1
+    GetaShape #PRE_PANEL + panelTile, panelTile*#PANEL_TILE, 0, #PANEL_TILE, #PANEL_TILE
+  Next
+End Statement
+
+; The title logo, once, after LoadLogo{}.
+Statement CutLogoShape{}
+  Use BitMap #LOGO_BM
+  GetaShape #LOGO_SHAPE, 0, 0, #LOGO_W, #LOGO_H
+End Statement
+
+; All of them, from init.blitz once the sheets are loaded.
+Statement CutActorShapes{}
+  CutSmallMarioShapes{}
+  CutBigMarioShapes{}
+  CutEnemyShapes{}
+  CutItemShapes{}
+  CutFlagShape{}
+  CutDebrisShapes{}
+  CutFloaterShapes{}
+  CutFloaterNumbers{}
+End Statement
+
+;; END OF ACTOR SHAPES (BLITZ MODE)

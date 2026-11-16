@@ -1,0 +1,604 @@
+;; =======================================================
+;; AREA LOADER (AMIGA MODE)
+;; =======================================================
+;; An area's maps come from its file, not from compiled-in assignments. An area file is read in Amiga mode with ReadMem, through
+;; &array(index). The files are packed (SDAREA02: runs of a repeated word and literals, each section on its own): the body is read
+;; whole into packedAreaWords() and unpacked into the slot (UnpackAreaWords{}, Poke.w through &array, about 3 frames an area).
+;; Packed, 1-2's four areas are 6.5 KB to read instead of 59, which on a floppy saves seconds. The file's layout is in
+;; tools/area_bin.py's docstring; the generated area table (sparkydave.areas.table.ab3) names the files and says what each holds.
+;; The build checks the area files against the level meta (area_bin.verify_tables_against_compiled).
+;;
+;; The game loads every area of a level into slots at start-up, enters the first (its map into mapBuffer() and
+;; metatileBuffer(), its objects into the level's tables), and a pipe enters another area from its slot
+;; (sparkydave.areas.blitz.ab3). The level's boxes and tables still come from the level meta for 1-1; they move onto
+;; the area files one step at a time.
+
+Dim areaHeaderWords.w(15)
+;; The All-Stars look has a back for the underground, the cave wall, and for the castles, the castle wall: its areas take the hills kind (the back strip BackStripGid{} gives it the cave's cells
+;; for, with its own pens), though the table, the NES look's, says none.
+If #LOOK_ALLSTARS = 1
+  For sceneryArea.w = 0 To #AREA_TABLE_COUNT - 1
+    If tableAreaType(sceneryArea) = #AREA_TYPE_UNDERGROUND AND tableAreaScenery(sceneryArea) = #SCENERY_NONE Then tableAreaScenery(sceneryArea) = #SCENERY_HILLS
+    ; A castle's wall has no band split (a pillar would shear at its line), so it takes the clouds kind: one speed.
+    If tableAreaType(sceneryArea) = #AREA_TYPE_CASTLE AND tableAreaScenery(sceneryArea) = #SCENERY_NONE Then tableAreaScenery(sceneryArea) = #SCENERY_CLOUDS
+  Next
+EndIf
+;; The slots: every area of the level that is running, read into memory at its start (the lives cover holds
+;; for 2.5 s and the four areas of 1-2 load in 0.3). A slot is an area's place in the level's list
+;; (tableLevelAreas), so slot 0 is the start area. The maps are copied out into mapBuffer() and
+;; metatileBuffer() when an area is entered (EnterSlotMaps{}); the objects stay here.
+Dim slotGids.w(#LEVEL_MAX_AREAS*#MAP_CELLS - 1)
+Dim slotClasses.w(#LEVEL_MAX_AREAS*#MAP_CELLS - 1)
+Dim slotObjects.w(#LEVEL_MAX_AREAS*#NEED_OBJECTS*#AREA_OBJECT_WORDS - 1)
+Dim slotObjectCount.w(#LEVEL_MAX_AREAS - 1)
+Dim slotAreaIndex.w(#LEVEL_MAX_AREAS - 1)
+Dim slotChecksum.l(#LEVEL_MAX_AREAS - 1)
+; A packed area file's body as read, before it is unpacked: the most a plain body holds, and the packing's extra.
+Dim packedAreaWords.w(2*#MAP_CELLS + #NEED_OBJECTS*#AREA_OBJECT_WORDS + #AREA_PACK_EXTRA_WORDS - 1)
+slotCount.w = 0
+currentLevel.w = 0
+; The slot of the level area (not a room) that is the world now: where a room returns to, and what a death keeps.
+currentLevelSlot.w = 0
+; The slot a death restarts the level in: the start area, except that 1-2 passed its pipe intro, which a death does not replay.
+levelRestartSlot.w = 0
+; True while the level area is a pipe intro and Mario has not yet gone into its pipe: he walks right by himself.
+areaIntroWalk.w = False
+loadFailedArea.w = 0
+;; The links of the pipes the engine uses: the packed word of the pipe to enter in the area the player is
+;; in, and of the pipe to leave a room by (tools/area_bin.py: target area, entrance mode, page).
+areaPipeEntryLink.w = 0
+areaPipeExitLink.w = 0
+;; The room boxes, declared here as words before ApplyRoomBoxes{} first names them (a variable named without a type
+;; is a long, and the bonus include, which comes later, declares them as words with the 1-1 values as defaults).
+areaPipeExitX.w = 0
+areaPipeExitY.w = 0
+areaPipeExitW.w = 0
+areaPipeExitH.w = 0
+areaBonusStartX.w = 0
+areaBonusStartY.w = 0
+
+; The header's long at word index wordIndex (high word first, as the file has it).
+Function.l AreaHeaderLong{wordIndex.w}
+  SHARED areaHeaderWords()
+  Function Return(areaHeaderWords(wordIndex) AND $ffff)*65536 + (areaHeaderWords(wordIndex + 1) AND $ffff)
+End Function
+
+;; The path of an area file. The All-Stars look has its own (the maps in its tiles, in data/areas-allstars) for the areas that have been converted,
+;; and takes the NES file for the others: their GIDs above the atlas's tiles are left out of the draw (#LOOK_ATLAS_TILES).
+Function.s AreaFilePath{areaFileName$}
+  SHARED dataDir$
+  If #LOOK_ALLSTARS = 1
+    If Exists(dataDir$ + "areas-allstars/" + areaFileName$) > 0 Then Function Return dataDir$ + "areas-allstars/" + areaFileName$
+  EndIf
+  Function Return dataDir$ + "areas/" + areaFileName$
+End Function
+
+;; One section of a packed area, from packedAreaWords() at readIndex into wordCount words at targetAddress: runs of a repeat
+;; count, the word repeated, a literal count and the literal words (tools/area_bin.py, pack_words()), until wordCount words are
+;; written. Returns the index after the section, or -1 when a run does not fit (it reads past readEnd, or writes more than
+;; wordCount words).
+Function.l UnpackAreaWords{readIndex.l, readEnd.l, targetAddress.l, wordCount.l}
+  SHARED packedAreaWords()
+  writtenWords.l = 0
+  While writtenWords < wordCount
+    If readIndex + 3 > readEnd Then Function Return -1
+    repeatCount.l = packedAreaWords(readIndex) AND $ffff
+    repeatedWord.w = packedAreaWords(readIndex + 1)
+    literalCount.l = packedAreaWords(readIndex + 2) AND $ffff
+    readIndex = readIndex + 3
+    If writtenWords + repeatCount + literalCount > wordCount Then Function Return -1
+    If readIndex + literalCount > readEnd Then Function Return -1
+    runEnd.l = targetAddress + repeatCount*2
+    While targetAddress < runEnd
+      Poke.w targetAddress, repeatedWord
+      targetAddress = targetAddress + 2
+    Wend
+    literalEnd.l = readIndex + literalCount
+    While readIndex < literalEnd
+      Poke.w targetAddress, packedAreaWords(readIndex)
+      targetAddress = targetAddress + 2
+      readIndex = readIndex + 1
+    Wend
+    writtenWords = writtenWords + repeatCount + literalCount
+  Wend
+  Function Return readIndex
+End Function
+
+;; Read one area into a slot: its two maps and its objects. Amiga mode (file I/O). 0 is good; -1 no such file, -2 could not
+;; open it, -3 not a packed area file, -4 a header that does not fit this build (rows, stride, columns, section lengths,
+;; more objects than #NEED_OBJECTS, a body too big for the buffer, or one that does not unpack to its end exactly).
+Function.w LoadAreaIntoSlot{areaIndex.w, slot.w}
+  SHARED areaHeaderWords(), slotGids(), slotClasses(), slotObjects(), slotObjectCount(), slotAreaIndex(), slotChecksum()
+  SHARED tableAreaFile$(), tableAreaColumns(), dataDir$, packedAreaWords()
+  readPath$ = AreaFilePath{tableAreaFile$(areaIndex)}
+  fileLength.l = Exists(readPath$)
+  If fileLength = 0 Then Function Return(-1)
+  If ReadFile(0, readPath$) = 0 Then Function Return(-2)
+  ReadMem 0, &areaHeaderWords(0), #AREA_HEADER_BYTES
+  If areaHeaderWords(0) <> $5344 OR areaHeaderWords(1) <> $4152 OR areaHeaderWords(2) <> $4541 OR areaHeaderWords(3) <> $3032
+    CloseFile 0
+    Function Return(-3)
+  EndIf
+  objectWords.l = AreaHeaderLong{12}
+  goodHeader.w = True
+  If areaHeaderWords(4) <> tableAreaColumns(areaIndex) Then goodHeader = False
+  If areaHeaderWords(5) <> #MAP_H OR areaHeaderWords(6) <> #MAX_MAP_W Then goodHeader = False
+  If AreaHeaderLong{8} <> #MAP_CELLS OR AreaHeaderLong{10} <> #MAP_CELLS Then goodHeader = False
+  If areaHeaderWords(7)*#AREA_OBJECT_WORDS <> objectWords Then goodHeader = False
+  If areaHeaderWords(7) > #NEED_OBJECTS Then goodHeader = False
+  bodyBytes.l = fileLength - #AREA_HEADER_BYTES
+  If bodyBytes < 0 OR (bodyBytes AND 1) <> 0 Then goodHeader = False
+  If bodyBytes > 2*(2*#MAP_CELLS + #NEED_OBJECTS*#AREA_OBJECT_WORDS + #AREA_PACK_EXTRA_WORDS) Then goodHeader = False
+  If goodHeader = False
+    CloseFile 0
+    Function Return(-4)
+  EndIf
+  ReadMem 0, &packedAreaWords(0), bodyBytes
+  CloseFile 0
+  ;; The three sections, one after the other, into the slot; the body must end where the last does. A section of no words
+  ;; (an area with no objects) packs to nothing and reads nothing.
+  bodyWords.l = bodyBytes/2
+  gidBase.l = slot*#MAP_CELLS
+  objectBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  readIndex.l = UnpackAreaWords{0, bodyWords, &slotGids(gidBase), #MAP_CELLS}
+  If readIndex >= 0 Then readIndex = UnpackAreaWords{readIndex, bodyWords, &slotClasses(gidBase), #MAP_CELLS}
+  If readIndex >= 0 Then readIndex = UnpackAreaWords{readIndex, bodyWords, &slotObjects(objectBase), objectWords}
+  If readIndex <> bodyWords Then Function Return(-4)
+  slotObjectCount(slot) = areaHeaderWords(7)
+  slotAreaIndex(slot) = areaIndex
+  slotChecksum(slot) = AreaHeaderLong{14}
+  Function Return(0)
+End Function
+
+; Every area of a level, into its slots. 0 if all are good, else the first code, with the area in loadFailedArea.
+Function.w LoadLevelAreas{levelIndex.w}
+  SHARED tableLevelAreaCount(), tableLevelAreas(), slotCount, loadFailedArea
+  slotCount = 0
+  For areaSlot.w = 0 To tableLevelAreaCount(levelIndex) - 1
+    wantedArea.w = tableLevelAreas(levelIndex*#LEVEL_MAX_AREAS + areaSlot)
+    readStatus.w = LoadAreaIntoSlot{wantedArea, areaSlot}
+    If readStatus <> 0
+      loadFailedArea = wantedArea
+      Function Return(readStatus)
+    EndIf
+    slotCount = areaSlot + 1
+  Next
+  Function Return(0)
+End Function
+
+; The slot an area of the running level is in, or -1.
+Function.w LevelSlotOfArea{areaIndex.w}
+  SHARED slotAreaIndex(), slotCount
+  For areaSlot.w = 0 To slotCount - 1
+    If slotAreaIndex(areaSlot) = areaIndex Then Function Return(areaSlot)
+  Next
+  Function Return(-1)
+End Function
+
+;; A slot's maps into mapBuffer() and metatileBuffer(): the area becomes the one in the world. (The caller stamps
+;; the playfields.)
+Statement EnterSlotMaps{slot.w}
+  SHARED slotGids(), slotClasses(), mapBuffer(), metatileBuffer()
+  gidBase.l = slot*#MAP_CELLS
+  For cellIndex.l = 0 To #MAP_CELLS - 1
+    mapBuffer(cellIndex) = slotGids(gidBase + cellIndex)
+    metatileBuffer(cellIndex) = slotClasses(gidBase + cellIndex)
+  Next
+End Statement
+
+;; The checksum tools/area_bin.py puts in the header (acc = (acc*31 + word) mod 2^24 over the gids, the classes, then
+;; the objects), worked out over a slot. Debug mode runs it to say the game saw the whole file (the build proves the
+;; file equals the compiled-in map; this proves the read). It is not cheap, about 8 frames for an area, so only debug
+;; mode pays for it.
+Function.l ChecksumSlot{slot.w}
+  SHARED slotGids(), slotClasses(), slotObjects(), slotObjectCount()
+  accumulator.l = 0
+  gidBase.l = slot*#MAP_CELLS
+  For cellIndex.l = 0 To #MAP_CELLS - 1
+    accumulator = (accumulator*31 + (slotGids(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  For cellIndex.l = 0 To #MAP_CELLS - 1
+    accumulator = (accumulator*31 + (slotClasses(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  objectBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  For wordIndex.l = 0 To slotObjectCount(slot)*#AREA_OBJECT_WORDS - 1
+    accumulator = (accumulator*31 + (slotObjects(objectBase + wordIndex) AND $ffff)) AND $ffffff
+  Next
+  Function Return(accumulator)
+End Function
+
+; A level's name as the HUD and the cover write it: "1-2". (The HUD font has digits and the dash.)
+Function.s LevelNameText{levelIndex.w}
+  SHARED tableLevelWorld(), tableLevelNumber()
+  Function Return(Chr$(48 + tableLevelWorld(levelIndex)) + "-" + Chr$(48 + tableLevelNumber(levelIndex)))
+End Function
+
+;; The last level the title's LEVEL row offers: every level in debug mode or with the parameter levels, else the highest
+;; reached so far (which the settings file keeps).
+Function.w StartLevelLimit{}
+  SHARED debugMode, levelReached, allLevelsOpen
+  If debugMode <> False OR allLevelsOpen <> False Then Function Return(#LEVEL_TABLE_COUNT - 1)
+  If levelReached > #LEVEL_TABLE_COUNT - 1 Then Function Return(#LEVEL_TABLE_COUNT - 1)
+  Function Return(levelReached)
+End Function
+
+;; The pipe a slot's area is left by (its first PipeExit): its box and its link word, or nowhere (#AREA_BOX_NONE) if it has
+;; none. Set for the area that is the world and for a room.
+Statement ApplyPipeExitBox{slot.w}
+  SHARED slotObjects(), slotObjectCount(), areaPipeExitLink
+  SHARED areaPipeExitX, areaPipeExitY, areaPipeExitW, areaPipeExitH
+  slotBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  haveExit.w = False
+  For recordIndex.w = 0 To slotObjectCount(slot) - 1
+    recordBase.l = slotBase + recordIndex*#AREA_OBJECT_WORDS
+    If slotObjects(recordBase) = #AOBJ_PIPE_EXIT AND haveExit = False
+      haveExit = True
+      areaPipeExitX = slotObjects(recordBase + 1)
+      areaPipeExitY = slotObjects(recordBase + 2)
+      areaPipeExitW = slotObjects(recordBase + 3)
+      areaPipeExitH = slotObjects(recordBase + 4)
+      areaPipeExitLink = slotObjects(recordBase + 5) AND $ffff
+    EndIf
+  Next
+  If haveExit = False
+    areaPipeExitX = #AREA_BOX_NONE
+    areaPipeExitY = #AREA_BOX_NONE
+    areaPipeExitW = 0
+    areaPipeExitH = 0
+    areaPipeExitLink = 0
+  EndIf
+End Statement
+
+;; Where he comes up out of a pipe in a slot's area at a given page (a link's page): the area's return pipe on that page
+;; (an area has one for each page a pipe leads to: 1-1 has two). True if the page has one; if not the box is left as it
+;; was and the caller must not use it.
+Function.w SelectAreaReturn{slot.w, page.w}
+  SHARED slotObjects(), slotObjectCount(), areaReturnX, areaReturnY
+  slotBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  returnFound.w = False
+  For recordIndex.w = 0 To slotObjectCount(slot) - 1
+    recordBase.l = slotBase + recordIndex*#AREA_OBJECT_WORDS
+    If slotObjects(recordBase) = #AOBJ_AREA_RETURN
+      If slotObjects(recordBase + 1)/256 = page
+        areaReturnX = slotObjects(recordBase + 1)
+        areaReturnY = slotObjects(recordBase + 2)
+        returnFound = True
+      EndIf
+    EndIf
+  Next
+  Function Return(returnFound)
+End Function
+
+;; The loaded area's objects, into the level's boxes and spawn tables: the variables and arrays the engine reads
+;; (the level meta gives them the 1-1 values as compile-time defaults, and the harness and the proofs keep those).
+;; The first of each box kind is the one used, as the single-area build reads them (tmx.REPEATABLE_OBJECTS); a warp
+;; pipe is not the pipe you enter. Block items keep the file's order (the harness relies on it). In debug mode the
+;; routine counts every value that differs from what was there and says so on the console: for 1-1 that is the
+;; compiled-in level, which the build already proves equal, so this proves the routine.
+Function.w ApplyAreaObjects{slot.w}
+  SHARED slotObjects(), slotObjectCount(), areaPipeEntryLink
+  SHARED plantSpawnX(), plantSpawnY(), plantSpawnCount, currentLevel, koopaSpawnKind()
+  SHARED areaWarpZoneX, warpPipeX(), warpPipeY(), warpPipeH(), warpPipeWorld(), warpPipeCount, warpLeftX
+  SHARED liftSpawnX(), liftSpawnY(), liftSpawnDir(), liftSpawnCount
+  SHARED springSpawnX(), springSpawnY(), springSpawnCount, whirlpoolLeftX(), whirlpoolWidth(), whirlpoolCount
+  SHARED blooberSpawnX(), blooberSpawnY(), blooberSpawnCount, frenzyMarkX(), frenzyMarkKind(), frenzyMarkCount
+  SHARED firebarSpawnX(), firebarSpawnY(), firebarSpawnKind(), firebarSpawnCount, podobooSpawnX(), podobooSpawnCount
+  SHARED bowserSpawnX(), bowserSpawnY(), bowserSpawnCount, areaScrollLockX, areaAxeX, areaAxeY, areaRetainerX, areaRetainerY
+  SHARED areaFlagpoleX, areaFlagpoleY, areaFlagpoleW, areaFlagpoleH, areaMarioStartX, areaMarioStartY
+  SHARED areaCastleDoorX, areaCastleDoorY, areaStarFlagX, areaStarFlagY, areaPipeEntryX, areaPipeEntryY
+  SHARED areaPipeEntryW, areaPipeEntryH, areaReturnX, areaReturnY
+  SHARED blockItemCell(), blockItemSprite(), multiCoinCell(), hiddenBlockCell()
+  SHARED goombaSpawnX(), goombaSpawnY(), koopaSpawnX(), koopaSpawnY()
+  SHARED blockItemCount, multiCoinCount, hiddenBlockCount, goombaSpawnCount, koopaSpawnCount
+  SHARED paletteZoneX(), paletteZoneKind(), paletteZoneCount
+  differences.w = 0
+  zonesNow.w = 0
+  itemsNow.w = 0
+  multiNow.w = 0
+  hiddenNow.w = 0
+  goombasNow.w = 0
+  koopasNow.w = 0
+  plantsNow.w = 0
+  warpPipesNow.w = 0
+  liftsNow.w = 0
+  springsNow.w = 0
+  whirlpoolsNow.w = 0
+  bloobersNow.w = 0
+  frenziesNow.w = 0
+  firebarsNow.w = 0
+  podoboosNow.w = 0
+  bowsersNow.w = 0
+  haveWarpZone.w = False
+  haveScrollLock.w = False
+  haveAxe.w = False
+  haveRetainer.w = False
+  haveFlagpole.w = False
+  haveMarioStart.w = False
+  haveCastleDoor.w = False
+  haveStarFlag.w = False
+  havePipeEntry.w = False
+  haveAreaReturn.w = False
+  slotBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  For recordIndex.w = 0 To slotObjectCount(slot) - 1
+    recordBase.l = slotBase + recordIndex*#AREA_OBJECT_WORDS
+    recordType.w = slotObjects(recordBase)
+    recordX.w = slotObjects(recordBase + 1)
+    recordY.w = slotObjects(recordBase + 2)
+    recordW.w = slotObjects(recordBase + 3)
+    recordH.w = slotObjects(recordBase + 4)
+    recordProperty.l = slotObjects(recordBase + 5) AND $ffff
+    recordCell.l = (recordY/#TILE)*#MAX_MAP_W + recordX/#TILE
+    If recordType = #AOBJ_BLOCK_ITEM OR recordType = #AOBJ_HIDDEN_BLOCK
+      If itemsNow >= #MAX_BLOCK_ITEMS Then Function Return(-1)
+      If blockItemCell(itemsNow) <> recordCell OR blockItemSprite(itemsNow) <> recordProperty Then differences = differences + 1
+      blockItemCell(itemsNow) = recordCell
+      blockItemSprite(itemsNow) = recordProperty
+      itemsNow = itemsNow + 1
+    EndIf
+    If recordType = #AOBJ_HIDDEN_BLOCK
+      If hiddenNow >= #MAX_HIDDEN_BLOCKS Then Function Return(-1)
+      If hiddenBlockCell(hiddenNow) <> recordCell Then differences = differences + 1
+      hiddenBlockCell(hiddenNow) = recordCell
+      hiddenNow = hiddenNow + 1
+    EndIf
+    If recordType = #AOBJ_MULTI_COIN
+      If multiNow >= #MAX_MULTI_COINS Then Function Return(-1)
+      If multiCoinCell(multiNow) <> recordCell Then differences = differences + 1
+      multiCoinCell(multiNow) = recordCell
+      multiNow = multiNow + 1
+    EndIf
+    If recordType = #AOBJ_GOOMBA
+      If goombasNow >= #MAX_GOOMBAS Then Function Return(-1)
+      If goombaSpawnX(goombasNow) <> recordX OR goombaSpawnY(goombasNow) <> recordY Then differences = differences + 1
+      goombaSpawnX(goombasNow) = recordX
+      goombaSpawnY(goombasNow) = recordY
+      goombasNow = goombasNow + 1
+    EndIf
+    If recordType = #AOBJ_KOOPA OR recordType = #AOBJ_RED_KOOPA OR recordType = #AOBJ_PARATROOPA OR recordType = #AOBJ_RED_PARATROOPA
+      If koopasNow >= #MAX_KOOPAS Then Function Return(-1)
+      koopaSpawnKind(koopasNow) = #KOOPA_KIND_GREEN
+      If recordType = #AOBJ_RED_KOOPA Then koopaSpawnKind(koopasNow) = #KOOPA_KIND_RED
+      If recordType = #AOBJ_PARATROOPA Then koopaSpawnKind(koopasNow) = #KOOPA_KIND_WINGED
+      If recordType = #AOBJ_RED_PARATROOPA Then koopaSpawnKind(koopasNow) = #KOOPA_KIND_RED_FLYING
+      If koopaSpawnX(koopasNow) <> recordX OR koopaSpawnY(koopasNow) <> recordY Then differences = differences + 1
+      koopaSpawnX(koopasNow) = recordX
+      koopaSpawnY(koopasNow) = recordY
+      koopasNow = koopasNow + 1
+    EndIf
+    ;; A plant marked not_in_first_level (property 1) is grown only when the level is not the first: the cartridge's VerticalPipe
+    ;; grows none in world 1 area 1, but 1-1's last pipe, which 1-2's exit comes out of, has one when it is 1-2's area.
+    If recordType = #AOBJ_PIRANHA_PLANT
+      If recordProperty = 0 OR currentLevel <> 0
+        If plantsNow >= #MAX_PIRANHAS Then Function Return(-1)
+        plantSpawnX(plantsNow) = recordX
+        plantSpawnY(plantsNow) = recordY
+        plantsNow = plantsNow + 1
+      EndIf
+    EndIf
+    ; A castle's retainer, its axe and its scroll lock: the first of each, one an area.
+    If recordType = #AOBJ_RETAINER AND haveRetainer = False
+      haveRetainer = True
+      areaRetainerX = recordX
+      areaRetainerY = recordY
+    EndIf
+    If recordType = #AOBJ_AXE AND haveAxe = False
+      haveAxe = True
+      areaAxeX = recordX
+      areaAxeY = recordY
+    EndIf
+    If recordType = #AOBJ_SCROLL_LOCK AND haveScrollLock = False
+      haveScrollLock = True
+      areaScrollLockX = recordX
+    EndIf
+    ; The warp zone: its object, and the pipes whose link names a world instead of an area (the three of 1-2's), left to right.
+    If recordType = #AOBJ_WARP_ZONE AND haveWarpZone = False
+      haveWarpZone = True
+      areaWarpZoneX = recordX
+    EndIf
+    If recordType = #AOBJ_PIPE_ENTRY AND recordProperty >= $8000 AND warpPipesNow < #WARP_PIPES_MAX
+      If warpPipesNow = 0 Then warpLeftX = recordX
+      If recordX < warpLeftX Then warpLeftX = recordX
+      warpPipeX(warpPipesNow) = recordX
+      warpPipeY(warpPipesNow) = recordY
+      warpPipeH(warpPipesNow) = recordH
+      warpPipeWorld(warpPipesNow) = recordProperty AND $7fff
+      warpPipesNow = warpPipesNow + 1
+    EndIf
+    If recordType = #AOBJ_LIFT
+      If liftsNow >= #MAX_LIFTS Then Function Return(-1)
+      liftSpawnX(liftsNow) = recordX
+      liftSpawnY(liftsNow) = recordY
+      liftSpawnDir(liftsNow) = recordProperty
+      liftsNow = liftsNow + 1
+    EndIf
+    If recordType = #AOBJ_JUMPSPRING
+      If springsNow >= #MAX_SPRINGS Then Function Return(-1)
+      springSpawnX(springsNow) = recordX
+      springSpawnY(springsNow) = recordY
+      springsNow = springsNow + 1
+    EndIf
+    ; A water area's whirlpools: the pull's left edge and its width (ProcessWhirlpools{}).
+    If recordType = #AOBJ_WHIRLPOOL
+      If whirlpoolsNow >= #MAX_WHIRLPOOLS Then Function Return(-1)
+      whirlpoolLeftX(whirlpoolsNow) = recordX
+      whirlpoolWidth(whirlpoolsNow) = recordW
+      whirlpoolsNow = whirlpoolsNow + 1
+    EndIf
+    ; The Bloobers, but those for hard mode only (property 1): the cartridge builds those only with SecondaryHardMode, from 5-3 on.
+    If recordType = #AOBJ_BLOOBER AND recordProperty = 0
+      If bloobersNow >= #MAX_BLOOBERS Then Function Return(-1)
+      blooberSpawnX(bloobersNow) = recordX
+      blooberSpawnY(bloobersNow) = recordY
+      bloobersNow = bloobersNow + 1
+    EndIf
+    ; The firebars, but those for hard mode only (the property's bit 3): their blocks, and their kinds.
+    If recordType = #AOBJ_FIREBAR AND (recordProperty AND #FIREBAR_HARD_BIT) = 0
+      If firebarsNow >= #MAX_FIREBARS Then Function Return(-1)
+      firebarSpawnX(firebarsNow) = recordX
+      firebarSpawnY(firebarsNow) = recordY
+      firebarSpawnKind(firebarsNow) = recordProperty AND 7
+      firebarsNow = firebarsNow + 1
+    EndIf
+    ; The Podoboos, but those for hard mode only (property 1): only their x matters.
+    If recordType = #AOBJ_PODOBOO AND recordProperty = 0
+      If podoboosNow >= #MAX_PODOBOOS Then Function Return(-1)
+      podobooSpawnX(podoboosNow) = recordX
+      podoboosNow = podoboosNow + 1
+    EndIf
+    ; Bowser, but one for hard mode only (property 1).
+    If recordType = #AOBJ_BOWSER AND recordProperty = 0
+      If bowsersNow >= #MAX_BOWSERS Then Function Return(-1)
+      bowserSpawnX(bowsersNow) = recordX
+      bowserSpawnY(bowsersNow) = recordY
+      bowsersNow = bowsersNow + 1
+    EndIf
+    ; The frenzy markers: where, and which kind starts (0 a stop).
+    If recordType = #AOBJ_FRENZY
+      If frenziesNow >= #MAX_FRENZIES Then Function Return(-1)
+      frenzyMarkX(frenziesNow) = recordX
+      frenzyMarkKind(frenziesNow) = recordProperty
+      frenziesNow = frenziesNow + 1
+    EndIf
+    ; The palette zones, in order of x (area_bin.py checks it): where each starts and its kind.
+    If recordType = #AOBJ_PALETTE_ZONE AND zonesNow < #MAX_PALETTE_ZONES
+      paletteZoneX(zonesNow) = recordX
+      paletteZoneKind(zonesNow) = recordProperty
+      zonesNow = zonesNow + 1
+    EndIf
+    If recordType = #AOBJ_FLAGPOLE AND haveFlagpole = False
+      haveFlagpole = True
+      If areaFlagpoleX <> recordX OR areaFlagpoleY <> recordY OR areaFlagpoleW <> recordW OR areaFlagpoleH <> recordH Then differences = differences + 1
+      areaFlagpoleX = recordX
+      areaFlagpoleY = recordY
+      areaFlagpoleW = recordW
+      areaFlagpoleH = recordH
+    EndIf
+    If recordType = #AOBJ_MARIO_START AND haveMarioStart = False
+      haveMarioStart = True
+      If areaMarioStartX <> recordX OR areaMarioStartY <> recordY Then differences = differences + 1
+      areaMarioStartX = recordX
+      areaMarioStartY = recordY
+    EndIf
+    If recordType = #AOBJ_CASTLE_DOOR AND haveCastleDoor = False
+      haveCastleDoor = True
+      If areaCastleDoorX <> recordX OR areaCastleDoorY <> recordY Then differences = differences + 1
+      areaCastleDoorX = recordX
+      areaCastleDoorY = recordY
+    EndIf
+    If recordType = #AOBJ_STAR_FLAG AND haveStarFlag = False
+      haveStarFlag = True
+      If areaStarFlagX <> recordX OR areaStarFlagY <> recordY Then differences = differences + 1
+      areaStarFlagX = recordX
+      areaStarFlagY = recordY
+    EndIf
+    If recordType = #AOBJ_PIPE_ENTRY AND havePipeEntry = False AND recordProperty < $8000
+      havePipeEntry = True
+      areaPipeEntryLink = recordProperty
+      If areaPipeEntryX <> recordX OR areaPipeEntryY <> recordY OR areaPipeEntryW <> recordW OR areaPipeEntryH <> recordH Then differences = differences + 1
+      areaPipeEntryX = recordX
+      areaPipeEntryY = recordY
+      areaPipeEntryW = recordW
+      areaPipeEntryH = recordH
+    EndIf
+    If recordType = #AOBJ_AREA_RETURN AND haveAreaReturn = False
+      haveAreaReturn = True
+      If areaReturnX <> recordX OR areaReturnY <> recordY Then differences = differences + 1
+      areaReturnX = recordX
+      areaReturnY = recordY
+    EndIf
+  Next
+  ; A kind this area does not have is nowhere: Mario cannot stand at, pass or grab it.
+  If haveFlagpole = False Then areaFlagpoleX = #AREA_BOX_NONE
+  If haveFlagpole = False Then areaFlagpoleY = #AREA_BOX_NONE
+  If haveCastleDoor = False Then areaCastleDoorX = #AREA_BOX_NONE
+  If haveCastleDoor = False Then areaCastleDoorY = #AREA_BOX_NONE
+  If haveStarFlag = False Then areaStarFlagX = #AREA_BOX_NONE
+  If haveStarFlag = False Then areaStarFlagY = #AREA_BOX_NONE
+  If havePipeEntry = False Then areaPipeEntryX = #AREA_BOX_NONE
+  If havePipeEntry = False Then areaPipeEntryY = #AREA_BOX_NONE
+  If haveAreaReturn = False Then areaReturnX = #AREA_BOX_NONE
+  If haveAreaReturn = False Then areaReturnY = #AREA_BOX_NONE
+  If blockItemCount <> itemsNow OR multiCoinCount <> multiNow OR hiddenBlockCount <> hiddenNow Then differences = differences + 1
+  If goombaSpawnCount <> goombasNow OR koopaSpawnCount <> koopasNow Then differences = differences + 1
+  blockItemCount = itemsNow
+  ApplyPipeExitBox{slot}
+  multiCoinCount = multiNow
+  hiddenBlockCount = hiddenNow
+  goombaSpawnCount = goombasNow
+  koopaSpawnCount = koopasNow
+  plantSpawnCount = plantsNow
+  warpPipeCount = warpPipesNow
+  liftSpawnCount = liftsNow
+  springSpawnCount = springsNow
+  whirlpoolCount = whirlpoolsNow
+  blooberSpawnCount = bloobersNow
+  frenzyMarkCount = frenziesNow
+  firebarSpawnCount = firebarsNow
+  podobooSpawnCount = podoboosNow
+  bowserSpawnCount = bowsersNow
+  paletteZoneCount = zonesNow
+  If haveWarpZone = False Then areaWarpZoneX = #AREA_BOX_NONE
+  If haveScrollLock = False Then areaScrollLockX = #AREA_BOX_NONE
+  If haveRetainer = False
+    areaRetainerX = #AREA_BOX_NONE
+    areaRetainerY = #AREA_BOX_NONE
+  EndIf
+  If haveAxe = False
+    areaAxeX = #AREA_BOX_NONE
+    areaAxeY = #AREA_BOX_NONE
+  EndIf
+  Function Return(differences)
+End Function
+
+;; A room's own boxes, from its objects, and nothing else: where Mario drops in (BonusStart), the pipe he leaves by
+;; (PipeExit) and its link. The level's tables stay the start area's, as the cartridge's do while he is in a bonus room
+;; (nothing is built there, the guards on currentArea). Called when a room is entered.
+Statement ApplyRoomBoxes{slot.w}
+  SHARED slotObjects(), slotObjectCount(), areaBonusStartX, areaBonusStartY
+  ApplyPipeExitBox{slot}
+  slotBase.l = slot*#NEED_OBJECTS*#AREA_OBJECT_WORDS
+  haveStart.w = False
+  For recordIndex.w = 0 To slotObjectCount(slot) - 1
+    recordBase.l = slotBase + recordIndex*#AREA_OBJECT_WORDS
+    If slotObjects(recordBase) = #AOBJ_BONUS_START AND haveStart = False
+      haveStart = True
+      areaBonusStartX = slotObjects(recordBase + 1)
+      areaBonusStartY = slotObjects(recordBase + 2)
+    EndIf
+  Next
+End Statement
+
+;; The first level's areas, loaded; its start area entered (maps into the world, objects into the level's tables); 0 if
+;; good, else a code: LoadAreaIntoSlot{}'s (the area in loadFailedArea) or -5 for more objects than the tables hold.
+;; Called once at start-up, after the file check (sparkydave.files.ab3), in Amiga mode; the caller says which file and
+;; stops if it is not good. In debug mode it checks every slot's checksum and says what it found.
+Function.w LoadStartArea{}
+  SHARED tableAreaFile$(), mapWidth, debugMode, slotChecksum(), slotAreaIndex(), slotCount, currentLevel
+  SHARED tableAreaType(), startAreaType, currentAreaType, tableAreaScenery(), startAreaScenery, currentAreaScenery
+  SHARED areaColumns, tableAreaColumns()
+  levelLoadStatus.w = LoadLevelAreas{currentLevel}
+  If levelLoadStatus <> 0 Then Function Return(levelLoadStatus)
+  EnterSlotMaps{0}
+  mapWidth = #MAP_W
+  areaColumns = tableAreaColumns(slotAreaIndex(0))
+  startAreaType = tableAreaType(slotAreaIndex(0))
+  currentAreaType = startAreaType
+  startAreaScenery = tableAreaScenery(slotAreaIndex(0))
+  currentAreaScenery = startAreaScenery
+  objectDifferences.w = ApplyAreaObjects{0}
+  If objectDifferences < 0 Then Function Return(-5)
+  If debugMode <> False
+    NPrint "Area objects applied: ", objectDifferences, " value(s) differed from the compiled-in level"
+    For checkSlot.w = 0 To slotCount - 1
+      checksumNow.l = ChecksumSlot{checkSlot}
+      If checksumNow = slotChecksum(checkSlot)
+        NPrint "Area ", tableAreaFile$(slotAreaIndex(checkSlot)), " loaded, checksum $", Hex$(checksumNow), " as the file says"
+      Else
+        NPrint "Area ", tableAreaFile$(slotAreaIndex(checkSlot)), " loaded, but its checksum is $", Hex$(checksumNow), " and the file says $", Hex$(slotChecksum(checkSlot))
+      EndIf
+    Next
+  EndIf
+  Function Return(0)
+End Function
+
+;; END OF AREA LOADER (AMIGA MODE)

@@ -1,0 +1,515 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 20
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 16
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; planes.ab3 -- what do 5, 6 and 8 bitplanes cost the blitter, on one playfield?
+;; Compile in UAE. Not part of the game. First proof of the all-stars branch
+;; (the all-stars plan): the All-Stars art needs 45 to 65 colours on screen, so the
+;; question is whether a single-playfield front of 5 planes (32 colours), 6 (64) or 8
+;; (256) fits the frame, and in Chip RAM, before anything is built on it.
+;;
+;; The game today shows 4 planes. Its dual playfield is 8 planes of fetch but only 4 planes
+;; of blitting (the back playfield is drawn once), which is why proofs/dual-playfield.ab3
+;; came out cheap. A single playfield of N planes makes every bob and tile stamp blit N
+;; planes and fetch N planes. This measures both together, the way proofs/fetch-mode.ab3
+;; does: the game's display (a 16 line HUD list at line 44 stacked over a 208 line smooth
+;; scrolling world list, DisplayAdjust -1 and -1, double buffered, fractional scroll), and
+;; each frame, after VWait, wait for beam line #WORK_LINE (inside the world list) and time
+;;   bobs    UnBuffer and #BOBS cookie BBlits of a 16x16 shape (the actors)
+;;   stamps  #STAMPS Blocks of a 16x16 tile past the view's right edge (the seam stamping
+;;           of a ring buffer, or the scroll stamping of the world)
+;; Same load as fetch-mode.ab3, so config 0 reads against its config 3 (4 planes, fetch
+;; mode 3).
+;;
+;; Eight configurations, each on its own pair of CopLists, switched with CreateDisplay:
+;;   config 0  4 planes  $13014  fetch mode 3  (the game's display, no dual playfield)
+;;   config 1  5 planes  $13015  fetch mode 3  32 colours
+;;   config 2  6 planes  $13016  fetch mode 3  64 colours
+;;   config 3  8 planes  $13018  fetch mode 3  256 colours
+;;   config 4  6 planes  $11016  fetch mode 1  does the narrower fetch cope at 6?
+;;   config 5  8 planes  $11018  fetch mode 1  or at 8?
+;;   config 6  6 planes  $12016  fetch mode 2  fetch mode 2 left 5 sprite channels, like 1
+;;   config 7  8 planes  $12018  fetch mode 2  (proofs/sprite-channels.ab3): does it cost like 1 or like 3?
+;; The bitmaps are 640 wide (a multiple of 64, as fetch mode 3 needs), not the game's
+;; 3648: the per-line cost does not depend on the width, and four depths of a full-width
+;; pair would not fit. The Chip RAM a full-width pair needs is computed in the results.
+;; Shapes and bitmaps are per depth (a shape has its bitmap's depth); the two fetch mode
+;; pairs of a depth share them. The shapes are drawn in pens near the top of the palette
+;; (colours - 3 and colours - 5) so the highest planes carry data.
+;;
+;; Each config runs #PHASE_FRAMES frames, the eight in turn, #ROUNDS times, then it writes
+;; planes-results.txt and quits. Esc quits early.
+;;
+;; What to look at on screen: the number of white boxes at the top left of the HUD is the
+;; config (1 to 8). To their right a ramp of every pen of the palette, left to right: it
+;; should step smoothly through all the colours for 16, 32, 64 and 256 pens (a pen that
+;; shows wrong, a repeat, or a band that is the background means a plane is not
+;; displayed). Each phase starts held at scroll 0 for #HOLD_FRAMES frames: the red line is
+;; bitmap column 0 and the green line column 319, and both should be at the very edges.
+;; Then the world scrolls. Note any config whose picture is wrong (shifted, torn, garbage,
+;; a broken HUD or gap line), and any frame that visibly drops.
+;;
+;; What the results answer
+;; 1. What do 5, 6 and 8 planes cost, in lines, for the same blits (average and worst)?
+;; 2. Is fetch mode 3 needed at 6 and 8 planes, or does fetch mode 1 do as well?
+;; 3. How much Chip RAM does a full-width double-buffered world need at each depth, and
+;;    what is left of 2 MB?
+;; A raster line is about 63.5 microseconds and a PAL frame is 312 lines. The game's
+;; own worst frame is about 207 lines (the main project's TIMING note), so a config whose bobs and
+;; stamps alone take a large share of the frame has no room for the game's other work.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_ESC = $45
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#HUD_W      = 384
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; Per depth d (0 to 3): bitmap d*4 the world A, d*4 + 1 the world B, d*4 + 2 the HUD
+;; band, d*4 + 3 the shape source. Shapes: d*2 the bob, d*2 + 1 the tile.
+#DEPTHS   = 4
+#WORLD_W  = 640
+#WORLD_H  = 256
+
+#TILE       = 16
+#BOB_BYTES  = 16384
+
+#CONFIGS      = 8
+#BOBS         = 8
+#STAMPS       = 26
+#STAMP_ROWS   = 13
+#WORK_LINE    = 80
+#PHASE_FRAMES = 300
+#HOLD_FRAMES  = 75
+#SETTLE       = 10
+#ROUNDS       = 2
+#LINES_PAL    = 312
+
+;; Bitmap 640, view 320, two stamp columns (32) and a 64 pixel fetch guard.
+#SCROLL_MAX = 200
+
+;; Chip RAM the game uses besides the world pair and the back playfield: the 2026-10-15
+;; total (1,316,048, the main project's MEMORY note) less the pair (933,888) and the back (147,520). An
+;; estimate from the doc's figures; the game's own Chip report is the check.
+#OTHER_CHIP = 234640
+#CHIP_2MB   = 2097152
+#GAME_W     = 3648
+#GAME_H     = 256
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+config.w = 0
+depth.w = 0
+drawBm.w = 0
+drawBuf.w = 1
+phase.w = 0
+phaseFrame.w = 0
+scrollX.q = 0
+scrollStep.q = 1.25
+scrollDir.q = scrollStep
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+stampLines.l = 0
+stampColumn.w = 0
+chipBefore.l = 0
+chipAfter.l = 0
+chipLargest.l = 0
+
+Dim depthPlanes.w(#DEPTHS - 1)
+Dim depthColours.w(#DEPTHS - 1)
+depthPlanes(0) = 4
+depthPlanes(1) = 5
+depthPlanes(2) = 6
+depthPlanes(3) = 8
+depthColours(0) = 16
+depthColours(1) = 32
+depthColours(2) = 64
+depthColours(3) = 256
+
+Dim configDepth.w(#CONFIGS - 1)
+Dim configFlags.l(#CONFIGS - 1)
+configDepth(0) = 0
+configDepth(1) = 1
+configDepth(2) = 2
+configDepth(3) = 3
+configDepth(4) = 2
+configDepth(5) = 3
+configDepth(6) = 2
+configDepth(7) = 3
+configFlags(0) = $13014
+configFlags(1) = $13015
+configFlags(2) = $13016
+configFlags(3) = $13018
+configFlags(4) = $11016
+configFlags(5) = $11018
+configFlags(6) = $12016
+configFlags(7) = $12018
+
+;; Totals per config.
+Dim bobFrames.l(#CONFIGS - 1)
+Dim bobSum.l(#CONFIGS - 1)
+Dim bobMax.l(#CONFIGS - 1)
+Dim stampSum.l(#CONFIGS - 1)
+Dim stampMax.l(#CONFIGS - 1)
+Dim frameMax.l(#CONFIGS - 1)
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+chipBefore = AvailMem_(2)
+
+For depthIndex.w = 0 To #DEPTHS - 1
+  BitMap depthIndex*4, #WORLD_W, #WORLD_H, depthPlanes(depthIndex)
+  BitMap depthIndex*4 + 1, #WORLD_W, #WORLD_H, depthPlanes(depthIndex)
+  BitMap depthIndex*4 + 2, #HUD_W, #HUD_H, depthPlanes(depthIndex)
+  BitMap depthIndex*4 + 3, 64, #TILE, depthPlanes(depthIndex)
+Next
+
+chipAfter = AvailMem_(2)
+chipLargest = AvailMem_($20002)
+
+;; One palette per depth: the game's 16 pens, then a ramp of distinct colours.
+For depthIndex.w = 0 To #DEPTHS - 1
+  InitPalette depthIndex, depthColours(depthIndex)
+  AGAPalRGB depthIndex, 0, 92, 148, 252
+  AGAPalRGB depthIndex, 1, 156, 74, 0
+  AGAPalRGB depthIndex, 2, 254, 205, 198
+  AGAPalRGB depthIndex, 3, 0, 0, 0
+  AGAPalRGB depthIndex, 4, 230, 156, 33
+  AGAPalRGB depthIndex, 5, 82, 33, 0
+  AGAPalRGB depthIndex, 6, 140, 214, 0
+  AGAPalRGB depthIndex, 7, 16, 148, 0
+  AGAPalRGB depthIndex, 8, 255, 255, 255
+  AGAPalRGB depthIndex, 9, 99, 173, 255
+  AGAPalRGB depthIndex, 10, 108, 110, 0
+  AGAPalRGB depthIndex, 11, 255, 0, 0
+  AGAPalRGB depthIndex, 12, 0, 255, 0
+  AGAPalRGB depthIndex, 13, 76, 105, 192
+  AGAPalRGB depthIndex, 14, 238, 195, 154
+  AGAPalRGB depthIndex, 15, 0, 0, 0
+  For pen.w = 16 To depthColours(depthIndex) - 1
+    AGAPalRGB depthIndex, pen, (pen*5) MOD 256, (pen*3 + 85) MOD 256, 255 - (pen MOD 256)
+  Next
+Next
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; Config c uses CopList 2c for the HUD and 2c + 1 for the world, so a switch is only
+;; a CreateDisplay. All sixteen are built once. The HUD list loads the palette's colours.
+Statement BuildLists{}
+  SHARED configFlags(), configDepth(), depthColours()
+  For configIndex.w = 0 To #CONFIGS - 1
+    hudList.w = configIndex*2
+    worldList.w = hudList + 1
+    flags.l = configFlags(configIndex)
+    colourCount.w = depthColours(configDepth(configIndex))
+    InitCopList hudList, #HUD_YPOS, #HUD_H, flags, 0, colourCount, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, flags, 0, 0, 0
+    DisplayAdjust hudList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+    DisplayAdjust worldList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+  Next
+End Statement
+
+Statement ShowConfig{configIndex.w}
+  SHARED configDepth(), drawBm
+  hudList.w = configIndex*2
+  depthIndex.w = configDepth(configIndex)
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, depthIndex
+  DisplayBitMap hudList, depthIndex*4 + 2, 0, 0
+  DisplayBitMap hudList + 1, drawBm, 0, #VIEW_TOP
+End Statement
+
+;; The config number as 1 to 8 white boxes, then a ramp of every pen (1 pixel wide at
+;; 256 pens, 16 pixels wide at 16) from x = 96 to 351.
+Statement DrawConfigBoxes{configIndex.w}
+  SHARED configDepth(), depthColours()
+  depthIndex.w = configDepth(configIndex)
+  Use BitMap depthIndex*4 + 2
+  Cls 0
+  For boxIndex.w = 0 To configIndex
+    Boxf 4 + boxIndex*12, 4, 11 + boxIndex*12, 11, 8
+  Next
+  colourCount.w = depthColours(depthIndex)
+  rampWidth.w = 256/colourCount
+  For pen.w = 0 To colourCount - 1
+    Boxf 96 + pen*rampWidth, 2, 96 + pen*rampWidth + rampWidth - 1, 13, pen
+  Next
+End Statement
+
+;; Ground, a ruler line every 64 pixels, and the edge markers: red on column 0, green on
+;; column 319 (both are on screen while the scroll is held at 0).
+Statement DrawWorld{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/#TILE - 1
+    pen.w = 6
+    If columnIndex MOD 2 = 1 Then pen = 7
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For rulerX.w = 64 To #WORLD_W - 64 Step 64
+    Boxf rulerX, #VIEW_TOP, rulerX, 207, 3
+  Next
+  Boxf 0, #VIEW_TOP, 0, 239, 11
+  Boxf #VIEW_W - 1, #VIEW_TOP, #VIEW_W - 1, 239, 12
+End Statement
+
+;; The two shapes of a depth: a ball for the bobs (pen 0 is the cookie's clear) and a
+;; filled brick for the stamps, in pens near the top of the palette.
+Statement MakeShapes{depthIndex.w}
+  SHARED depthColours()
+  Use BitMap depthIndex*4 + 3
+  Cls 0
+  ballPen.w = depthColours(depthIndex) - 3
+  brickPen.w = depthColours(depthIndex) - 5
+  Circlef 7, 7, 7, ballPen
+  Circlef 7, 7, 3, 8
+  Boxf 16, 0, 31, 15, brickPen
+  Boxf 16, 0, 31, 0, 3
+  Boxf 16, 7, 31, 7, 3
+  GetaShape depthIndex*2, 0, 0, #TILE, #TILE
+  GetaShape depthIndex*2 + 1, 16, 0, #TILE, #TILE
+End Statement
+
+BBlitMode CookieMode
+For depthIndex.w = 0 To #DEPTHS - 1
+  MakeShapes{depthIndex}
+  DrawWorld{depthIndex*4}
+  DrawWorld{depthIndex*4 + 1}
+Next
+DrawConfigBoxes{0}
+BuildLists{}
+drawBm = 1
+drawBuf = 1
+ShowConfig{0}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  ;; Held at 0 at the start of a phase, then back and forth.
+  If phaseFrame >= #HOLD_FRAMES
+    scrollX = scrollX + scrollDir
+    If scrollX >= #SCROLL_MAX Then scrollDir = -scrollStep
+    If scrollX <= 0
+      scrollX = 0
+      scrollDir = scrollStep
+    EndIf
+  EndIf
+  viewX = Int(scrollX)
+
+  ;; Into the world list's lines before timing anything.
+  While RasterLine{} < #WORK_LINE
+  Wend
+
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  For bobIndex.w = 0 To #BOBS - 1
+    BBlit drawBuf, depth*2, viewX + 20 + bobIndex*36, 160 + (bobIndex MOD 2)*16
+  Next
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+
+  ;; Two columns past the view's right edge, rows 2 to 14 (lines 32 to 239).
+  stampColumn = (viewX/#TILE + #VIEW_W/#TILE + 1)*#TILE
+  startLine = RasterLine{}
+  For stampIndex.w = 0 To #STAMPS - 1
+    Block depth*2 + 1, stampColumn + (stampIndex/#STAMP_ROWS)*#TILE, #VIEW_TOP + (stampIndex MOD #STAMP_ROWS)*#TILE
+  Next
+  endLine = RasterLine{}
+  stampLines = endLine - startLine
+  If stampLines < 0 Then stampLines = stampLines + #LINES_PAL
+
+  If phaseFrame >= #SETTLE
+    bobFrames(config) = bobFrames(config) + 1
+    bobSum(config) = bobSum(config) + bobLines
+    If bobLines > bobMax(config) Then bobMax(config) = bobLines
+    stampSum(config) = stampSum(config) + stampLines
+    If stampLines > stampMax(config) Then stampMax(config) = stampLines
+    If bobLines + stampLines > frameMax(config) Then frameMax(config) = bobLines + stampLines
+  EndIf
+
+  VWait
+  DisplayBitMap config*2 + 1, drawBm, scrollX, #VIEW_TOP
+  If drawBm = depth*4
+    drawBm = depth*4 + 1
+    drawBuf = 1
+  Else
+    drawBm = depth*4
+    drawBuf = 0
+  EndIf
+
+  phaseFrame = phaseFrame + 1
+  If phaseFrame >= #PHASE_FRAMES
+    ;; Put the two worlds back as they were drawn, so the next depth's phase and the
+    ;; next round start from clean bitmaps and empty buffers.
+    Use BitMap depth*4
+    UnBuffer 0
+    FlushBuffer 0
+    Use BitMap depth*4 + 1
+    UnBuffer 1
+    FlushBuffer 1
+    phaseFrame = 0
+    phase = phase + 1
+    If phase >= #CONFIGS*#ROUNDS
+      quitFlag = True
+    Else
+      config = phase MOD #CONFIGS
+      depth = configDepth(config)
+      drawBm = depth*4 + 1
+      drawBuf = 1
+      scrollX = 0
+      scrollDir = scrollStep
+      DrawConfigBoxes{config}
+      VWait
+      ShowConfig{config}
+    EndIf
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/planes-results.txt")
+  FileOutput 0
+  NPrint "planes: blitter time while the beam is in the world list (from line ", #WORK_LINE, ")"
+  NPrint #BOBS, " bobs (UnBuffer + cookie BBlit 16x16), ", #STAMPS, " tile Blocks (16x16), ", #PHASE_FRAMES, " frames a phase, ", #ROUNDS, " rounds"
+  NPrint "A raster line is about 63.5 microseconds. A PAL frame is ", #LINES_PAL, " lines."
+  NPrint ""
+  NPrint "config  planes  colours  flags     frames  bobs avg  bobs worst  stamps avg  stamps worst  both worst"
+  For configIndex.w = 0 To #CONFIGS - 1
+    If bobFrames(configIndex) > 0
+      depthIndex.w = configDepth(configIndex)
+      Print configIndex, "  ", depthPlanes(depthIndex), "  ", depthColours(depthIndex), "  $", Hex$(configFlags(configIndex)), "  ", bobFrames(configIndex), "  "
+      Print bobSum(configIndex)/bobFrames(configIndex), "  ", bobMax(configIndex), "  "
+      Print stampSum(configIndex)/bobFrames(configIndex), "  ", stampMax(configIndex), "  "
+      NPrint frameMax(configIndex)
+    EndIf
+  Next
+  NPrint ""
+  NPrint "Averages are whole lines (integer division). Config 0 is the game's display without"
+  NPrint "dual playfield; configs 1 to 3 add planes at fetch mode 3; 4 and 5 are 6 and 8 planes"
+  NPrint "at fetch mode 1, and 6 and 7 at fetch mode 2, to compare with 2 and 3."
+  NPrint ""
+  NPrint "Chip RAM"
+  NPrint "Free before the proof's bitmaps: ", chipBefore, ", after: ", chipAfter, " (largest block ", chipLargest, ")"
+  NPrint "The proof's bitmaps (640 wide, all four depths): ", chipBefore - chipAfter, " bytes"
+  NPrint ""
+  NPrint "A full-width double-buffered world (", #GAME_W, " x ", #GAME_H, ", two bitmaps), plus ", #OTHER_CHIP, " for the rest"
+  NPrint "of the game (estimate from the main project's MEMORY note), against 2 MB (", #CHIP_2MB, "):"
+  NPrint "planes  colours  world pair  with the rest  left of 2 MB"
+  For depthIndex.w = 0 To #DEPTHS - 1
+    pairBytes.l = 2*(#GAME_W/8)*#GAME_H*depthPlanes(depthIndex)
+    Print depthPlanes(depthIndex), "  ", depthColours(depthIndex), "  ", pairBytes, "  ", pairBytes + #OTHER_CHIP, "  "
+    NPrint #CHIP_2MB - pairBytes - #OTHER_CHIP
+  Next
+  CloseFile 0
+EndIf
+End

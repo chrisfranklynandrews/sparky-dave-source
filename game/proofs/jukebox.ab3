@@ -1,0 +1,1020 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 224
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 13
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; jukebox.ab3 -- the jukebox page (the jukebox plan, step 0): the sound's settings and every
+;; song and effect on one page, with four characters from the game hopping to each channel's
+;; loudness. Compile in UAE (execute sparky-dave:S/run-proof). Not part of the game.
+;;
+;; What it is built from: the game's own display (the HUD list over the dual playfield world
+;; list, fetch mode 3, the back in front by PF2PRI over a blank front, the overlay's two 384 px
+;; pages on the back bitmap, as proofs/overlay.ab3 proved), the game's own sound files (so what
+;; is heard is what the game plays), the game's sheets and shape slots (#PRE_*), the HUD font.
+;; Left out: the band split (the page does not scroll).
+;;
+;; The backdrop: the start of 1-1 (the hill, the bush, the ground) behind the stage, from the host
+;; preview picture assets/world1-1-320x256.iff. It is on the FRONT playfield (the blank cover), drawn
+;; once, so it costs no time per frame; the back page's pen 0 is transparent over it. The picture
+;; has its own palette order, so the front uses its colours (front entries 1 to 8) and a spare pen
+;; (9) for the sky behind the hill, filled first so that the picture's own sky (its pen 0) can be
+;; transparent; entry 0 stays black, so the rest of the page is black and the text is readable. The
+;; real feature would stamp the real map's cells with the atlas instead of using this picture.
+;;
+;; Questions it answers
+;;   1. Cost. Each frame draws on the hidden page only what changed: a character that moved or
+;;      changed frame (erased where it was, drawn where it is; the first version cleared the whole
+;;      stage strip, 127 lines a frame, and the loop ran slower than the display: the music dragged
+;;      and the keys lagged) and the rows that changed (a cursor move is two rows, a value one),
+;;      each page keeping its own list. The results file gives the lines of the sound ticks, the
+;;      stage, the rows and the whole frame's work, and the display frames that really passed
+;;      against the loop's passes (CIA-A's time of day counts the vertical sync): they must match.
+;;   2. Layout. A heading, a stage of about 80 px, nine rows at a 12 px pitch and a readout line in
+;;      the view (rows 32 to 239). Look at it for fit and readability.
+;;   3. The hop. Each character rises at once to a height from its channel's loudness
+;;      (apuState #AP_LEVEL, times the group's volume step) and falls back under gravity. Does it
+;;      look like the music? Do the volume rows change it? Does the layout row move the
+;;      characters to the other side?
+;;   4. The art. Mario (pulse 1), the Goomba (pulse 2), the Koopa (the triangle), the mushroom (the
+;;      noise), blitted into the back bitmap: are the colours right?
+;;   5. The engine's state can be saved and put back (F1 and F2), which leaving the page in a game
+;;      will do so the game's music goes on where it was. Play the ground music, F1, play another
+;;      song or an effect, F2: the ground music should carry on from the same place.
+;;
+;; Keys
+;;   Up, Down   choose a row          Left, Right  change the row's value
+;;   Return     SONG: play the song shown (the same one again: stop)   EFFECT: play it   DEFAULTS: the sound's defaults
+;;   F1 save the engine's state       F2 put it back          F10  quit
+;;   Esc        discard the changes made since the page opened (or since BACK last saved): the
+;;              sound goes back as it was, nothing is written. A BACK row that has changes to save
+;;              reads SAVE AND BACK, with ESC DISCARDS beside it; Return on it keeps them. On a
+;;              CD32 pad red (A) is Return and blue (B) is Esc: the pad is not read here.
+;; Rows: SONG, EFFECT, SOUND LAYOUT, FILTER, PULSE VOLUME, TRIANGLE VOLUME, NOISE VOLUME,
+;; DEFAULTS, BACK (here it only takes the changes as saved: nothing is written).
+;;
+;; Writes jukebox-results.txt on exit.
+
+WBStartup
+
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.sound.data.ab3"
+XINCLUDE "/includes/sparkydave.sound.ab3"
+
+;; =======================================================
+;; PROOF CONSTANTS
+;; =======================================================
+
+#PAGE_W = 384
+
+; The display window's edges moved one pixel left (DisplayAdjust units are lores pixels).
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; The rows.
+#ROW_SONG     = 0
+#ROW_EFFECT   = 1
+#ROW_PAN      = 2
+#ROW_FILTER   = 3
+#ROW_PULSE    = 4
+#ROW_TRIANGLE = 5
+#ROW_NOISE    = 6
+#ROW_DEFAULTS = 7
+#ROW_BACK     = 8
+#ROW_COUNT    = 9
+
+;; The page's layout, rows 32 to 239 of the back bitmap.
+#HEADING_Y   = 36
+#STAGE_TOP   = 48
+#GROUND_Y    = 112
+#ROWS_Y      = 122
+#ROW_PITCH   = 12
+#READOUT_Y   = 232
+#CURSOR_X    = 24
+#LABEL_X     = 40
+#VALUE_X     = 168
+#STAGE_MAX_H = 40
+
+;; The backdrop: the picture from row 160 for 56 lines (the hill from its top, the bush and one course
+;; of the ground's bricks, 8 lines) put 96 lines up, so the ground's top meets #GROUND_Y and its
+;; bricks end at line 119, above the first row's text (122); sky above it from the stage's top. #SKY_PEN is a front pen the picture does not use.
+#SCENE_BM        = 3
+#SCENE_SHAPE     = 1
+#SCENE_FIRST_ROW = 10
+#SCENE_TOP       = 64
+#SCENE_H         = 56
+#SKY_PEN         = 9
+
+#SONG_COUNT   = 14
+#EFFECT_COUNT = 18
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+Dim keyHeld.w(127)
+;; What sound.blitz.ab3 reads from the game: the area (0 main, 1 bonus) and the cover on show.
+currentArea.w = #AREA_MAIN
+coverKind.w = #COVER_NONE
+quitFlag.w = False
+wavesOk.w = BuildSoundWaves{}
+videoIsNtsc.w = NTSC
+hudLine.w = #HUD_YPOS_PAL
+If videoIsNtsc = True Then hudLine = #HUD_YPOS_NTSC
+frameLines.l = #PERF_LINES_PAL
+If videoIsNtsc = True Then frameLines = #PERF_LINES_NTSC
+
+cursorRow.w = 0
+songIndex.w = 0
+effectIndex.w = 0
+songPlaying.w = False
+playingText$ = "SILENT"
+shownPage.w = 0
+;; The song playing (-1 none), and a song waiting for the silence before it to be taken.
+;; The sound settings as they were when the page opened or BACK last saved them (what Esc goes back
+;; to, and what "changed" is measured against).
+baselinePan.w = 0
+baselineFilter.w = 0
+Dim baselineVolume.w(2)
+playingSongIndex.w = -1
+pendingSongIndex.w = -1
+lastTod.l = 0
+;; What each page still has to redraw: row r of page p is rowDirty(p*(#ROW_COUNT + 1) + r), the last
+;; entry of a page being the readout line. What each page shows of each character (-1: nothing).
+Dim rowDirty.w(2*(#ROW_COUNT + 1) - 1)
+Dim drawnShape.w(7)
+Dim drawnX.w(7)
+Dim drawnY.w(7)
+todStart.l = 0
+todEnd.l = 0
+Dim songName$(#SONG_COUNT - 1)
+Dim songIsEvent.w(#SONG_COUNT - 1)
+Dim songBit.w(#SONG_COUNT - 1)
+Dim effectName$(#EFFECT_COUNT - 1)
+Dim effectGroup.w(#EFFECT_COUNT - 1)
+Dim effectBit.w(#EFFECT_COUNT - 1)
+
+;; The four characters, by NES channel: their height off the ground and their fall speed.
+Dim hopHeight.w(3)
+Dim hopSpeed.w(3)
+Dim characterHeight.w(3)
+
+;; The saved engine.
+Dim savedSoundState.l(#SS_COUNT)
+Dim savedApuState.l(63)
+stateSaved.w = False
+
+;; The measurements, in raster lines.
+frameCount.l = 0
+tickCount.l = 0
+tickLineSum.l = 0
+tickLineWorst.l = 0
+stageLineSum.l = 0
+stageLineWorst.l = 0
+rowsDrawCount.l = 0
+rowsLineSum.l = 0
+rowsLineWorst.l = 0
+workLineSum.l = 0
+workLineWorst.l = 0
+overBudgetCount.l = 0
+openLines.l = 0
+hopPeak.w = 0
+
+;; The tracks.
+songName$(0) = "GROUND"
+songBit(0) = #MUSIC_GROUND
+songName$(1) = "UNDERGROUND"
+songBit(1) = #MUSIC_UNDERGROUND
+songName$(2) = "WATER"
+songBit(2) = #MUSIC_WATER
+songName$(3) = "CASTLE"
+songBit(3) = #MUSIC_CASTLE
+songName$(4) = "CLOUD"
+songBit(4) = #MUSIC_CLOUD
+songName$(5) = "PIPE INTRO"
+songBit(5) = #MUSIC_PIPE_INTRO
+songName$(6) = "STAR POWER"
+songBit(6) = #MUSIC_STAR_POWER
+songName$(7) = "DEATH"
+songIsEvent(7) = True
+songBit(7) = #MUSIC_DEATH
+songName$(8) = "GAME OVER"
+songIsEvent(8) = True
+songBit(8) = #MUSIC_GAME_OVER
+songName$(9) = "VICTORY"
+songIsEvent(9) = True
+songBit(9) = #MUSIC_VICTORY
+songName$(10) = "END OF CASTLE"
+songIsEvent(10) = True
+songBit(10) = #MUSIC_END_OF_CASTLE
+songName$(11) = "ALT GAME OVER"
+songIsEvent(11) = True
+songBit(11) = #MUSIC_ALT_GAME_OVER
+songName$(12) = "END OF LEVEL"
+songIsEvent(12) = True
+songBit(12) = #MUSIC_END_OF_LEVEL
+songName$(13) = "TIME RUNNING OUT"
+songIsEvent(13) = True
+songBit(13) = #MUSIC_TIME_RUNNING_OUT
+
+;; The effects: group 0 square 1, 1 square 2, 2 noise.
+effectName$(0) = "SMALL JUMP"
+effectBit(0) = #SFX_SMALL_JUMP
+effectName$(1) = "BIG JUMP"
+effectBit(1) = #SFX_BIG_JUMP
+effectName$(2) = "BUMP"
+effectBit(2) = #SFX_BUMP
+effectName$(3) = "STOMP"
+effectBit(3) = #SFX_ENEMY_STOMP
+effectName$(4) = "SMACK"
+effectBit(4) = #SFX_ENEMY_SMACK
+effectName$(5) = "PIPE INJURY"
+effectBit(5) = #SFX_PIPE_DOWN_INJURY
+effectName$(6) = "FIREBALL"
+effectBit(6) = #SFX_FIREBALL
+effectName$(7) = "FLAGPOLE"
+effectBit(7) = #SFX_FLAGPOLE
+effectName$(8) = "COIN"
+effectGroup(8) = 1
+effectBit(8) = #SFX_COIN_GRAB
+effectName$(9) = "GROW POWER UP"
+effectGroup(9) = 1
+effectBit(9) = #SFX_GROW_POWER_UP
+effectName$(10) = "GROW VINE"
+effectGroup(10) = 1
+effectBit(10) = #SFX_GROW_VINE
+effectName$(11) = "FIREWORK BLAST"
+effectGroup(11) = 1
+effectBit(11) = #SFX_BLAST
+effectName$(12) = "TIMER TICK"
+effectGroup(12) = 1
+effectBit(12) = #SFX_TIMER_TICK
+effectName$(13) = "POWER UP GRAB"
+effectGroup(13) = 1
+effectBit(13) = #SFX_POWER_UP_GRAB
+effectName$(14) = "ONE UP"
+effectGroup(14) = 1
+effectBit(14) = #SFX_EXTRA_LIFE
+effectName$(15) = "BOWSER FALL"
+effectGroup(15) = 1
+effectBit(15) = #SFX_BOWSER_FALL
+effectName$(16) = "BRICK SHATTER"
+effectGroup(16) = 2
+effectBit(16) = #SFX_BRICK_SHATTER
+effectName$(17) = "BOWSER FLAME"
+effectGroup(17) = 2
+effectBit(17) = #SFX_BOWSER_FLAME
+
+characterHeight(0) = #TILE
+characterHeight(1) = #GOOMBA_H
+characterHeight(2) = #KOOPA_H
+characterHeight(3) = #ITEM_H
+
+;; =======================================================
+;; ALLOCATION (AMIGA MODE)
+;; =======================================================
+
+;; The back bitmap holds two pages of #PAGE_W side by side; the front is a blank cover.
+BitMap #BACK_BM, #PAGE_W*2 + #FETCH_GUARD, #WORLD_H, #PLAYFIELD_PLANES
+BitMap #COVER_BM, #VIEW_W + #FETCH_GUARD, #WORLD_H, #PLAYFIELD_PLANES
+BitMap #HUD_BAND_BM, #VIEW_W + #FETCH_GUARD, #HUD_H, #PLAYFIELD_PLANES
+BitMap #MARIO_BM, #MARIO_SHEET_W, #TILE, #PLAYFIELD_PLANES
+BitMap #ITEMS_BM, #ITEMS_SHEET_W, #ITEMS_SHEET_H, #PLAYFIELD_PLANES
+BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+BitMap #HUD_BM, #HUD_SHEET_W, 8, #PLAYFIELD_PLANES
+BitMap #SCENE_BM, #VIEW_W, 256, #PLAYFIELD_PLANES
+
+LoadBitMap #MARIO_BM, "sparky-dave:game/assets/mario-small.iff"
+LoadBitMap #ITEMS_BM, "sparky-dave:game/assets/items-16x16.iff"
+LoadBitMap #ENEMIES_BM, "sparky-dave:game/assets/enemies.iff"
+LoadBitMap #HUD_BM, "sparky-dave:game/assets/hud-objects.iff"
+LoadBitMap #SCENE_BM, "sparky-dave:game/assets/world1-1-320x256.iff"
+InitShape #SCENE_SHAPE, #VIEW_W, #SCENE_H, #PLAYFIELD_PLANES
+
+For hudGlyph.w = 0 To #HUD_GLYPHS - 1
+  InitShape #HUD_SHAPE_BASE + hudGlyph, 8, 8, #PLAYFIELD_PLANES
+Next
+InitShape #PRE_SMALL_R + #MARIO_F_JUMP, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_SMALL_R + #MARIO_F_IDLE, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_GOOMBA, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_GOOMBA + 1, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_KOOPA + 2, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+InitShape #PRE_KOOPA + 3, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+InitShape #PRE_MUSHROOM, #TILE, #TILE, #PLAYFIELD_PLANES
+
+;; The palette is the game's: entries 0 to 15 the front (the cover is black), 16 to 31 the
+;; back's pens, each the atlas colour of the pen (the main project's PALETTE note).
+InitPalette 0, #COPPER_COLORS
+For penIndex.w = 1 To 15
+  AGAPalRGB 0, penIndex, atlasPalette(penIndex*3), atlasPalette(penIndex*3 + 1), atlasPalette(penIndex*3 + 2)
+  AGAPalRGB 0, penIndex + 16, atlasPalette(penIndex*3), atlasPalette(penIndex*3 + 1), atlasPalette(penIndex*3 + 2)
+Next
+;; The front, which shows only the backdrop: the picture's own colours for its pens 1 to 8 (black,
+;; white, light blue, brown, orange, green, light green, skin), the sky in the spare pen, and black
+;; at entry 0 for the rest of the page. The back's entries 17 to 31 are the atlas's, above.
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 0, 0, 0
+AGAPalRGB 0, 2, 255, 255, 255
+AGAPalRGB 0, 3, 99, 173, 255
+AGAPalRGB 0, 4, 156, 74, 0
+AGAPalRGB 0, 5, 230, 156, 33
+AGAPalRGB 0, 6, 16, 148, 0
+AGAPalRGB 0, 7, 140, 214, 0
+AGAPalRGB 0, 8, 255, 206, 198
+AGAPalRGB 0, #SKY_PEN, 193, 224, 254
+AGAPalRGB 0, 16, 0, 0, 0
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "/includes/sparkydave.sound.blitz.ab3"
+
+;; CIA-A's time-of-day counter, which counts the 50 or 60 Hz vertical sync (proofs/sound-engine.ab3).
+;; The high byte is read first, as that latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+;; True once when a key goes down.
+Function.w KeyPressed{rawCode.w}
+  SHARED keyHeld()
+  If RawStatus(rawCode)
+    If keyHeld(rawCode) = False
+      keyHeld(rawCode) = True
+      Function Return True
+    EndIf
+  Else
+    keyHeld(rawCode) = False
+  EndIf
+  Function Return False
+End Function
+
+;; The HUD font, as hud.blitz.ab3 draws it: a clear of the 8x8 cell and a blit.
+Function.w HudGlyphFor{code.w}
+  If code >= 48
+    If code <= 57 Then Function Return code - 48
+  EndIf
+  If code >= 65
+    If code <= 90 Then Function Return code - 55
+  EndIf
+  If code = 45 Then Function Return #HUD_G_DASH
+  Function Return -1
+End Function
+
+Statement DrawGlyphInto{targetBitmap.w, glyphIndex.w, glyphX.w, glyphY.w}
+  Use BitMap targetBitmap
+  Boxf glyphX, glyphY, glyphX + 7, glyphY + 7, 0
+  Blit #HUD_SHAPE_BASE + glyphIndex, glyphX, glyphY
+End Statement
+
+Statement DrawTextInto{targetBitmap.w, glyphText$, textX.w, textY.w}
+  For charIndex.w = 1 To Len(glyphText$)
+    glyphIndex.w = HudGlyphFor{Asc(Mid$(glyphText$, charIndex, 1))}
+    If glyphIndex >= 0 Then DrawGlyphInto{targetBitmap, glyphIndex, textX + (charIndex - 1)*8, textY}
+  Next
+End Statement
+
+;; Text blitted with no clear of each cell: over an area already cleared (a row's value), or over
+;; the same text (a label). Half the blitter work of DrawTextInto{}.
+Statement BlitTextInto{targetBitmap.w, glyphText$, textX.w, textY.w}
+  Use BitMap targetBitmap
+  For charIndex.w = 1 To Len(glyphText$)
+    glyphIndex.w = HudGlyphFor{Asc(Mid$(glyphText$, charIndex, 1))}
+    If glyphIndex >= 0 Then Blit #HUD_SHAPE_BASE + glyphIndex, textX + (charIndex - 1)*8, textY
+  Next
+End Statement
+
+Statement DrawTextCentredAt{targetBitmap.w, glyphText$, originX.w, textY.w}
+  DrawTextInto{targetBitmap, glyphText$, originX + (#VIEW_W - Len(glyphText$)*8)/2, textY}
+End Statement
+
+Statement CutShapes{}
+  Use BitMap #HUD_BM
+  For hudGlyph.w = 0 To #HUD_GLYPHS - 1
+    GetaShape #HUD_SHAPE_BASE + hudGlyph, hudGlyph*8, 0, 8, 8
+  Next
+  Use BitMap #MARIO_BM
+  GetaShape #PRE_SMALL_R + #MARIO_F_JUMP, #MARIO_F_JUMP*#TILE, 0, #TILE, #TILE
+  GetaShape #PRE_SMALL_R + #MARIO_F_IDLE, #MARIO_F_IDLE*#TILE, 0, #TILE, #TILE
+  Use BitMap #ENEMIES_BM
+  For goombaFrame.w = 0 To 1
+    GetaShape #PRE_GOOMBA + goombaFrame, goombaFrame*#GOOMBA_W, 16, #GOOMBA_W, #GOOMBA_H
+  Next
+  ;; The Koopa's art faces left; the shapes are turned to face right, as the game's are.
+  For koopaFrame.w = 0 To 1
+    GetaShape #PRE_KOOPA + 2 + koopaFrame, (#KOOPA_SHEET_CELL + koopaFrame)*#KOOPA_W, 8, #KOOPA_W, #KOOPA_H
+    XFlip #PRE_KOOPA + 2 + koopaFrame
+  Next
+  Use BitMap #ITEMS_BM
+  GetaShape #PRE_MUSHROOM, #PRE_MUSHROOM_CELL*#TILE, 0, #ITEM_W, #ITEM_H
+End Statement
+
+;; The backdrop on the front (the cover bitmap), once: sky from the stage's top to the ground, then
+;; the picture's strip over it, its sky transparent (pen 0, as every shape's is).
+Statement DrawScene{}
+  Use BitMap #SCENE_BM
+  GetaShape #SCENE_SHAPE, 0, #SCENE_FIRST_ROW*#TILE, #VIEW_W, #SCENE_H
+  Use BitMap #COVER_BM
+  Boxf 0, #STAGE_TOP, #VIEW_W - 1, #SCENE_TOP + #SCENE_H - 1, #SKY_PEN
+  Blit #SCENE_SHAPE, 0, #SCENE_TOP
+End Statement
+
+;; The page's x on the back bitmap.
+Function.w PageX{pageIndex.w}
+  Function Return pageIndex*#PAGE_W
+End Function
+
+;; True if the sound's settings differ from the baseline.
+Function.w SettingsChanged{}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), baselinePan, baselineFilter, baselineVolume()
+  changedNow.w = False
+  If soundPanNow <> baselinePan Then changedNow = True
+  filterNow.w = 0
+  If soundFilterChosen <> False Then filterNow = 1
+  If filterNow <> baselineFilter Then changedNow = True
+  For volumeGroup.w = 0 To 2
+    If soundVolumeScale(volumeGroup) <> baselineVolume(volumeGroup) Then changedNow = True
+  Next
+  Function Return changedNow
+End Function
+
+;; What is set now becomes the baseline (the page opening, or BACK saving).
+Statement TakeBaseline{}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), baselinePan, baselineFilter, baselineVolume()
+  baselinePan = soundPanNow
+  baselineFilter = 0
+  If soundFilterChosen <> False Then baselineFilter = 1
+  For volumeGroup.w = 0 To 2
+    baselineVolume(volumeGroup) = soundVolumeScale(volumeGroup)
+  Next
+End Statement
+
+;; The baseline put back, on the hardware too. The layout restarts the audio only if it differs.
+Statement DiscardChanges{}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), baselinePan, baselineFilter, baselineVolume()
+  If soundPanNow <> baselinePan Then SoundSetPan{baselinePan}
+  soundFilterChosen = False
+  If baselineFilter = 1 Then soundFilterChosen = True
+  SoundSetFilter{soundFilterChosen}
+  For volumeGroup.w = 0 To 2
+    soundVolumeScale(volumeGroup) = baselineVolume(volumeGroup)
+  Next
+End Statement
+
+;; A row's label, and its value.
+Function.s RowLabel{rowIndex.w}
+  If rowIndex = #ROW_SONG Then Function Return "SONG"
+  If rowIndex = #ROW_EFFECT Then Function Return "EFFECT"
+  If rowIndex = #ROW_PAN Then Function Return "SOUND LAYOUT"
+  If rowIndex = #ROW_FILTER Then Function Return "FILTER"
+  If rowIndex = #ROW_PULSE Then Function Return "PULSE VOLUME"
+  If rowIndex = #ROW_TRIANGLE Then Function Return "TRIANGLE VOLUME"
+  If rowIndex = #ROW_NOISE Then Function Return "NOISE VOLUME"
+  If rowIndex = #ROW_DEFAULTS Then Function Return "DEFAULTS"
+  If SettingsChanged{} <> False Then Function Return "SAVE AND BACK"
+  Function Return "BACK"
+End Function
+
+Function.s RowValue{rowIndex.w}
+  SHARED songName$(), effectName$(), songIndex, effectIndex, soundPanNow, soundFilterChosen, soundVolumeScale()
+  If rowIndex = #ROW_SONG Then Function Return songName$(songIndex)
+  If rowIndex = #ROW_EFFECT Then Function Return effectName$(effectIndex)
+  If rowIndex = #ROW_PAN Then Function Return Chr$(49 + soundPanNow)
+  If rowIndex = #ROW_FILTER
+    If soundFilterChosen <> False Then Function Return "ON"
+    Function Return "OFF"
+  EndIf
+  If rowIndex = #ROW_PULSE Then Function Return Chr$(48 + soundVolumeScale(0))
+  If rowIndex = #ROW_TRIANGLE Then Function Return Chr$(48 + soundVolumeScale(1))
+  If rowIndex = #ROW_NOISE Then Function Return Chr$(48 + soundVolumeScale(2))
+  If rowIndex = #ROW_BACK
+    If SettingsChanged{} <> False Then Function Return "ESC DISCARDS"
+  EndIf
+  Function Return ""
+End Function
+
+;; One row on one page: its cursor cell and value area cleared (the label never changes and is
+;; drawn once, by DrawStatic{}), then the cursor if it is the chosen row and the value, blitted
+;; without a clear of each cell. The last row number is the readout.
+Statement DrawRow{pageIndex.w, rowIndex.w}
+  SHARED cursorRow, playingText$
+  pageX.w = PageX{pageIndex}
+  Use BitMap #BACK_BM
+  If rowIndex = #ROW_COUNT
+    Boxf pageX, #READOUT_Y, pageX + #VIEW_W - 1, #READOUT_Y + 7, 0
+    BlitTextInto{#BACK_BM, playingText$, pageX + (#VIEW_W - Len(playingText$)*8)/2, #READOUT_Y}
+    Statement Return
+  EndIf
+  rowY.w = #ROWS_Y + rowIndex*#ROW_PITCH
+  Boxf pageX + #CURSOR_X, rowY, pageX + #CURSOR_X + 7, rowY + 7, 0
+  Boxf pageX + #VALUE_X, rowY, pageX + #VIEW_W - 1, rowY + 7, 0
+  If rowIndex = #ROW_BACK
+    Boxf pageX + #LABEL_X, rowY, pageX + #VALUE_X - 1, rowY + 7, 0
+    BlitTextInto{#BACK_BM, RowLabel{rowIndex}, pageX + #LABEL_X, rowY}
+  EndIf
+  If rowIndex = cursorRow Then Blit #HUD_SHAPE_BASE + #HUD_G_MENU_CURSOR, pageX + #CURSOR_X, rowY
+  BlitTextInto{#BACK_BM, RowValue{rowIndex}, pageX + #VALUE_X, rowY}
+End Statement
+
+;; A row (or the readout) to be redrawn on both pages.
+Statement MarkRow{rowIndex.w}
+  SHARED rowDirty()
+  rowDirty(rowIndex) = True
+  rowDirty(#ROW_COUNT + 1 + rowIndex) = True
+End Statement
+
+Statement MarkAllRows{}
+  For rowIndex.w = 0 To #ROW_COUNT
+    MarkRow{rowIndex}
+  Next
+End Statement
+
+;; The rows marked for a page, drawn and cleared. True if there were any.
+Function.w DrawDirtyRows{pageIndex.w}
+  SHARED rowDirty()
+  drewAny.w = False
+  For rowIndex.w = 0 To #ROW_COUNT
+    If rowDirty(pageIndex*(#ROW_COUNT + 1) + rowIndex) <> False
+      DrawRow{pageIndex, rowIndex}
+      rowDirty(pageIndex*(#ROW_COUNT + 1) + rowIndex) = False
+      drewAny = True
+    EndIf
+  Next
+  Function Return drewAny
+End Function
+
+;; Everything that does not move: cleared, the heading, the speakers' letters and the labels, then
+;; every row. The page then shows no character.
+Statement DrawStatic{pageIndex.w}
+  SHARED drawnShape(), rowDirty()
+  pageX.w = PageX{pageIndex}
+  Use BitMap #BACK_BM
+  Boxf pageX, 0, pageX + #PAGE_W - 1, #WORLD_H - 1, 0
+  DrawTextCentredAt{#BACK_BM, "JUKEBOX", pageX, #HEADING_Y}
+  DrawTextInto{#BACK_BM, "L", pageX + 16, #HEADING_Y}
+  DrawTextInto{#BACK_BM, "R", pageX + #VIEW_W - 24, #HEADING_Y}
+  For rowIndex.w = 0 To #ROW_COUNT - 1
+    DrawTextInto{#BACK_BM, RowLabel{rowIndex}, pageX + #LABEL_X, #ROWS_Y + rowIndex*#ROW_PITCH}
+  Next
+  For channelIndex.w = 0 To 3
+    drawnShape(pageIndex*4 + channelIndex) = -1
+  Next
+  For rowIndex.w = 0 To #ROW_COUNT
+    rowDirty(pageIndex*(#ROW_COUNT + 1) + rowIndex) = True
+  Next
+  drewAny.w = DrawDirtyRows{pageIndex}
+End Statement
+
+;; The shape a channel's character is showing now.
+Function.w CharacterShape{channelIndex.w}
+  SHARED hopHeight(), frameCount
+  If channelIndex = 0
+    If hopHeight(0) > 0 Then Function Return #PRE_SMALL_R + #MARIO_F_JUMP
+    Function Return #PRE_SMALL_R + #MARIO_F_IDLE
+  EndIf
+  If channelIndex = 1 Then Function Return #PRE_GOOMBA + ((frameCount/8) AND 1)
+  If channelIndex = 2 Then Function Return #PRE_KOOPA + 2 + ((frameCount/8) AND 1)
+  Function Return #PRE_MUSHROOM
+End Function
+
+;; The character in a channel's place on a page, only if it is not already as it should be there:
+;; erased where this page last drew it, then drawn at its height above the ground.
+Statement DrawCharacter{pageIndex.w, channelIndex.w, characterX.w}
+  SHARED hopHeight(), characterHeight(), drawnShape(), drawnX(), drawnY()
+  pageX.w = PageX{pageIndex}
+  slotIndex.w = pageIndex*4 + channelIndex
+  shapeSlot.w = CharacterShape{channelIndex}
+  drawY.w = #GROUND_Y - characterHeight(channelIndex) - hopHeight(channelIndex)
+  If drawnShape(slotIndex) = shapeSlot AND drawnX(slotIndex) = characterX AND drawnY(slotIndex) = drawY Then Statement Return
+  Use BitMap #BACK_BM
+  If drawnShape(slotIndex) >= 0
+    Boxf pageX + drawnX(slotIndex), drawnY(slotIndex), pageX + drawnX(slotIndex) + 15, drawnY(slotIndex) + characterHeight(channelIndex) - 1, 0
+  EndIf
+  Blit shapeSlot, pageX + characterX, drawY
+  drawnShape(slotIndex) = shapeSlot
+  drawnX(slotIndex) = characterX
+  drawnY(slotIndex) = drawY
+End Statement
+
+;; One frame's hop for a channel: it rises at once to the height its loudness asks for and falls back
+;; under gravity (the speed grows a pixel a frame).
+Statement UpdateHop{channelIndex.w}
+  SHARED hopHeight(), hopSpeed(), hopPeak, apuState(), soundVolumeScale()
+  groupIndex.w = 0
+  If channelIndex = 2 Then groupIndex = 1
+  If channelIndex = 3 Then groupIndex = 2
+  levelNow.w = apuState(channelIndex*16 + #AP_LEVEL)
+  targetHeight.w = (levelNow*soundVolumeScale(groupIndex)*8)/15
+  If targetHeight > #STAGE_MAX_H Then targetHeight = #STAGE_MAX_H
+  If targetHeight > hopHeight(channelIndex)
+    hopHeight(channelIndex) = targetHeight
+    hopSpeed(channelIndex) = 0
+  Else
+    hopSpeed(channelIndex) = hopSpeed(channelIndex) + 1
+    hopHeight(channelIndex) = hopHeight(channelIndex) - hopSpeed(channelIndex)
+    If hopHeight(channelIndex) < 0
+      hopHeight(channelIndex) = 0
+      hopSpeed(channelIndex) = 0
+    EndIf
+  EndIf
+  If hopHeight(channelIndex) > hopPeak Then hopPeak = hopHeight(channelIndex)
+End Statement
+
+;; The stage on one page: the four characters, each on the side of the speaker its channel's Paula
+;; channel is on (channels 0 and 3 are the left, 1 and 2 the right), in channel order. A character
+;; whose side changed (the layout row) is erased where it was by DrawCharacter{}.
+Statement DrawStage{pageIndex.w}
+  SHARED soundPaulaChannel()
+  leftCount.w = 0
+  rightCount.w = 0
+  For channelIndex.w = 0 To 3
+    paulaNow.w = soundPaulaChannel(channelIndex)
+    If paulaNow = 0 OR paulaNow = 3
+      DrawCharacter{pageIndex, channelIndex, 56 + leftCount*56}
+      leftCount = leftCount + 1
+    Else
+      DrawCharacter{pageIndex, channelIndex, 208 + rightCount*56}
+      rightCount = rightCount + 1
+    EndIf
+  Next
+End Statement
+
+;; A song asked for now (area music loops; an event tune plays once).
+Statement StartSong{startIndex.w}
+  SHARED songIsEvent(), songBit(), songName$(), playingText$, playingSongIndex
+  If songIsEvent(startIndex) <> False
+    SoundEventMusic{songBit(startIndex)}
+  Else
+    SoundAreaMusic{songBit(startIndex)}
+  EndIf
+  playingSongIndex = startIndex
+  playingText$ = "PLAYING " + songName$(startIndex)
+  MarkRow{#ROW_COUNT}
+End Statement
+
+;; Return on the SONG row: the song shown, if another is playing or none is; the same one again
+;; stops it. A change of song silences the engine's music first and starts the new one the next
+;; frame (pendingSongIndex), since one request is kept a tick, and an event tune would hold off an
+;; area one.
+Statement PressSong{}
+  SHARED songIndex, playingSongIndex, pendingSongIndex, playingText$
+  If playingSongIndex = songIndex
+    SoundAreaMusic{#MUSIC_SILENCE}
+    SoundEventMusic{#MUSIC_SILENCE}
+    playingSongIndex = -1
+    playingText$ = "SILENT"
+    MarkRow{#ROW_COUNT}
+    Statement Return
+  EndIf
+  If playingSongIndex >= 0
+    SoundAreaMusic{#MUSIC_SILENCE}
+    SoundEventMusic{#MUSIC_SILENCE}
+    pendingSongIndex = songIndex
+    playingSongIndex = -1
+    Statement Return
+  EndIf
+  StartSong{songIndex}
+End Statement
+
+;; Once a frame, before the ticks: the song waiting for the silence, and an event tune that has
+;; ended on its own (the engine's event buffer is empty) leaves the readout.
+Statement UpdateSongState{}
+  SHARED pendingSongIndex, playingSongIndex, songIsEvent(), soundState(), playingText$
+  If pendingSongIndex >= 0
+    StartSong{pendingSongIndex}
+    pendingSongIndex = -1
+    Statement Return
+  EndIf
+  If playingSongIndex >= 0
+    If songIsEvent(playingSongIndex) <> False AND soundState(#SS_EVENT_MUSIC_BUFFER) = 0 AND soundState(#SS_EVENT_MUSIC_QUEUE) = 0
+      playingSongIndex = -1
+      playingText$ = "SILENT"
+      MarkRow{#ROW_COUNT}
+    EndIf
+  EndIf
+End Statement
+
+Statement PlayEffect{}
+  SHARED effectIndex, effectGroup(), effectBit(), effectName$(), playingText$
+  If effectGroup(effectIndex) = 0 Then SoundSquare1{effectBit(effectIndex)}
+  If effectGroup(effectIndex) = 1 Then SoundSquare2{effectBit(effectIndex)}
+  If effectGroup(effectIndex) = 2 Then SoundNoise{effectBit(effectIndex)}
+  playingText$ = "EFFECT " + effectName$(effectIndex)
+End Statement
+
+;; Left (-1) or right (1) on the chosen row.
+Statement ChangeRow{changeNow.w}
+  SHARED cursorRow, songIndex, effectIndex, soundPanNow, soundFilterChosen, soundVolumeScale()
+  If cursorRow = #ROW_SONG
+    songIndex = (songIndex + changeNow + #SONG_COUNT) MOD #SONG_COUNT
+  EndIf
+  If cursorRow = #ROW_EFFECT
+    effectIndex = (effectIndex + changeNow + #EFFECT_COUNT) MOD #EFFECT_COUNT
+  EndIf
+  If cursorRow = #ROW_PAN
+    SoundSetPan{(soundPanNow + changeNow + #SOUND_PAN_LAYOUTS) MOD #SOUND_PAN_LAYOUTS}
+  EndIf
+  If cursorRow = #ROW_FILTER
+    soundFilterChosen = NOT soundFilterChosen
+    SoundSetFilter{soundFilterChosen}
+  EndIf
+  If cursorRow >= #ROW_PULSE AND cursorRow <= #ROW_NOISE
+    groupIndex.w = cursorRow - #ROW_PULSE
+    volumeNew.w = soundVolumeScale(groupIndex) + changeNow
+    If volumeNew >= 0 AND volumeNew <= 9 Then soundVolumeScale(groupIndex) = volumeNew
+  EndIf
+  MarkRow{cursorRow}
+  MarkRow{#ROW_BACK}
+End Statement
+
+;; Return on BACK, and Esc.
+Statement PressBack{}
+  SHARED playingText$
+  If SettingsChanged{} <> False
+    TakeBaseline{}
+    playingText$ = "SAVED"
+  Else
+    playingText$ = "NOTHING CHANGED"
+  EndIf
+  MarkRow{#ROW_BACK}
+  MarkRow{#ROW_COUNT}
+End Statement
+
+Statement PressCancel{}
+  SHARED playingText$
+  If SettingsChanged{} <> False
+    DiscardChanges{}
+    playingText$ = "DISCARDED"
+    MarkAllRows{}
+  Else
+    playingText$ = "NOTHING CHANGED"
+    MarkRow{#ROW_COUNT}
+  EndIf
+End Statement
+
+;; The keys, once a frame.
+Statement PollKeys{}
+  SHARED cursorRow, quitFlag, soundState(), apuState(), savedSoundState(), savedApuState(), stateSaved
+  SHARED playingText$
+  If RawStatus(#RAW_KEY_F10) Then quitFlag = True
+  If KeyPressed{#RAW_KEY_ESC} Then PressCancel{}
+  If KeyPressed{#RAW_KEY_UP}
+    MarkRow{cursorRow}
+    cursorRow = (cursorRow + #ROW_COUNT - 1) MOD #ROW_COUNT
+    MarkRow{cursorRow}
+  EndIf
+  If KeyPressed{#RAW_KEY_DOWN}
+    MarkRow{cursorRow}
+    cursorRow = (cursorRow + 1) MOD #ROW_COUNT
+    MarkRow{cursorRow}
+  EndIf
+  If KeyPressed{#RAW_KEY_LEFT} Then ChangeRow{-1}
+  If KeyPressed{#RAW_KEY_RIGHT} Then ChangeRow{1}
+  If KeyPressed{#RAW_KEY_START}
+    If cursorRow = #ROW_SONG Then PressSong{}
+    If cursorRow = #ROW_EFFECT Then PlayEffect{}
+    If cursorRow = #ROW_BACK Then PressBack{}
+    If cursorRow = #ROW_DEFAULTS
+      SetSoundDefaults{}
+      SoundApplySettings{}
+      MarkAllRows{}
+    EndIf
+    MarkRow{#ROW_COUNT}
+  EndIf
+  If KeyPressed{#RAW_KEY_F1}
+    For stateIndex.w = 0 To #SS_COUNT
+      savedSoundState(stateIndex) = soundState(stateIndex)
+    Next
+    For stateIndex.w = 0 To 63
+      savedApuState(stateIndex) = apuState(stateIndex)
+    Next
+    stateSaved = True
+    playingText$ = "STATE SAVED"
+    MarkRow{#ROW_COUNT}
+  EndIf
+  If KeyPressed{#RAW_KEY_F2}
+    If stateSaved <> False
+      For stateIndex.w = 0 To #SS_COUNT
+        soundState(stateIndex) = savedSoundState(stateIndex)
+      Next
+      For stateIndex.w = 0 To 63
+        apuState(stateIndex) = savedApuState(stateIndex)
+      Next
+      playingText$ = "STATE PUT BACK"
+      MarkRow{#ROW_COUNT}
+    EndIf
+  EndIf
+End Statement
+
+;; The display: the HUD band (blank) over the world list, whose front is the blank cover and whose
+;; back is the page, brought in front by PF2PRI. The game's lists, flags and window edges.
+BBlitMode CookieMode
+BlitMode CookieMode
+CutShapes{}
+Use BitMap #COVER_BM
+Cls 0
+DrawScene{}
+Use BitMap #HUD_BAND_BM
+Cls 0
+Use BitMap #BACK_BM
+Cls 0
+
+InitCopList 0, hudLine, #HUD_H, #COPPER_FLAGS, #COPPER_SPRITES, #COPPER_COLORS, #COPPER_CUSTOMS
+InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, #COPPER_CUSTOMS
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #HUD_BAND_BM, 0, 0
+DisplayBitMap 1, #COVER_BM, 0, #VIEW_TOP, #BACK_BM, 0, #VIEW_TOP
+BlitzKeys On
+
+;; Both pages drawn before the back comes to the front (the cost of opening the page is measured).
+openStart.l = RasterLine{}
+SoundReset{}
+SetSoundDefaults{}
+TakeBaseline{}
+DrawStatic{0}
+DrawStatic{1}
+openLines = SegmentLines{openStart, RasterLine{}, frameLines}
+VWait
+DisplayControls 1, #PLAYFIELD2_PRIORITY, 0, 0
+
+If wavesOk = True
+  soundState(#SS_ENABLED) = True
+  SoundStart{}
+  SoundApplySettings{}
+EndIf
+
+tickDebt.w = 0
+todStart = ReadTimeOfDay{}
+lastTod = todStart
+While quitFlag = False
+  VWait
+  DisplayBitMap 1, #COVER_BM, 0, #VIEW_TOP, #BACK_BM, PageX{shownPage}, #VIEW_TOP
+  drawPage.w = 1 - shownPage
+  frameStart.l = RasterLine{}
+
+  UpdateSongState{}
+  PollKeys{}
+
+  ;; The sound ticks: 60 a second, so 6 in 5 frames on PAL and one a frame on NTSC. Counted from
+  ;; the display frames that really passed since the last pass (CIA-A's time of day counts the
+  ;; vertical sync), not from the passes: a pass that ran long (the keys held down through the
+  ;; menu) then catches the music up and it keeps its tempo.
+  tickStart.l = RasterLine{}
+  todNow.l = ReadTimeOfDay{}
+  framesPassed.l = (todNow - lastTod) AND $ffffff
+  lastTod = todNow
+  If framesPassed < 1 Then framesPassed = 1
+  If framesPassed > 4 Then framesPassed = 4
+  If videoIsNtsc = True
+    tickDebt = tickDebt + 5*framesPassed
+  Else
+    tickDebt = tickDebt + 6*framesPassed
+  EndIf
+  While tickDebt >= 5
+    SoundTick{}
+    tickCount = tickCount + 1
+    tickDebt = tickDebt - 5
+  Wend
+  tickLines.l = SegmentLines{tickStart, RasterLine{}, frameLines}
+  tickLineSum = tickLineSum + tickLines
+  If tickLines > tickLineWorst Then tickLineWorst = tickLines
+
+  ;; The stage on the hidden page, every frame.
+  stageStart.l = RasterLine{}
+  For channelIndex.w = 0 To 3
+    UpdateHop{channelIndex}
+  Next
+  DrawStage{drawPage}
+  stageLines.l = SegmentLines{stageStart, RasterLine{}, frameLines}
+  stageLineSum = stageLineSum + stageLines
+  If stageLines > stageLineWorst Then stageLineWorst = stageLines
+
+  ;; The rows marked for this page, on the hidden page.
+  rowsStart.l = RasterLine{}
+  If DrawDirtyRows{drawPage} <> False
+    rowsLines.l = SegmentLines{rowsStart, RasterLine{}, frameLines}
+    rowsDrawCount = rowsDrawCount + 1
+    rowsLineSum = rowsLineSum + rowsLines
+    If rowsLines > rowsLineWorst Then rowsLineWorst = rowsLines
+  EndIf
+
+  workEnd.l = RasterLine{}
+  workLines.l = SegmentLines{frameStart, workEnd, frameLines}
+  workLineSum = workLineSum + workLines
+  If workLines > workLineWorst Then workLineWorst = workLines
+  ;; Past the next vertical blank: the beam is back above where the frame's work began.
+  If workEnd < frameStart Then overBudgetCount = overBudgetCount + 1
+
+  shownPage = drawPage
+  frameCount = frameCount + 1
+Wend
+
+todEnd = ReadTimeOfDay{}
+SoundStop{}
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/jukebox-results.txt")
+  FileOutput 0
+  NPrint "jukebox: ", frameCount, " frames, ", tickCount, " sound ticks, video ", frameLines, " lines a frame"
+  If wavesOk = False Then NPrint "BuildSoundWaves FAILED (no Chip RAM): no sound"
+  NPrint "opening the page, both pages drawn whole: ", openLines, " lines"
+  If frameCount > 0
+    NPrint "per frame, average / worst lines: sound ticks ", tickLineSum/frameCount, " / ", tickLineWorst, ", stage ", stageLineSum/frameCount, " / ", stageLineWorst, ", whole frame's work ", workLineSum/frameCount, " / ", workLineWorst
+  EndIf
+  If rowsDrawCount > 0 Then NPrint "rows redraws on one page: ", rowsDrawCount, ", average ", rowsLineSum/rowsDrawCount, " lines, worst ", rowsLineWorst
+  NPrint "frames whose work ran past the next vertical blank (this check misses a long overrun): ", overBudgetCount
+  NPrint "loop passes ", frameCount, ", display frames that really passed (CIA-A time of day) ", todEnd - todStart, " (equal if every pass fitted in a frame)"
+  NPrint "highest hop reached: ", hopPeak, " px"
+  If stateSaved = True Then NPrint "the engine's state was saved (F1)"
+  NPrint ""
+  NPrint "The picture and the sound are the main result: report the five points at the top of the proof."
+  CloseFile 0
+EndIf
+End

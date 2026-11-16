@@ -1,0 +1,1681 @@
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_JUMP  = $40
+#RAW_KEY_START = $44 ; Return, the cartridge's Start button
+#RAW_KEY_ESC   = $45
+#RAW_KEY_UP    = $4c
+#RAW_KEY_DOWN  = $4d
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_F1    = $50
+#RAW_KEY_F2    = $51
+#RAW_KEY_F3    = $52
+#RAW_KEY_RUN   = $63
+#RAW_KEY_ALT   = $64
+#RAW_KEY_RALT  = $65
+
+;; Debug keys (debug mode only): F4 makes Mario big, F5 makes him small, F3 plays the shell-chain scene, F7 switches invincibility
+;; and F8 gives the Starman. Del switches the world's scroll between whole pixels and fractions. A player can never choose one of
+;; these for an action: the redefine screen refuses every function key, Del and Help.
+;;
+;; These are Amiga raw key codes, which follow the keyboard's matrix, not the alphabet: $20 is A, $21 S, $22 D, $23 F ... $31 Z ...
+;; $42 is Tab, not B. Space is $40, Esc $45, F1 $50.
+#RAW_KEY_DEL        = $46
+#RAW_KEY_BIG        = $53
+#RAW_KEY_SMALL      = $54
+#RAW_KEY_INVINCIBLE = $56
+#RAW_KEY_STAR       = $57
+#RAW_KEY_F9         = $58
+#RAW_KEY_F10        = $59
+#RAW_KEY_HELP       = $5F
+
+;; The display's type words. #COPPER_FLAGS ($11014) is 4 planes, smooth scroll, AGA colours and fetch mode 1 (32 bit). Fetch mode 1
+;; leaves the two sprite channels that Mario's attached 15 colour sprite needs; fetch mode 3 would leave only one (the guide warns that
+;; sprites and fetch mode 3 do not mix well). Fetch blocks are 32 pixels wide (#FINE_MASK, the band's maths). Each displayed bitmap
+;; is a multiple of 64 pixels wide and #FETCH_GUARD pixels wider than the view or the map, because the fetch can run up to
+;; #FETCH_GUARD pixels past the view.
+;; The world list is dual playfield: #WORLD_FLAGS is #COPPER_FLAGS with 8 planes and the dual playfield bit ($20). The front playfield
+;; is the world and its bobs; the back is the clouds and hills (#BACK_BM), in palette entries 16 to 31. BPLCON3's PF2OF is 8 by
+;; default, and DisplayControls XORs its BPLCON3 argument, so #PLAYFIELD2_OFFSET_16 makes it 16 when given once, before CreateDisplay.
+;; A second call would flip it back: DisplayControls is a toggle (the main project's BLITZ_CONVENTIONS note). The HUD list loads all 32 colours.
+;; #PLAYFIELD2_PRIORITY flips BPLCON2's PF2PRI, putting the back playfield in front of the front one for the title overlay
+;; (SetOverlayFront{}, sparkydave.parallax.blitz.ab3; the main project's AMIGA_RENDERER note, "The overlay").
+#COPPER_SPRITES       = 0
+#COPPER_CUSTOMS       = 3
+#PLAYFIELD_PLANES     = 4
+#COPPER_COLORS        = 32
+#FETCH_GUARD          = 64
+#PLAYFIELD2_PRIORITY  = $40
+#PLAYFIELD2_OFFSET_16 = $1c00
+#COPPER_FLAGS         = $11014
+#WORLD_FLAGS          = $11038
+
+;; Two stacked Copper lists: a fixed HUD band, then the scrolling world. The Blitz guide requires at least 3 lines between lists, so
+;; the world list starts #LIST_GAP lines under the HUD band. Together the two lists cover 227 lines. They start at line #HUD_YPOS_PAL
+;; (44, the top of the standard PAL window), or on an NTSC machine at #HUD_YPOS_NTSC (32): an NTSC window is 200 lines with overscan to
+;; about line 261, so 227 lines fit only by starting higher. 32 is measured: 30 or less loses the top, 36 or more runs past the last line.
+;; Palette entry 0 is the sky blue, which hides the 3 line seam.
+;; The world list shows #VIEW_H (208) lines from bitmap row #VIEW_TOP (32), set through DisplayBitMap's y: the map's top two rows are
+;; the NES status bar area, which the HUD band replaces. #WORLD_H is #MAP_H*#TILE, from the generated level meta (included after this
+;; file; python tools/build_assets.py). The world bitmaps are #SURFACE_H tall: one extra tile row, so a blit that lands just below the
+;; map, such as a falling Mario, stays inside the bitmap.
+#HUD_BAND_BM = 10
+
+;; The safe margin: nothing that must be read sits within this many pixels of the view's left and right edges, because a different
+;; monitor, an emulator or a handheld may crop a little. The HUD text starts and ends inside it.
+#SAFE_MARGIN = 8
+
+;; Screen layout rows. The redefine-keys screen's list starts at #KEYS_LIST_Y. The title screen's rows (sparkydave.cover.blitz.ab3)
+;; start with the menu line at #TITLE_MENU_Y, and each row after it is a line (#TITLE_LINE) or a gap (#TITLE_GAP) below the one before.
+;; Everything is centred in the view by DrawTextCentredAt{} (at the overlay page's x), so no x is worked out by hand.
+#LIST_GAP      = 3
+#TITLE_LINE    = 16
+#HUD_H         = 16
+#TITLE_GAP     = 24
+#HUD_YPOS_NTSC = 32
+#VIEW_TOP      = 32
+#HUD_YPOS_PAL  = 44
+#KEYS_LIST_Y   = 48
+#TITLE_MENU_Y  = 144
+#VIEW_H        = 208
+#SURFACE_H     = 256
+;; Apart from the front pair's extra tile row (#SURFACE_H), no displayed bitmap has spare rows under its picture: the display window
+;; closes under the picture (the main project's AMIGA_RENDERER note, "The window's lines"), so such rows would never be shown, and leaving them out
+;; saves Chip RAM. Some draws end exactly on a bitmap's last row (the menu hint, the jukebox readout and the palette page's scene, all
+;; ending on row 239 of #WORLD_H), and Blit and Block are not clipped: a draw moved lower, or a list made longer (#KEY_COUNT), writes
+;; past the bitmap into the next Chip RAM allocation, so check it against the bitmap's height first. If garbage ever shows under a
+;; picture, a missing spare row is the likely cause.
+
+; The view's width in lores pixels: the cartridge's own screen, 256, centred in the 320 wide hardware display. The same in both looks.
+#VIEW_W = 256
+
+;; The cartridge's screen width, the number the cartridge's own rules are written in. It is defined from #VIEW_W so the two cannot
+;; differ; the separate name marks code that follows the cartridge's arithmetic.
+#NES_VIEW_W = #VIEW_W
+
+;; The five DisplayAdjust numbers for that width (the main project's AMIGA_RENDERER note, "The display window"): the fetch's width in bytes, its
+;; start and stop in colour clocks, and the window's start and stop in pixels. The fetch is the library's own 320 pixels (start and
+;; stop 0, fetch mode 1), and the window is 32 pixels in on each side (31 and -33), which cuts the picture to 256. A narrower fetch
+;; shows blue at the left edge and jumps while scrolling.
+#DISPLAY_DIWSTOP  = -33
+#DISPLAY_DDFSTOP  = 0
+#DISPLAY_DDFSTART = 0
+#DISPLAY_FETCHWID = 0
+#DISPLAY_DIWSTART = 31
+
+;; The line byte of the library's DIWSTOP ($70c1: line $170, past the frame's last line). With DIWSTRT's line 0 that window covers the
+;; whole frame and fills it with pen 0 above and below the picture. SparkyDave.ab3 adds to both so the window covers the picture's lines only.
+#LIBRARY_DIWSTOP_LINE = $70
+
+;; The lead-in, added to every x the game hands to the display (DisplayBitMap) so that a bitmap's pixel 0 is on the screen's left edge.
+;; The window (DIWSTRT 31) starts 32 pixels in from the first fetched block, and the fetch start moves in whole blocks, so no DDF start
+;; can centre it. The display x is therefore negative at the camera's left edge, and the 32 bitmap pixels left of x 0 are the ones the
+;; window cuts. A front x is never left negative where the band is used (ShowWorldLists{}, the overlay pages, the attract start).
+#SCROLL_BIAS = -32
+
+;; The black cover's sub-pixel phase, added to the cover's front x under the options, pause, jukebox and palette pages. The library's
+;; table gives a whole x the quarter-pixel bits 3, while the page and the world have 0, and two playfields a fraction apart show the
+;; page half a pixel off on some lines, or shimmering, depending on the emulator. 0.75 lines the front's quarter bits up with the page's
+;; (the main project's AMIGA_RENDERER note, "The overlay"). It is a macro, not a # constant, because a constant cannot hold a fraction ("Illegal
+;; constant expression"); a macro is text put in wherever !COVER_PHASE_X is written (Amiblitz3.guide, 2.10 Macros).
+Macro COVER_PHASE_X:0.75:End Macro
+
+;; Column positions (x in pixels on the view or on the overlay page): the redefine-keys list (the mushroom cursor, the action, the
+;; key's name; the longest name, PAD RPAREN, is 80 wide), the palette page's scene (big Mario, small Mario, a Goomba, a Koopa, each
+;; 16 wide) and the options, pause, palette and jukebox pages (the cursor, the labels, the values). The value column has room for 16
+;; glyphs before #VIEW_W, which is why the joystick texts and the jukebox's volume labels are short.
+#MENU_LABEL_X      = 16
+#KEYS_CURSOR_X     = 40
+#PAL_PAGE_BIG_X    = 40
+#KEYS_ACTION_X     = 64
+#MENU_VALUE_X      = 128
+#KEYS_NAME_X       = 144
+#PAL_PAGE_SMALL_X  = 152
+#PAL_PAGE_GOOMBA_X = 184
+#PAL_PAGE_KOOPA_X  = 216
+
+;; HUD glyph sheet, hud-objects.iff: 44 cells of 8x8, 352x8. Glyph g is cut into
+;; shape slot #HUD_SHAPE_BASE + g. Cells: 0-9 digits, 10-35 A-Z, 36 dash,
+;; 37 small x, 38 exclaim, 39 dot, 40 copyright, 41 mushroom, 42 crown, 43 coin.
+#HUD_BM        = 8
+#HUD_G_DASH    = 36
+#HUD_G_X       = 37
+#HUD_G_EXCLAIM = 38
+#HUD_G_COIN    = 43
+
+;; Pre-cut actor shapes (sparkydave.shapes.blitz.ab3), one shape slot per animation frame. Slots 0 to 7 are single-use shapes and
+;; 44 to 87 the HUD's glyphs. From 145 on each enemy, item and screen has its own range (its block below says which). `Max Shape` in
+;; the header of SparkyDave.ab3 must be at least one past the highest slot used.
+;;   8 to 21  small Mario facing right       22 to 35  small Mario facing left
+;;   36 to 38 Goomba                         39 to 41  mushroom, items cells 29 to 31
+;;   88 to 106 big Mario right               107 to 125 big Mario left
+;;   126 to 133 coin, items cells 42 to 49   134 to 137 brick chunks (below)
+;;   138 to 143 score digits, 144 the "1UP" (floating numbers, below)
+#PRE_GOOMBA_FRAMES   = 3
+#PRE_MUSHROOM_FRAMES = 3
+#PRE_SMALL_R         = 8
+#PRE_COIN_FRAMES     = 8
+#PRE_SMALL_FRAMES    = 14
+#PRE_BIG_FRAMES      = 19
+#PRE_SMALL_L         = 22
+#PRE_MUSHROOM_CELL   = 29
+#PRE_GOOMBA          = 36
+#PRE_MUSHROOM        = 39
+#PRE_BIG_R           = 88
+#PRE_BIG_L           = 107
+#PRE_COIN            = 126
+
+;; Brick chunks (sparkydave.debris.blitz.ab3). One 8x8 fragment, the top left
+;; quarter of the items sheet's brick_debris cell (#DEBRIS_ITEM_CELL), in four
+;; flip variants (bit 0 flips X, bit 1 flips Y), cut once at start into slot
+;; #DEBRIS_SHAPE + variant; all four pieces share it, as on the cartridge. Pieces
+;; are 0 upper-left, 1 upper-right, 2 lower-left, 3 lower-right. Speeds are 8.8
+;; fixed point pixels per sim tick, the cartridge's (smbdis SpawnBrickChunks 7416,
+;; ImposeGravityBlock 7660): upper pair -6, lower pair -4 and 8 px lower, gravity
+;; 80/256 a tick, terminal 8, one pixel a tick sideways, spin every 4 ticks.
+;; #DEBRIS_SETS is the two block-object slots the cartridge alternates between.
+#DEBRIS_UPPER_SPEED = -1536
+#DEBRIS_LOWER_SPEED = -1024
+#DEBRIS_SETS        = 2
+#DEBRIS_PIECES      = 4
+#DEBRIS_VARIANTS    = 4
+#DEBRIS_SPIN_TICKS  = 4
+#DEBRIS_SIZE        = 8
+#DEBRIS_ITEM_CELL   = 27
+#DEBRIS_GRAVITY     = 80
+#DEBRIS_SHAPE       = 134
+#DEBRIS_TERMINAL    = 2048
+;; HUD values. One HUD time unit is #HUD_TIME_TICKS sim ticks (sparkydave.physics.ab3). The points are the original game's but have
+;; not been checked against the cartridge.
+#HUD_GLYPHS     = 44
+#HUD_SHAPE_BASE = 44
+#SCORE_BRICK    = 50
+#SCORE_STOMP    = 100
+#SCORE_COIN     = 200
+#HUD_SHEET_W    = 352
+#HUD_TIME_START = 400
+#SCORE_POWER_UP = 1000
+#HUD_SCORE_MAX  = 999999
+
+;; The HUD's digit positions, for redrawing only the digits that changed (UpdateHud{}): the
+;; score's 6, the coins' 2 and the time's 3, each number's first slot.
+#HUD_SLOT_SCORE  = 0
+#HUD_SLOT_COINS  = 6
+#HUD_SLOT_TIME   = 8
+#HUD_DIGIT_SLOTS = 11
+
+; Chip RAM report (debug mode only), see sparkydave.memory.ab3.
+#MEM_SAMPLE_FRAMES = 64
+
+;; The machine checks' numbers (the CPU, the chipset, the least Fast and Chip RAM) are in sparkydave.machine.ab3, with
+;; the checks, so the launcher's helper DetectVideo can include them without this file.
+
+;; Twice the microseconds of one raster line (63.5), so lines * #RASTER_LINE_US_X2 / 2 is
+;; microseconds in the frame time report (sparkydave.reports.ab3).
+#RASTER_LINE_US_X2 = 127
+
+; Frame time report (debug mode only), see sparkydave.frametime.blitz.ab3.
+#PERF_LINES_NTSC = 262
+#PERF_LINES_PAL  = 312
+
+;; The slow-frame log in that report: up to #SLOW_LOG_MAX of the heaviest frames of at least #SLOW_LOG_LINES lines, each with what was
+;; on screen. It holds 80 so that a long heavy stretch (2-4 with the Starman) does not crowd out the odd slow frame.
+#SLOW_LOG_MAX   = 80
+#SLOW_LOG_LINES = 200
+
+; The display stretch's log (FrameTimeAfterDisplay{}): its slowest passes kept.
+#DISPLAY_LOG_MAX = 16
+
+;; The world bitmap check (F10 in debug mode, CheckWorldBitmaps{}): how many differing words and how many presses are kept for the
+;; report at exit (a press after the last is still counted, but its words are not kept). The watch it switches on (WatchWorldBitmaps{}):
+;; the world's pixel rows checked each frame (kept small: 8 rows across the view cost about 70 raster lines), the candidates kept (a
+;; stray is one seen again in the same place a sweep later), the columns checked past the view's right edge, the numbers kept for each
+;; frame, the strays the whole-area check keeps, the frames of state kept in its ring (more than a sweep's), and the world's pixel rows
+;; (#MAP_H*#TILE; the level meta is included later). The stamp repair (RepairStampedBitmaps{}, debug mode only): the stamps with
+;; differing words kept, and the words kept.
+#WATCH_ROWS_A_FRAME   = 2
+#WATCH_MAX            = 8
+#BITMAP_CHECK_PRESSES = 16
+#WATCH_AHEAD_COLUMNS  = 16
+#WATCH_FIELDS         = 16
+#STAMP_CHECK_STAMPS   = 32
+#BITMAP_CHECK_STRAYS  = 64
+#WATCH_RING           = 128
+#STAMP_CHECK_WORDS    = 200
+#WATCH_PIXEL_ROWS     = 240
+#BITMAP_CHECK_MAX     = 400
+
+;; The transition log (sparkydave.timing-marks.blitz.ab3) keeps this many marks; the report
+;; says how many it had to drop.
+#TRANSITION_LOG_MAX = 300
+
+;; The highest tile GID the playfield stamp groups by (BuildStampLists{}); the NES atlas has 174. A cell above it is not drawn, and
+;; the report says how many were skipped.
+#STAMP_GID_MAX = 1023
+
+;; The development keys and the two reports work only when the program is started with the parameter debug (`SparkyDave debug`; the
+;; variable debugMode, sparkydave.init.ab3), so the program that is tested is the program that is shipped (the main project's INPUT note,
+;; "Debug keys"). F1 (reset the game) is not a debug key.
+
+;; Jump forgiveness: NOT the cartridge's (the main project's PLAYER_PHYSICS note, "Jump forgiveness"). A jump
+;; pressed a few ticks too early is remembered and fires on landing (jump buffering), and one
+;; pressed a few ticks too late, just after walking off a ledge, still jumps (coyote time). The
+;; windows are in the physics variant files, one per level: #JUMP_BUFFER_LOW_TICKS,
+;; #JUMP_BUFFER_TICKS (medium) and #JUMP_BUFFER_HIGH_TICKS, and the same three for #COYOTE_*. Each
+;; of the two is a setting on the options page: off is the cartridge's behaviour exactly.
+#FORGIVENESS_OFF     = 0
+#FORGIVENESS_LOW     = 1
+#FORGIVENESS_MEDIUM  = 2
+#FORGIVENESS_DEFAULT = 2
+
+;; The two forgiveness settings, the first index of forgivenessLevel() and forgivenessWindowTicks().
+;; #OPT_JUMP_BUFFER and #OPT_COYOTE (the options page's rows) follow the same order.
+#FORGIVENESS_BUFFER = 0
+#FORGIVENESS_COYOTE = 1
+#FORGIVENESS_HIGH   = 3
+#FORGIVENESS_LEVELS = 4
+
+;; Continues: not the cartridge's. The options page's CONTINUES setting is one of #CONTINUES_CHOICES (continuesChoice, saved: NONE, 1,
+;; 2, 5, 10, INFINITE; continuesAllowed() holds each one's number, #CONTINUES_INFINITE for the last). While a game has continues left,
+;; its game over offers one, which carries on from where Mario died with the score and coins kept and the lives restored.
+#CONTINUES_INFINITE = -1
+#CONTINUES_DEFAULT  = 0
+#CONTINUES_CHOICES  = 6
+
+;; The controls (the main project's INPUT note, "Controls"): two settings on the options page; the keyboard and the joystick port are both always
+;; read. KEYBOARD (keyboardMode): 2 key is classic (the run key and the fire key each do both, as the cartridge's B button does); 3 key
+;; is split (run and fire apart). JOYSTICK (joystickMode): 2 button, button 1 (a pad's red) jumps and button 2 (blue) runs and fires;
+;; 1 button, stick up jumps and the button runs and fires. A CD32 pad is read as a 2 button joystick.
+#KEYBOARD_TWO_KEY    = 0
+#JOYSTICK_TWO_BUTTON = 0
+#KEYBOARD_THREE_KEY  = 1
+#JOYSTICK_ONE_BUTTON = 1
+#KEYBOARD_MODES      = 2
+#JOYSTICK_MODES      = 2
+;; Settings files older than SPARKYKEYS11 hold a single controls number, converted by OldControlsKeyboard{} and OldControlsJoystick{}:
+;; 0 keyboard 2 key, 1 keyboard 3 key, 2 joystick 1 button, 3 joystick 2 button, 4 CD32 pad.
+#OLD_CONTROLS_KEYS_SPLIT = 1
+#OLD_CONTROLS_JOY_ONE    = 2
+#OLD_CONTROLS_COUNT      = 5
+
+;; Redefinable keys (the main project's INPUT note, "Redefinable keys"): the eight actions in keyMap() order, and the highest raw code a key can
+;; have (the Right Amiga key). #SAVE_DELAY_FRAMES is the wait after the settings are written, before Blitz mode takes the machine back
+;; (the guide's "QAmiga mode").
+#KEY_LEFT  = 0
+#KEY_RIGHT = 1
+#KEY_JUMP  = 2
+#KEY_DOWN  = 3
+#KEY_RUN   = 4
+#KEY_FIRE  = 5
+#KEY_UP    = 6
+#KEY_PAUSE = 7
+#KEY_COUNT = 8
+;; How many actions older settings files have keys for: files before SPARKYKEYS6 run from left to fire (no #KEY_UP), and files before
+;; SPARKYKEYS10 from left to up (no #KEY_PAUSE). A missing key gets its default (DefaultUpKey{}, DefaultPauseKey{}).
+#KEY_COUNT_OLD          = 6
+#KEY_COUNT_BEFORE_PAUSE = 7
+#RAW_KEY_PAUSE          = $19
+#SAVE_DELAY_FRAMES      = 50
+#KEY_LAST               = $67
+
+;; The offset of pr_WindowPtr in a struct Process (dos/dosextens.h). Setting it to -1 turns off system requesters
+;; (SystemRequestersOff{}, sparkydave.settings.ab3).
+#PR_WINDOWPTR = 184
+
+;; The joystick port, the only port read (UpdateJoystick{}): Blitz's port 1, which is the Amiga's port 2. The mouse port is not read,
+;; because a test to tell a mouse from a stick there can mistake a pad (the A500 Mini's) for a mouse.
+#JOY_PORT = 1
+
+;; The most a packed area file's body can exceed its unpacked word count (tools/area_bin.py, PACK_MAX_EXTRA_WORDS, checked by the
+;; build): one first run for each of its three sections. The loader's buffer allows for it (packedAreaWords(), sparkydave.areaload.ab3).
+#AREA_PACK_EXTRA_WORDS = 9
+
+; The sound engine's tick switch: 0 leaves the engine idle, to compare frame times with and without sound.
+#SOUND_ON = 1
+
+;; The sound engine runs at the NES's 60 ticks a second on either machine (RunSoundTicks{}), so the
+;; music and the effects keep their tempo and pitch whatever the sim's rate is.
+#SOUND_HZ = 60
+
+;; The pause (smbdis 851): after a press, #PAUSE_LOCKOUT_TICKS ticks ($2b) before another
+;; is taken.
+#PAUSE_LOCKOUT_TICKS = 43
+
+;; Render margin either side of the view: an object is drawn while any part of
+;; it is within this many pixels of the view. Covers a 16 px sprite, fine scroll
+;; and a frame of movement. Render only: simulation and despawn ignore it.
+#VIEW_GUARD = 32
+
+;; Big Mario: 19 frames of 16x32, bitmap slot 5, shape slot 3.
+;;
+;; Frames 0-4 and 6-14 are the same in both sheets. Frame 5 is DEATH on Small Mario and CROUCH on Big;
+;; those states never meet (a dead Mario is not big, and small cannot crouch), so #MARIO_F_* drives both.
+;; Big has one swim frame Small does not: 14. Frames 15-18 are not used (15 is a Small Mario left in the
+;; big row, 16-18 are alternative walks). Names from game-data/derived/mario-big-contact.json.
+#MARIO_BIG_SHAPE  = 3
+#MARIO_BIG_BM     = 5
+#MARIO_F_CROUCH   = 5
+#MARIO_BIG_FRAMES = 19
+#MARIO_BIG_H      = 32
+#MARIO_BIG_W      = 304
+
+;; The 52-tile item sheet is a separate bitmap because its natural width is
+;; larger than the small Game Objects sheet. Its shape size comes from the
+;; authored object box in #ITEM_W/_H, not from #TILE, so the sheet and the
+;; map cannot disagree about how big a mushroom is.
+#ITEMS_SHAPE   = 4
+#ITEMS_BM      = 6
+#ITEMS_SHEET_H = 16
+#ITEMS_SHEET_W = 992
+
+;; Shape slots: 0 tile, 1 small Mario, 2 flag, 3 big Mario, 4 items. The bump
+;; bob blits a map tile as a moving cookie, so it needs its own slot. The
+;; item occluder re-stamps the releasing cell's tile as a plain Block, so
+;; it keeps a third tile slot: it must not reuse #BUMP_SHAPE, because the
+;; player can bump another block during the rise and the bob owns that slot.
+#BUMP_SHAPE    = 5
+#OCCLUDE_SHAPE = 6
+
+;; The pipe occluder's tiles (sparkydave.pipes.blitz.ab3): each cell of the pipe Mario is in is
+;; cut once when the pipe move starts, into its own slot from #PIPE_OCCLUDE_SHAPE, so a frame
+;; only Blocks. #PIPE_OCCLUDE_MAX cells at most: 2x4 down, 3x2 into the side pipe, 2x4 up.
+;; Slots 203 to 210, after the floating numbers' 193 to 202.
+#PIPE_OCCLUDE_MAX   = 8
+#PIPE_OCCLUDE_SHAPE = 203
+
+;; The course-clear screen's two lines of text, each composed once into one shape (CutCourseClearText{}), slots 211 and 212, so the
+;; screen costs two blits a frame instead of 24 glyph blits while it waits for Return (the main project's OPTIMISATION note).
+#COURSE_TEXT_SHAPE = 211
+
+;; The mushroom walks one pixel a tick, as the cartridge's items do. Whole
+;; pixels, not sixteenths: it is not on the player's friction curve.
+#MUSHROOM_SPEED       = 1
+#ITEM_FIXED_DIRECTION = 1
+#ITEM_W               = 16
+#ITEM_H               = 16
+#MUSHROOM_SPRITE      = 29
+
+;; The 1-UP is the mushroom drawn in green (items cell 30), and a hidden block
+;; releases it. The cartridge clears Hidden1UpFlag when the level decoder reaches
+;; the block, and sets it only on a new game (smbdis 1041, 4172-4176), so after a
+;; death the block is gone from the level. #HIDDEN_ONEUP_ONCE = 1 keeps that; 0
+;; brings the block back on every life. Must match ONEUP_SPRITE in manifest.py.
+#HIDDEN_ONEUP_ONCE = 1
+#ONEUP_SPRITE      = 30
+
+;; Vertical motion for the block-item spawn, in two phases.
+;;
+;; Rise: the mushroom spawns fully inside the block, top flush with the block's
+;; top, and rises #ITEM_H over exactly one real second -- simStepNumerator
+;; ticks, the clock rate in the main project's TIMING note -- on a fixed per-tick step and
+;; ignoring gravity. The rise ends with the bottom flush with the block's top,
+;; and from there the mushroom rests on the block's top, walks at
+;; #MUSHROOM_SPEED, and falls off the edge when its foot probe clears solid.
+;;
+;; Fall: constant gravity in 1/256 px subpixel units, the same
+;; playerMoveForceY/playerFractionY pattern the player's integrator uses
+;; (sparkydave.player.blitz.ab3), rather than whole pixels: objVelY()
+;; is 1/256 px per tick. NTSC-derived values; the PAL clock applies the same
+;; per-tick values at 50 ticks/s.
+;; The cartridge's MoveD_EnemyVertically gives a falling power-up $3d (61) a tick and a cap of 3 px a
+;; tick (smbdis 7599, 7637, 7704). Goombas and Koopas fall under the same routine and numbers: see
+;; #GOOMBA_GRAVITY and #GOOMBA_FALL_MAX.
+#MUSHROOM_GRAVITY  = 61
+#MUSHROOM_FALL_MAX = 768
+
+;; Coin (block-spawned only). The coin pops up from the ? block, spins
+;; for a short time, then auto-collects. No walking or falling like the
+;; mushroom. Uses the items-16x16 sheet: coin_1/2/3 (indices 42-44) for
+;; the idle spin, coin_turning_1-4 (indices 45-48) for the pop animation.
+#COIN_ANIM_SPEED = 4
+;; Colour cycling (sparkydave.palette.blitz.ab3, the main project's PALETTE note). Pen 12 is the glint colour: the `?` block, the floating coins
+;; and the HUD coin icon are drawn in it, and one palette entry rewritten every #CYCLE_TICKS ticks through #CYCLE_STEPS colours moves
+;; them all together, as the cartridge's ColorRotation does (smbdis 8000s). Pens 13 to 15 are Mario's, recoloured for Fire Mario and
+;; the Starman. #PALETTE_SAFE_LINE is the beam line the palette must not be rewritten before: the HUD list loads it at line 44.
+#CYCLE_STEPS = 6
+#CYCLE_TICKS = 8
+;; The palette's cover modes (coverNow in PaletteComponent{}): the overlay over a cover, the jukebox page, and the palette page, whose
+;; pen 0 is its area look's backdrop, not the cover's black (its rows sit over the sky, its scene on the front).
+#PALETTE_COVER_OVERLAY = 1
+#PALETTE_COVER_JUKEBOX = 2
+#PALETTE_COVER_PAGE    = 3
+
+;; The NES palette chosen (paletteChoice): 0 is "as drawn", the art's own colour tables, and 1 on are the palettes in
+;; sparkydave.palettes.data.ab3. That file also holds #PALETTE_DEFAULT (the choice for a new settings file and for DEFAULTS) and which
+;; choices a release offers (nesInRelease()). Then the palette page's area looks (ground, underground, water, castle: AreaLookIndex{}'s
+;; sets 0, 1, 4 and 5), Mario's colour modes (normal, Fire, the Starman), and where the page's characters stand in its scene (map
+;; coordinates: the scene is drawn at its own map y).
+#PALETTE_MARIO_MODES = 3
+#PALETTE_LOOKS       = 4
+#PAL_PAGE_BIG_Y      = 176
+#PAL_PAGE_KOOPA_Y    = 184
+#PAL_PAGE_SMALL_Y    = 192
+;; Floating score numbers (sparkydave.floaters.blitz.ab3).
+;; From the cartridge: a number lives #FLOATER_TICKS ticks ($30), rises a pixel a
+;; tick until its y reaches #FLOATER_TOP_Y ($18), and adds its points when it has
+;; been alive five ticks, the tick its timer reads #FLOATER_SCORE_AT ($2b;
+;; FloateyNumbersRoutine, smbdis 1283). There are #FLOATER_SLOTS (six, one per
+;; enemy slot). The points index is the stomp chain: 1 to 10 are 100 to 8000 and
+;; #FLOATER_ONEUP_INDEX (11) is a 1-UP; #FLOATER_POWER_UP_INDEX (6) is the 1000 of a
+;; power-up. The digits are six 4x8 shapes from the items-4x8 sheet in
+;; #DIGITS_BM; the "1UP" is cell #FLOATER_UP_CELL of the 16x16 items sheet.
+;; #STOMP_BOUNCE_SPEED_Y is Mario's speed after stomping a Goomba ($fc, SBnce,
+;; smbdis 11510).
+#STOMP_BOUNCE_SPEED_Y   = -4
+#FLOATER_DIGIT_W        = 4
+#FLOATER_SLOTS          = 6
+#FLOATER_POWER_UP_INDEX = 6
+#FLOATER_DIGIT_H        = 8
+#DIGITS_BM              = 9
+#FLOATER_ONEUP_INDEX    = 11
+#MULTI_COIN_INTERVALS   = 11 ; a brick with coins pays out for 11 intervals of #INTERVAL_PERIOD ticks
+#PEN_CYCLE              = 12
+#PEN_MARIO_SKIN         = 13
+#PEN_MARIO_BROWN        = 14
+#PEN_MARIO_RED          = 15
+
+;; Mario as a hardware sprite (#MARIO_SPRITE, the look files). His sprite is 3 colours on channel 0, in sprite bank 2 (BPLCON4 xor
+;; #SPRITE_BANK_XOR), so his colours are entries 33 to 35, the low two bits of his pens 13, 14 and 15 (skin, brown, red). The HUD list
+;; and list 2 then load #SPRITE_PALETTE_COLOURS colours. #SPRITE_FLAG is the lores sprite flag of the lists' type words. The scratch
+;; shape and bitmap are used only while the sprites are cut; #SPRITE_HIDDEN_Y is below any list.
+#SPRITE_CHANNELS        = 8
+#SPRITE_TMP_BM          = 13
+#COIN_W                 = 16
+#COIN_H                 = 16
+#FLOATER_UP_CELL        = 21
+#FLOATER_TOP_Y          = 24
+#DIGITS_SHEET_W         = 24
+#COIN_POP_FRAMES        = 32 ; half speed: 32 frames total (16 up, 16 down)
+#PEN_SPRITE_SKIN        = 33
+#PEN_SPRITE_BROWN       = 34
+#PEN_SPRITE_RED         = 35
+#COIN_SPRITE_BASE       = 42
+#FLOATER_SCORE_AT       = 43
+#COIN_POP_HEIGHT        = 44 ; 2 blocks + poke into block above (44 pixels peak height)
+#COIN_SPRITE_TURN_BASE  = 45
+#SPRITE_PALETTE_COLOURS = 48
+#FLOATER_TICKS          = 48
+#PALETTE_SAFE_LINE      = 50
+#SPRITE_BANK_XOR        = $33
+#FLOATER_DIGIT_SHAPE    = 138
+#FLOATER_ONEUP_SHAPE    = 144
+#FLOATER_NUMBER_SHAPE   = 192 ; whole numbers, one shape each: slots 193 to 202 for indices 1 to 10
+#SPRITE_HIDDEN_Y        = 300
+
+;; The value XORed into the world lists' BPLCON2 (DisplayControls; the default is $224) to put Mario between the playfields: behind
+;; the front one (the pipe's tiles, the cloud floor) and in front of the back one. PF1P 0 and PF2P 2 put the back playfield behind
+;; sprite pairs 0-1 and 2-3, so the second pair of the big swim poses (#SPRITE_SWIM) is in front of it too. With PF2P 1 the back
+;; playfield would cover pair 2-3 and only his back half would show over the hills.
+#MARIO_BEHIND_XOR = $34
+; The first of the two clip sprite slots, 66 and 67 (CutMarioClipSprite{}: one on show while the other is cut).
+#SPRITE_CLIP = 66
+; Where the lives cover puts the small Mario (the cartridge's place for him, in the cover bitmap's pixels).
+#COVER_MARIO_X = 96
+; The back strip's top rows left empty for the HUD's copy (StampBackPlayfield{}).
+#BACK_HUD_ROWS        = 2
+#COVER_MARIO_Y        = 104
+#SPRITE_SCRATCH_SHAPE = 322
+#SPRITE_FLAG          = $400
+
+;; All-Stars Mario's own sheets (#MARIO_SPRITE_COLOURS 15, the look files): 4 plane bitmaps of their own, loaded from mario-small-all-stars.iff
+;; and mario-big-all-stars.iff and cut into attached sprites by CutMarioSprites{}. The bob sheets (#MARIO_BM, #MARIO_BIG_BM) stay the NES art's:
+;; the covers, the palette page and the jukebox still blit him, in the playfield's pens.
+#SPRITE_SMALL_BM      = 14
+#SPRITE_BIG_BM        = 15
+#SPRITE_SMALL_SHEET_W = 240
+#SPRITE_BIG_SHEET_W   = 256
+
+;; Big Mario's three swim poses, 32 wide, from mario-big-swim-all-stars.iff (tools/make_sprite_mario.py). The All-Stars art for them
+;; is 18 to 20 pixels wide, so a 16 wide sprite would cut off his nose, front hand and feet. Each pose is two attached pairs side by
+;; side: the left half on channel 0 at his x less #SWIM_WINDOW_X, the right half on channel #SWIM_CHANNEL, #SWIM_HALF_W further right.
+;; The frame's columns 8 to 23 match the big sheet's 16 wide frame, so his body does not shift between poses. Pose p's four sprites
+;; start at #SPRITE_SWIM + p*4: the right-facing left and right halves, then the left-facing ones (the halves flipped and swapped).
+#SWIM_CHANNEL        = 2
+#SWIM_POSES          = 3
+#SWIM_WINDOW_X       = 8
+#SPRITE_SWIM_BM      = 16
+#SWIM_HALF_W         = 16
+#SPRITE_SWIM         = 68
+#SPRITE_SWIM_SHEET_W = 96
+
+;; ---------------------------------------------------------------
+;; Object Pool
+;; ---------------------------------------------------------------
+#OBJ_NONE     = 0
+#OBJ_MUSHROOM = 1
+#OBJ_COIN     = 2
+#MAX_OBJECTS  = 12
+
+#PLAY_BM_A = 0
+#BOB_BUF_A = 0
+#PLAY_BM_B = 1
+#BOB_BUF_B = 1
+
+;; #BOB_BYTES is the BBlit/UnBuffer buffer, not the playfield: it holds the background behind each shape between UnBuffers, so it
+;; scales with shape size and count. BitMapLib.guide suggests 16384 for most situations; 4096 is too small for two 16x16 shapes in
+;; one frame.
+#BOB_BYTES = 16384
+
+;; Dirty-cell list for RedrawMetatileCells{}. One cell is queued per block spent,
+;; so this is generous; over-full drops the cell rather than wrapping.
+#MAX_REDRAW_CELLS = 32
+
+;; Frame indices into the 224x16, 14 frame Mario sheet, which DrawPlayer{} reads at x = frame * #TILE. The order is the sheet's own:
+;; 0-2 walk, 3 turn, 4 jump, 5 death, 6 idle, 7-8 climb, 9-13 swim. The names come from game-data/derived/mario-small-contact.json.
+;; Do not reorder them: DrawPlayer{} indexes the sheet by these numbers, and the test ScenarioFlagpole{} checks that the flagpole
+;; frames are 7 and 8.
+;;
+;; The sheet has no crouch frame: small Mario cannot crouch in SMB1. Inventory in ../assets/the main project's SPEC note.
+#MARIO_FACE_LEFT  = -1
+#MARIO_F_WALK1    = 0
+#MARIO_SHAPE      = 1
+#MARIO_FACE_RIGHT = 1
+#MARIO_F_WALK2    = 1
+#MARIO_F_WALK3    = 2
+#MARIO_F_TURN     = 3
+#MARIO_F_JUMP     = 4
+#MARIO_BM         = 4
+#MARIO_F_DEATH    = 5
+#MARIO_F_IDLE     = 6
+#MARIO_SCREEN_X   = 80
+#MARIO_SHEET_W    = 224
+
+;; Flagpole. The pole's box is generated from the Tiled "Flagpole" object into sparkydave.level.meta.ab3 as #FLAGPOLE_X/_Y/_W/_H,
+;; and nothing here repeats those numbers. What is here is the rule the cartridge applies to that box.
+;;
+;; #PLAYER_ST_RESIZE is the grow/shrink lockout. The pole slide has a state of its own for the same reason: both run outside the
+;; normal movement code.
+#PLAYER_ST_FREE    = 0
+#PLAYER_ST_POLE    = 1
+#PLAYER_ST_RESIZE  = 2
+#PLAYER_ST_DYING   = 3
+#PLAYER_ST_ENDWALK = 4
+
+;; Damage, death, lives (sparkydave.life.blitz.ab3). From the cartridge unless
+;; marked. Ticks are sim ticks, one per console frame.
+;;   - #CONTACT_EVERY_OTHER_TICK: PlayerEnemyCollision only runs on frames where
+;;     FrameCounter bit 0 is clear (smbdis 11293), so enemy contact is checked at
+;;     half rate. 1 is authentic; 0 checks every tick.
+;;   - #INJURY_INTERVALS: InjuryTimer is set to 8 (11410) and is an interval
+;;     timer, so it counts down once per #INTERVAL_PERIOD ticks: 147 to 168 ticks
+;;     of invulnerability, the sprite drawn on alternate ticks only.
+;;   - A killed Mario is held #DEATH_FREEZE_TICKS ticks (PlayerDeath waits for
+;;     TimerControl to fall from $ff to $f0, 5766), then jumps at
+;;     #DEATH_SPEED_Y px a tick (KillPlayer sets $fc, 11427) and falls under
+;;     #DEATH_FALL_FORCE (the cartridge's falling force for the slow speed bands is $70; on the cartridge the force actually in play
+;;     is whatever his last jump left, which has not been checked), with no tile collision at all (PlayerBGCollision returns for
+;;     routine $0b, 11893).
+;;   - He is gone once he has fallen to #DEATH_FALL_Y (Player_Y_HighPos 4) or, for a pit, #PIT_FALL_Y (HighPos 6, 5617-5640). A pit
+;;     death starts when his top passes #PIT_DEATH_Y (HighPos 2) and has no hop and no freeze.
+;;   - #LIVES_START is 2, shown as 3 on the cartridge (2722): the third death is game over. #HALFWAY_X is page 5 of 1-1
+;;     (HalfwayPageNybbles, 2906). Game over's time is the cover's (CoverTicksFor{}, 18 intervals).
+#DEATH_SPEED_Y            = -4
+#DEATH_HOP                = 0
+#LIFE_NONE                = 0
+#CONTACT_EVERY_OTHER_TICK = 1
+#DEATH_PIT                = 1
+#LIFE_RESPAWN             = 1
+#LIVES_START              = 2
+#LIFE_GAMEOVER            = 2
+#LIFE_NEWGAME             = 3
+#LIFE_COMPLETE            = 4
+#LIFE_REPLAY              = 5
+#INJURY_INTERVALS         = 8
+#DEATH_FREEZE_TICKS       = 16
+#DEATH_FALL_FORCE         = 112
+#PIT_DEATH_Y              = 256
+#DEATH_FALL_Y             = 768
+#PIT_FALL_Y               = 1280
+#HALFWAY_X                = 1280
+
+; Frames 7 and 8 are the two halves of the climbing pose, used on the flagpole.
+#MARIO_F_CLIMB1 = 7
+#MARIO_F_CLIMB2 = 8
+#MARIO_F_SWIM1  = 9
+#MARIO_F_SWIM2  = 10
+#MARIO_F_SWIM3  = 11
+#MARIO_F_SWIM4  = 12
+#MARIO_F_SWIM5  = 13
+
+;; Big Mario only: a sixth swim frame, which the cartridge gives big and not
+;; small. See the Big Mario block above for why the sheets otherwise agree.
+#MARIO_F_SWIM6 = 14
+
+;; The size changes and what the world does meanwhile (the main project's LIFE_CYCLE note, "The freeze").
+;; The cartridge sets its master timer TimerControl to $ff when a power-up or an injury starts
+;; one, and it counts down a tick at a time; while it is not zero the enemies and every timer
+;; (the game clock, the invulnerability, a shell's revive) stand still. The two routines look at
+;; it at set moments (smbdis 5732 PlayerChangeSize, 5744 PlayerInjuryBlink, 5764 PlayerFireFlower).
+;; The numbers are the ticks from $ff to each moment:
+;;   grow   (a mushroom to a small Mario)  held for 59 ticks ($c4); the size flips and the picture
+;;          starts alternating 7 ticks in ($f8)
+;;   injury (a hit big Mario)  held 15 ticks ($f0), when the size flips and the shrink picture
+;;          starts; he is then free for the rest of the freeze, 55 ticks in all ($c8), while the
+;;          enemies and timers stand still
+;;   fire   (a flower to a big Mario)  held for 63 ticks ($c0), see #FIRE_FLASH_TICKS
+;; The alternating picture is #SIZE_ANIM_STEPS steps of #SIZE_ANIM_STEP_TICKS ticks (40 in all).
+#SIZE_ANIM_STEP_TICKS = 4
+#GROW_ANIM_START      = 7
+#SIZE_ANIM_STEPS      = 10
+#INJURY_HOLD_TICKS    = 15
+#SIZE_ANIM_TICKS      = 40
+#INJURY_FREEZE_TICKS  = 55
+#GROW_FREEZE_TICKS    = 59
+
+;; The flag's own three states, separate from the player's. The flag descends because the pole was touched, and keeps going after
+;; Mario has let go; only Mario's grab height varies, and on the cartridge that decides the score, not how far the flag falls.
+#FLAG_ST_IDLE = 0
+#FLAG_ST_DOWN = 1
+#FLAG_ST_DONE = 2
+
+;; The ROM's grab window is the low nybble of X in $06..$09 -- an 8-px effective
+;; width, with the cartridge's own comment that this makes the physical part of
+;; the pole thinner than 16 pixels (12153-12159, in the main project's PLAYER_HITBOX note
+;; section 4.5). The shaft tile, GID 104, draws at pixel columns 7-8 of its
+;; tile, so the window brackets the line.
+#FLAGPOLE_GRAB_LO = $06
+#FLAGPOLE_SHAFT_X = 7
+#FLAGPOLE_GRAB_HI = $09
+
+;; The flag. #OBJ_FLAG is its tile on the Game Objects sheet, #FLAG_SHAPE the
+;; shape slot it is blitted from (Mario has slot 1), and #OBJ_BM the sheet's
+;; bitmap -- slot 2, since 0 and 1 are the playfield and its cookie buffer, 3 is
+;; the atlas and 4 is Mario. #FLAG_TOP_DY clears the ball tile, which takes the
+;; top of the pole box, so the flag hangs just below it.
+;;
+;; The flag is a Game Object rather than a playfield tile: it is drawn
+;; separately, it moves independently of the level, and its colours are reserved
+;; on the shared screen palette at pens 13 and 14 (manifest.SWATCHES) because
+;; that palette comes from the atlas, not from this sheet. #OBJ_SHEET_W/_H
+;; allocate the sheet's bitmap and are checked against the PNG by
+;; tools/build_assets.py, so growing the sheet without bumping them fails the
+;; build rather than cropping. Append new objects to the sheet; do not insert.
+#OBJ_FLAG    = 0
+#OBJ_BM      = 2
+#FLAG_SHAPE  = 2
+#FLAG_TOP_DY = 8
+#OBJ_SHEET_W = 16
+#OBJ_SHEET_H = 16
+#FLAG_W      = 16
+#FLAG_H      = 16
+
+;; Enemy sprites. #ENEMIES_BM is bitmap slot 7 (0 and 1 the playfield, 2 game objects, 3 the atlas, 4 small Mario, 5 big Mario,
+;; 6 items, 7 enemies). #ENEMIES_SHAPE is shape slot 7 (0 tile, 1 small Mario, 2 flag, 3 big Mario, 4 items, 5 bump, 6 occlude,
+;; 7 enemies). The enemies sheet is 720x32 (45 cells of 16x32), matched to the atlas's palette.
+#ENEMIES_BM      = 7
+#ENEMIES_SHAPE   = 7
+#ENEMIES_SHEET_H = 32
+#ENEMIES_SHEET_W = 720
+
+;; Goomba constants. Frames 0,1 = walking (16x16 at bottom of 16x32 cell);
+;; frame 2 = squashed. Animation at fixed interval.
+#GOOMBA_F_WALK1    = 0
+#GOOMBA_F_WALK2    = 1
+#GOOMBA_F_SQUASH   = 2
+#GOOMBA_ANIM_SPEED = 8
+#GOOMBA_W          = 16
+#GOOMBA_H          = 16
+
+;; Goomba fall: gravity, capped. It walks at #ENEMY_WALK_SPEED and reverses at
+;; solid walls.
+;; The cartridge's numbers (MoveD_EnemyVertically, smbdis 7599: $3d a tick, capped at 3 px a tick).
+;; A Koopa and a shell fall the same way.
+#GOOMBA_GRAVITY  = 61
+#GOOMBA_FALL_MAX = 768
+
+;; A group of Goombas or Koopas (HandleGroupEnemies, smbdis 8756): its members are placed from the screen's right edge as the entry
+;; is met, each #ENEMY_GROUP_SPACING px after the last (`adc #$18`), so the first stands #ENEMY_GROUP_LEAD px left of the entry's
+;; own x (the importer's group_lead, CheckRightBounds' `adc #$30`). Single enemies stand on the 16 px grid, so two spawns of a kind
+;; on the same row this far apart are a group: GoombaEntryX{} and KoopaEntryX{} give back the entry the cartridge decides on.
+#ENEMY_GROUP_SPACING = 24
+#ENEMY_GROUP_LEAD    = 48
+
+
+; Object pool type for Goomba
+#OBJ_GOOMBA = 3
+
+;; Walkers: a Goomba or a Koopa walks at the cartridge's $f8, half a pixel a tick (InitNormalEnemy, smbdis 8166; MoveObjectHorizontally,
+;; 7541, takes the speed in sixteenths of a pixel), kept here in sixteenths with the remainder carried between ticks. A kicked shell
+;; moves at $30, three pixels a tick.
+
+;; An enemy knocked off by a shell: up at 3 pixels a tick ($fd), sideways at 1.5
+;; ($18) away from Mario, then down under the cartridge's enemy gravity ($3d a tick
+;; in 1/256 pixels), upside down, until it is out of the level. The sideways speed
+;; is in sixteenths of a pixel, the vertical numbers in 256ths.
+#KNOCK_SPEED_Y  = -768
+#KNOCK_SPEED_X  = 24
+#KNOCK_GRAVITY  = 61
+#KNOCK_FALL_MAX = 1024
+
+;; An object on a bumped or broken block (smbdis 12470 to 12490, SetStun): lifted 2 px,
+;; vertical speed $fd (three pixels a tick up) and sideways $10 (a pixel a tick) away from
+;; Mario. Units: 1/256 px a tick up (negative), 1/16 px a tick.
+#BUMP_JUMP_SPEED_Y  = -768
+#BUMP_THROW_SPEED_X = 16
+
+;; The Koopa is a 16x24 sprite whose object y is its top. Its box is the cartridge's
+;; control $03 (BoundBoxCtrlData, smbdis 11271): 2 to 14 across, 9 to 21 down, the
+;; head not counting. Stomped it becomes a shell, a 16x16 picture at the bottom of
+;; the same 24, which the revive timer (RevivalRateData, 11497: $10 intervals)
+;; turns back into a Koopa. Kicking it starts it sliding; the shell kills what it
+;; touches. #KOOPA_ST_KNOCKED is shared with the Goomba's state 3.
+#KOOPA_ST_WALK      = 0
+#KOOPA_ST_SHELL     = 1
+#GOOMBA_ST_SQUASHED = 1
+#KOOPA_BOX_LEFT     = 2
+#KOOPA_ST_KICKED    = 2
+#KOOPA_ST_KNOCKED   = 3
+#GOOMBA_ST_KNOCKED  = 3
+#OBJ_KOOPA          = 4
+#KOOPA_SHELL_DROP   = 8
+#KOOPA_BOX_TOP      = 9
+#KOOPA_BOX_RIGHT    = 13
+#KOOPA_W            = 16
+#KOOPA_WALL_PROBE_Y = 16
+#KOOPA_BOX_BOTTOM   = 21
+#KOOPA_H            = 24
+
+;; The Starman (smbdis 7160-7195 PowerUpObjHandler, 9376 MoveJumpingEnemy, EnemyJump,
+;; 11237 HandlePowerUpCollision, 5340 the palette cycle). Released from a brick
+;; that holds one; rises like the mushroom, then goes along at 1 px a tick and hops
+;; for good: gravity $1c a tick (1/256 px), capped at 3 px a tick, a bounce of 3 up
+;; ($fd) every time it lands, and it turns at a wall. Four colour frames, items
+;; cells 32 to 35, one every #STAR_FRAME_TICKS. Picked up it gives 1000 and
+;; #STAR_INTERVALS (35, $23) intervals of invincibility: Mario's colours step
+;; through the four star sets, every 2 ticks while 8 or more intervals remain and
+;; every 8 after, and whatever he touches is knocked off (100 for a Goomba, 200 for
+;; the rest, as a shell kills). Must match STAR_SPRITE in tools/manifest.py.
+#STAR_BOUNCE_VY      = -768
+#STAR_FAST_TICKS     = 2
+#STAR_FRAME_TICKS    = 2
+#STAR_FRAMES         = 4
+#OBJ_STAR            = 6
+#STAR_FAST_INTERVALS = 8
+#STAR_SLOW_TICKS     = 8
+#STAR_SPEED          = 16
+#STAR_GRAVITY        = 28
+#STAR_SPRITE_BASE    = 32
+#STAR_INTERVALS      = 35
+#PRE_STAR            = 164
+#STAR_FALL_MAX       = 768
+
+;; Fireballs (smbdis 6273-6380, 12726, 14229; see sparkydave.fireballs.blitz.ab3).
+;; Their speeds are in sparkydave.physics.ab3. A bounce is 3 up ($fd). The ball is 8x8 (box control $07), cut from
+;; the four quadrants of items cell 28 (`fire_tile`), and its burst from cells 17,
+;; 16 and 15 (`fireworks_1` to `_3`, small to large: the cartridge draws the burst
+;; and the end-of-level fireworks from the same tiles). #MARIO_F_THROW is
+;; `throwing_1`, frame 16 of the big Mario sheet.
+#FIREBALL_BOUNCE_VY     = -768
+#FIREBALL_SPAWN_DY      = -16
+#FIREBALL_FLYING        = 1
+#FIREBALL_SLOTS         = 2
+#FIREBALL_EXPLODING     = 2
+#FIREBALL_SPAWN_DX      = 4
+#FIREBALL_SPIN_TICKS    = 4
+#FIREBALL_EXPLODE_TICKS = 6
+#FIREBALL_SIZE          = 8
+#MARIO_F_THROW          = 16
+#BLAST_SHEET_CELL       = 17
+#FIREBALL_TOP_LIMIT     = 24
+#FIREBALL_SHEET_CELL    = 28
+#PRE_FIREBALL           = 156
+#PRE_BLAST              = 160
+
+;; The Fire Flower (smbdis 7140, 11237, 13475-13537). A `?` block that releases a
+;; mushroom releases a flower instead when Mario is big. The flower rises like the
+;; mushroom and then stays where it is; its four colour sets, items cells 22 to 25,
+;; are drawn in turn, one every #FLOWER_FRAME_TICKS (the cartridge steps its
+;; palette bits with the frame counter shifted right once). Picked up it gives
+;; 1000 and turns a big Mario into Fire Mario, after a freeze of #FIRE_FLASH_TICKS
+;; (TimerControl $ff to $c0) in which his colours step through the star sets every
+;; #FLASH_SET_TICKS (PlayerFireFlower, 5764).
+#FLOWER_FRAME_TICKS = 2
+#FLOWER_FRAMES      = 4
+#FLASH_SET_TICKS    = 4
+#OBJ_FLOWER         = 5
+#FLOWER_SPRITE_BASE = 22
+#FIRE_FLASH_TICKS   = 63
+#PRE_FLOWER         = 152
+
+;; Shape slots, filled by CutEnemyShapes{}: the Koopa's two walk frames facing
+;; left then right, the shell, the shell upside down, the Goomba upside down.
+#KOOPA_SHEET_CELL = 3
+#SHELL_SHEET_CELL = 7
+#PRE_KOOPA        = 145
+#PRE_SHELL        = 149
+#PRE_SHELL_FLIP   = 150
+#PRE_GOOMBA_FLIP  = 151
+
+;; The Piranha Plant (the main project's OBJECT_SYSTEM note, "The Piranha Plant"; smbdis InitPiranhaPlant 8814, MovePiranhaPlant
+;; 10577). #PLANT_RISE is how far it comes out of its pipe, #PLANT_NEAR the horizontal distance inside which it stays
+;; down (`cmp #$21`, so under 33), #PLANT_FRAME_TICKS the mouth's step. The box is the cartridge's control $09 (#SMALL_BOX_*). Its two frames are enemies sheet cells
+;; 9 and 10, the bottom 24 of the 32 px cell, in shapes from #PRE_PIRANHA. #PLANT_WAIT_TICKS (the pause at each end,
+;; 64 frames) is a variant constant. The pipe tiles drawn over a plant are cut once each, into #PLANT_CELL_CACHE shape
+;; slots from #PLANT_CELL_SHAPE (213 to 220), keyed by the tile (a pipe is four tiles, whatever the pipe).
+#OBJ_PIRANHA        = 7
+#PLANT_FRAME_TICKS  = 8
+#PLANT_CELL_CACHE   = 8
+#PIRANHA_SHEET_CELL = 9
+#PLANT_W            = 16
+#PLANT_H            = 24
+#PLANT_RISE         = 24
+#PLANT_NEAR         = 33
+#PRE_PIRANHA        = 184
+
+;; The cartridge's bounding box control $09 (SmallBBox: the Piranha Plant, the Bloober and the swimming Cheep-Cheep), 3 to 12 across
+;; (its 13, less one as the Koopa's) and 14 to 20 down of the 24 px sprite: SmallBoxHitBox{}.
+#SMALL_BOX_LEFT   = 3
+#SMALL_BOX_RIGHT  = 12
+#SMALL_BOX_TOP    = 14
+#SMALL_BOX_BOTTOM = 20
+;; The large lift (the main project's OBJECT_SYSTEM note, "The large lift"; smbdis 8944, 10974, 11709, 11846): a platform 48 px wide and 8
+;; thick whose box is the cartridge's control $06 (48 across, 13 down from its top). It is one shape, #PRE_LIFT, cut from the
+;; three copies of the platform segment appended to the items sheet at #LIFT_SHEET_X (the sheet's width before them).
+;; #LIFT_SPEED (a variant constant) is how far it goes a tick in 256ths of a pixel, up or down, wrapping at 256 as the
+;; cartridge's one-byte y does.
+#OBJ_LIFT        = 8
+#LIFT_H          = 8
+#LIFT_BOX_BOTTOM = 13
+#LIFT_W          = 48
+#PRE_LIFT        = 222
+#LIFT_WRAP       = 256
+#LIFT_SHEET_X    = 832
+;; The warp zone (the main project's AREAS note, "The warp zone"): its text at #WARP_TEXT_Y, left edge on the left warp pipe (the
+;; cartridge's text starts in the pipe's column), and each pipe's number #WARP_NUMBER_DY above its top, 8 across.
+#WARP_PIPES_MAX   = 3
+#WARP_NUMBER_DY   = 24
+#WARP_TEXT_Y      = 96
+#PLANT_CELL_SHAPE = 213
+;; The HUD goes away while Mario is above the top of the world (the main project's AMIGA_RENDERER note, "The HUD goes away"): a third Copper
+;; list (list 2), one world list #AWAY_H lines tall from the HUD's first line, showing the world from bitmap row #AWAY_TOP, so every row
+;; stays on the screen line it had. #AWAY_LEAD is how far below #VIEW_TOP his top may be before the switch is asked for (the display
+;; changes a frame or two later, so with 0 a few rows of his head are hidden for a frame or two). #BAND_LINE_AWAY (below, beside
+;; #BAND_LINE) is the hills' band's line in list 2. #PRE_PLAYER_CLIP is the first of the shape slots for Mario cut short at the top of
+;; the bitmap (DrawPlayer{}).
+#AWAY_LEAD       = 0
+#PRE_PLAYER_CLIP = 223
+;; The HUD over the world while list 2 is shown (the main project's AMIGA_RENDERER note, "The HUD goes away"): 1 shows the HUD in the first lines
+;; of list 2's back playfield, with Mario in front of it as on the NES and the clock still on screen; 0 hides the HUD while he is up
+;; there. The HUD is a copy of the band's bitmap in the back bitmap's rows 0 to 15 (empty in every strip). The whole copy is made as the
+;; list comes up or when it is stale (UpdateHudMirror{}), about 31 raster lines for #HUD_STAMP_W pixels, and after that each changed
+;; glyph is drawn into it as well (a line or two). The list's header gives the back playfield x 0, y 0, and two Copper strings at lines
+;; #HUD_END_LINE - 2 and - 1 move it on to the clouds, as the hills' band does; the back's colour offset is 0 for those lines, so the HUD
+;; has its real colours even where the back playfield is hidden (1-2). Nothing is copied on a frame where the HUD has not changed.
+#HUD_OVER_WORLD = 1
+#HUD_END_LINE   = 18
+#AWAY_TOP       = #VIEW_TOP - #HUD_H - #LIST_GAP
+#AWAY_H         = #HUD_H + #LIST_GAP + #VIEW_H
+;; Mario cut short at the top of the bitmap is cached (DrawPlayer{}). A cut is a GetaShape, which frees and allocates memory, makes a
+;; cookie and waits for the blitter, 42 to 125 raster lines each, so each cut is kept. Only the rows list 2 shows are cut, so the rows
+;; that can show above row 0 are the cell's height less #AWAY_TOP and one (big Mario 18, small Mario 2): one shape for each, facing each
+;; way (PlayerClipIndex{}), from #PRE_PLAYER_CLIP, cut again only when the slot holds a different frame (nothing clears them: his sheets
+;; are cut once, at start). #PLAYER_SMALL_H is #TILE, which the level meta defines after this file. `Max Shape` in the header of
+;; SparkyDave.ab3 must reach #PRE_PLAYER_CLIP + #PLAYER_CLIP_SLOTS.
+#PLAYER_SMALL_H         = 16
+#PLAYER_CLIP_BIG_ROWS   = #MARIO_BIG_H - #AWAY_TOP - 1
+#PLAYER_CLIP_SMALL_ROWS = #PLAYER_SMALL_H - #AWAY_TOP - 1
+#PLAYER_CLIP_SLOTS      = 2*(#PLAYER_CLIP_BIG_ROWS + #PLAYER_CLIP_SMALL_ROWS)
+;; The HUD's text ends at the clock (3 digits at #HUD_CLOCK_X); #HUD_STAMP_W is how much of the band is copied: the text and a blank
+;; margin of #SAFE_MARGIN each side (more than a camera moves in a frame), so a moving camera overwrites the last copy's edges. A glyph
+;; past it is not shown while the HUD is away (DrawGlyphInto{} leaves it out of both the whole copy and the per-glyph update).
+#HUD_CLOCK_X = #SAFE_MARGIN + 192
+#HUD_STAMP_W = #HUD_CLOCK_X + 3*8 + 2*#SAFE_MARGIN
+;; The Red Koopa (sheet cells 30 and 31 for the walk, 32 for the shell, built from the Koopa's: manifest "copies"): shapes
+;; 187 to 190 the walk facing left then right, 191 the shell, 221 the shell upside down.
+#RED_KOOPA_SHEET_CELL = 30
+#RED_SHELL_SHEET_CELL = 32
+#PRE_RED_KOOPA        = 187
+#PRE_RED_SHELL        = 191
+#PRE_RED_SHELL_FLIP   = 221
+
+;; The Green Paratroopa that hops (GreenParatroopaJump: InitJumpGPTroopa, smbdis 8868; MoveJumpingEnemy, 9371; EnemyJump, 12661): a
+;; winged Koopa that walks left at the Koopa's pace and bounces on whatever it lands on, as the Starman does (gravity $1c a tick, capped
+;; at three pixels a tick, up at three pixels a tick, $fd, each time it lands, and only landing when it is falling by a pixel a tick
+;; or more). Its sheet cells are 5 and 6 (the winged art); shapes #PRE_PARATROOPA to +3, the walk facing left then right, after the
+;; clip cache's slots (`Max Shape` in SparkyDave.ab3 must reach #PRE_PARATROOPA + 4). Stomped it loses its wings and is a walking
+;; Koopa again (ChkForDemoteKoopa, 11481), 400 and no stomp chain. A spawn's kind (koopaSpawnKind) is one of #KOOPA_KIND_*.
+#PARATROOPA_BOUNCE_VY      = -768
+#KOOPA_KIND_GREEN          = 0
+#KOOPA_KIND_RED            = 1
+#KOOPA_KIND_WINGED         = 2
+#PARATROOPA_DEMOTE_FLOATER = 3
+#PARATROOPA_SHEET_CELL     = 5
+#PARATROOPA_GRAVITY        = 28
+#PARATROOPA_LAND_SPEED     = 256
+#PARATROOPA_FALL_MAX       = 768
+#PRE_PARATROOPA            = #PRE_PLAYER_CLIP + #PLAYER_CLIP_SLOTS
+
+;; The Red Paratroopa that flies up and down (RedParatroopa: InitRedPTroopa, smbdis 8214; ProcMoveRedPTroopa, 9377): a winged Koopa
+;; (objWinged #WINGS_FLY, the green hopper's being #WINGS_HOP) that swings about a centre by StepSwing{} (objStartY
+;; its top, its start; objRiseTarget its centre, 48 px below, or 32 above from y 128) and never moves sideways or meets the ground (the
+;; cartridge leaves ids from $07 out of EnemyToBGCollisionDet). It faces left. Stomped it is demoted as the green one is (400, no chain,
+;; facing Mario) to the cartridge's id $01: a red Koopa that walks off ledges (objRed #RED_WALKS_OFF; a Red Koopa's #RED_TURNS turns at
+;; them, ChkForRedKoopa looks for $03 only). Its art is the green one's cells in the red palette (sheet cells #RED_PARATROOPA_SHEET_CELL
+;; and on, manifest "copies"), shapes #PRE_RED_PARATROOPA to +3 (after the retainer's), the flap facing left then right.
+#WINGS_HOP                 = 1
+#RED_TURNS                 = 1
+#WINGS_FLY                 = 2
+#RED_WALKS_OFF             = 2
+#KOOPA_KIND_RED_FLYING     = 3
+#RED_PARATROOPA_SHEET_CELL = 42
+
+;; The jumpspring (JumpspringHandler, smbdis 6628; ChkForLandJumpSpring, 12248; the metatiles $67 and $68, a column of two tile rows). An
+;; object 16 across and 32 tall (#OBJ_SPRING), solid like a lift: Mario falling onto its top (his feet within #MT_FEET_MIN_SUBTILE of
+;; it) starts the squash, in which he is held still (no jump, no walk, no gravity: jumpspringAnimCtrl is the cartridge's
+;; JumpspringAnimCtrl) while the spring steps through its five frames, #SPRING_STEP_TICKS ticks each (the first
+;; #SPRING_LAND_TIMER + 1): he is moved #SPRING_MOVE pixels a tick, down in the first two steps and up in the last two, and at the
+;; last frame he leaves at #SPRING_FORCE, or #SPRING_FORCE_A (variant constants) if A went down afresh from the second step on, with
+;; #SPRING_RISE_FORCE for gravity on the first tick and his last jump's fall force from then on (springLaunch). The
+;; art is the items sheet's cells 0 to 4 ("jumping board": the top up and middle, the bottom up, middle and down; the down frame has
+;; no top), the pictures already carrying the lowering, shapes #PRE_SPRING to +4 after the Paratroopa's. `Max Shape` must reach
+;; #PRE_SPRING + 5.
+#SPRING_MOVE       = 2
+#SPRING_LAND_TIMER = 3
+#SPRING_STEP_TICKS = 4
+#SPRING_FRAMES     = 5
+#OBJ_SPRING        = 9
+#PRE_SPRING        = #PRE_PARATROOPA + 4
+
+;; THE VINE and the climb (smbdis 6677 Setup_Vine, 6705 VineObjectHandler, 13103 DrawVine; 12153 HandleClimbing, 12185 PutPlayerOnVine,
+;; 5966 ClimbingSub, 6043 PlayerPhysicsSub, 5666 Vine_AutoClimb). A vine grows from the top of the block that
+;; made it: one pixel on the ticks whose counter has bit 1 set (two of every four), to #VINE_HEIGHT_FIRST (the first piece, $30) or to
+;; #VINE_HEIGHT_FULL ($60, the two pieces 2-1's vine has). From #VINE_CLIMB_MIN ($20) high it is climbable: the cells from the one a tile
+;; under its top (its top + 16, floored to a cell) down to the block, but not above #CLIMB_TOP_Y ($20, the status bar). Mario touching it
+;; with a side probe, within #CLIMB_GRAB_MIN to #CLIMB_GRAB_MAX of the 16 across, is put on its side (#CLIMB_X_RIGHT or #CLIMB_X_LEFT from
+;; its column, by which way he faces) and climbs (playerClimbing): up and down move him 1 px a tick with a movement force of
+;; #CLIMB_UP_FORCE or #CLIMB_DOWN_FORCE carried in 256ths (about 7/8 px a tick up and 2 down), left and right swap sides by
+;; the four steps of climbAdder() at most every #CLIMB_SIDE_TICKS ticks. Above #CLIMB_TOP_Y he is taken over (the controller is
+;; Up) and climbs on until his y is #CLIMB_AREA_Y, when the area is to change (climbAreaChange). The picture is the items sheet's cells
+;; (sheet cells 36 and 37, the curled top at x #VINE_SHEET_TOP_X and the body at #VINE_SHEET_BODY_X, row #VINE_SHEET_Y), shapes #PRE_VINE and +1. `Max Shape` must reach #PRE_VINE + 13 (see the cloud platform and the title panel below).
+;; (The cloud platform is +2, the title panel's tiles +3 to +11 and its whole shape +12.)
+#CLIMB_AREA_Y      = -29
+#CLIMB_X_RIGHT     = -7
+#VINE_SHEET_Y      = 0
+#CLIMB_ANIM_DOWN   = 4
+#CLIMB_GRAB_MIN    = 6
+#CLIMB_X_LEFT      = 7
+#CLIMB_ANIM_UP     = 8
+#CLIMB_GRAB_MAX    = 9
+#CLIMB_EDGE_X      = 16
+#CLIMB_SIDE_TICKS  = 24
+#VINE_CLIMB_MIN    = 32
+#CLIMB_TOP_Y       = 32
+#CLIMB_UP_FORCE    = $20
+#VINE_SPRITE       = 36
+#VINE_HEIGHT_FIRST = 48
+#VINE_HEIGHT_FULL  = 96
+#CLIMB_DOWN_FORCE  = $ff
+#VINE_SHEET_TOP_X  = 576
+#VINE_SHEET_BODY_X = 592
+#PRE_VINE          = #PRE_SPRING + #SPRING_FRAMES
+; A lift in a cloud area (the sky bonus, 5-2) is the cloud platform, six of the 8x8 items' ball: #PRE_CLOUD_LIFT, from #CLOUD_LIFT_SHEET_X.
+#CLOUD_LIFT_SHEET_X = 880
+;; The title's panel (DrawTitlePanel{}): nine 8x8 tiles, title-panel.iff (72 across: top-left, top-right, bottom-left, bottom-right, left, right, top,
+;; bottom, centre = #PT_*), cut into the shapes #PRE_PANEL to #PRE_PANEL + 8 from a bitmap in the logo's slot before the logo is loaded there
+;; (LoadPanel{}, CutPanelShapes{}). The panel is the text's size plus #PANEL_PAD_X a side and #PANEL_PAD_Y above and below, in whole tiles.
+;; #OVERLAY_ROWS_MAX: the rows an overlay page records a key for (pageRowKey$(), #OVERLAY_ROWS_MAX for each page). It must be at least
+;; the longest page's row count, the NES look's options page with 10 (#OPTIONS_ROWS): a smaller number lets a page write past the end
+;; of the array and corrupt memory. python tools/check_source_split.py checks it (LOOKS).
+#PT_TL            = 0
+#PT_TR            = 1
+#PT_BL            = 2
+#PT_BR            = 3
+#PT_L             = 4
+#PANEL_PAD_Y      = 4
+#PT_R             = 5
+#PT_T             = 6
+#PT_B             = 7
+#PANEL_TILE       = 8
+#PT_C             = 8
+#PANEL_PAD_X      = 8
+#PANEL_TILES      = 9
+#OVERLAY_ROWS_MAX = 10
+#PANEL_SHEET_W    = 72
+#PANEL_MAX_H      = 112
+#TITLE_MENU_W     = 120
+#PRE_PANEL        = #PRE_VINE + 3
+#PRE_PANEL_WHOLE  = #PRE_VINE + 12
+#PRE_CLOUD_LIFT   = #PRE_VINE + 2
+
+;; THE BLOOBER (the main project's OBJECT_SYSTEM note, "The Bloober"; smbdis 8206 InitBloober, 9468 MoveBloober,
+;; 9520 ProcSwimmingB, 11330 the touch in water, 11172 ShellOrBlockDefeat, 13816 the frame). objY is the cartridge's Enemy_Y, the
+;; top of its 24 px sprite. Its box is control $09, as the Piranha's (#SMALL_BOX_*). It may not rise above
+;; #BLOOBER_TOP_Y (the status bar's edge, $20); its swim speeds up and slows by 1 every #BLOOBER_SWIM_TICKS ticks to
+;; #BLOOBER_SWIM_TOP; then it floats down for #BLOOBER_FLOAT_INTERVALS intervals and while it is more than #BLOOBER_NEAR_Y above
+;; Mario (the steps, the speeds, the float and the distance are variant constants). Beaten (a fireball, the Starman) it is lifted
+;; 2 px and falls slowly from speed -1 (SetStun, MoveEnemySlowVert: #BLOOBER_FALL_FORCE to #BLOOBER_FALL_MAX), 200 points. Drawn
+;; stretched #BLOOBER_DRAW_DROP px lower, squeezed when its interval timer is 1, and beaten squeezed upside down. The pictures are
+;; enemies sheet cells 26 (squeezed: its top 24 rows) and 27 (stretched: its bottom 24), shapes #PRE_BLOOBER to +2, after the panel's
+;; (`Max Shape` in SparkyDave.ab3 must reach #PRE_BLOOBER + 3). Erased #BLOOBER_ERASE_MARGIN px out of the view (OffscreenBoundsCheck).
+#BLOOBER_SWIM_TOP        = 2
+#BLOOBER_FLOAT_INTERVALS = 2
+#BLOOBER_DRAW_DROP       = 3
+#OBJ_BLOOBER             = 10
+#BLOOBER_W               = 16
+#BLOOBER_H               = 24
+#BLOOBER_SQUEEZED_CELL   = 26
+#BLOOBER_STRETCHED_CELL  = 27
+#BLOOBER_TOP_Y           = 32
+#BLOOBER_ERASE_MARGIN    = 72
+#PRE_BLOOBER             = #PRE_PANEL_WHOLE + 1
+
+;; THE SWIMMING CHEEP-CHEEP AND ITS FRENZY (the main project's OBJECT_SYSTEM note, "The Cheep-Cheep frenzy";
+;; smbdis 3607 AreaFrenzy, 7871 ChkEnemyFrenzy, 8004 CheckFrenzyBuffer, 8243 InitCheepCheep, 8685 BulletBillCheepCheep, 9595
+;; MoveSwimmingCheepCheep). While a swimming frenzy is on in a water area, once its timer is out and fewer than #FRENZY_SWIMMERS
+;; swimmers (Bloobers and Cheep-Cheeps: the cartridge's first three enemy slots) are alive, a Cheep-Cheep comes in
+;; #CHEEP_SPAWN_GAP px past the view's right edge, at the next of frenzyHeights() its filter allows, red when its random byte is
+;; #CHEEP_RED_LIMIT or more (in world 2; grey otherwise there, the other way round in the other worlds). It swims left; one that came
+;; when two swimmers were already alive (the cartridge's slot 2 and on) also bobs, turning #CHEEP_BOB_RANGE px from where it came in.
+;; objY is its Enemy_Y, the top of the 24 px figure whose bottom 16 rows are the fish; its box is control $09, the Bloober's. Beaten
+;; it falls as a beaten Bloober does, 200. Shapes #PRE_CHEEP to +5: grey's two frames, red's two, grey and red upside down (`Max
+;; Shape` in SparkyDave.ab3 must reach #PRE_CHEEP + 6), from enemies sheet cells 28 and 29 (grey) and 33 and 34 (the red copy).
+#FRENZY_KIND_STOP     = 0
+#FRENZY_KIND_SWIMMING = 1
+#FRENZY_KIND_FLYING   = 2
+#FRENZY_SWIMMERS      = 3
+#FRENZY_KIND_FLAME    = 4
+#OBJ_CHEEP            = 11
+#CHEEP_BOB_RANGE      = 15
+#CHEEP_GREY_CELL      = 28
+#CHEEP_SPAWN_GAP      = 31
+#CHEEP_RED_CELL       = 33
+#CHEEP_RED_LIMIT      = $aa
+#PRE_CHEEP            = #PRE_BLOOBER + 3
+
+;; THE AIR BUBBLES (smbdis 6311 ProcAirBubbles, 6384 BubbleCheck, 6394 SetupBubble, 14372 DrawBubble). In a
+;; water area #BUBBLE_SLOTS bubbles, the last first: an empty one, once the shared timer is out, comes from Mario's mouth (#BUBBLE_MOUTH_X
+;; right of his x when he faces right, at his x when left; #BUBBLE_MOUTH_Y below his y: the cartridge's y + 8, 16 lower in this game's y), setting
+;; the timer long or short by its random bit (the register's byte after its slot); every tick it rises by its random bit's speed and pops
+;; under #BUBBLE_TOP_Y (the status bar). The picture is the items sheet's at #BUBBLE_SHEET_X (the 8x8's top-left ring), shape #PRE_BUBBLE.
+#BUBBLE_MOUTH_Y = -8
+#BUBBLE_SLOTS   = 3
+#BUBBLE_SIZE    = 8
+#BUBBLE_MOUTH_X = 9
+#BUBBLE_TOP_Y   = 32
+#BUBBLE_SHEET_X = 928
+#PRE_BUBBLE     = #PRE_CHEEP + 6
+
+;; THE FLYING CHEEP-CHEEP (model: tools/record/fly_cheep_model.py; smbdis 8419 InitFlyingCheepCheep,
+;; 9922 MoveFlyingCheepCheep, 7704 ImposeGravity, 7541 MoveObjectHorizontally, 11293 PlayerEnemyCollision, 11439 EnemyStomped, 12466 SetStun). A flying
+;; frenzy (#FRENZY_KIND_FLYING, 2-3) sends one when its timer is out into the lowest of the cartridge's enemy slots 0 to 2 a flyer does not
+;; hold (objAux; at most #FLY_CHEEP_SLOTS; with none free the timer starts again all the same), from #FLY_CHEEP_SPAWN_Y below the screen,
+;; around Mario by his speed and the register (the variant files' numbers). It does not move on the tick it comes. objY is its Enemy_Y,
+;; the top of the 24 px figure whose bottom 16 rows are the fish (as the swimmers'); erased once objY reaches #FLY_CHEEP_ERASE_Y, never
+;; sideways. It touches Mario only once wholly above the screen's bottom (objY at most #FLY_CHEEP_SHOWN_Y). A stomp (Mario moving down,
+;; or his cartridge y + #FLY_CHEEP_STOMP_REACH above its y) is 200 and bounces him at #FLY_CHEEP_STOMP_BOUNCE; a side touch hurts. Shapes:
+;; the red Cheep-Cheep's frames facing right, and upside down facing right (#PRE_FLY_CHEEP to +2; facing left it is #PRE_CHEEP's red).
+#FLY_CHEEP_STOMP_BOUNCE = -3
+#FLY_CHEEP_SLOTS        = 3
+#FLY_CHEEP_STOMP_REACH  = 12
+#OBJ_FLY_CHEEP          = 12
+#FLY_CHEEP_SHOWN_Y      = 216
+#FLY_CHEEP_SPAWN_Y      = $f8
+#FLY_CHEEP_ERASE_Y      = 256
+#PRE_FLY_CHEEP          = #PRE_BUBBLE + 1
+
+;; THE FIREBARS (model: tools/record/firebar_model.py; smbdis 8378 InitShortFirebar, 9701
+;; ProcFirebar, 10639 FirebarSpin, GetFirebarPosition, 9678 FirebarPosLookupTbl, 9797 FirebarCollision, 14236 DrawFirebar). A firebar
+;; (#OBJ_FIREBAR) turns about its block: objX and objY the centre ball's top left (the block's + 4), objAux its kind (the cartridge's id
+;; less $1b: 0 slow and 1 fast clockwise, 2 slow and 3 fast counter-clockwise, #FIREBAR_LONG long), objVelX and objVelY its spin state's
+;; low and high bytes (the high byte's five bits the angle: 32 steps a turn from straight up, clockwise as it grows; the long bar steps
+;; over the level states 8 and 24). Its balls: the centre's and #FIREBAR_SHORT_PARTS parts (#FIREBAR_LONG_PARTS long) 8 px apart, each
+;; offset by firebarTable() and firebarMirror(). Built as its block comes within #FIREBAR_WAKE_MARGIN of the view's right (the cartridge's
+;; extended right boundary), erased #FIREBAR_ERASE_MARGIN out of the view either side (OffscreenBoundsCheck): both less than a long bar's
+;; reach (88), so its far arm appears and goes at the view's edge, as the cartridge's does. A ball touches Mario within
+;; 8 px both ways of his x + 4 and one point of him (24 below his cartridge y small or crouching; 0, 12 and 24 big); not while the Starman
+;; lasts. Drawn as the player's fireball (#PRE_FIREBALL, its four turns), each ball an 8x8 bob.
+#FIREBAR_LONG         = 4
+#FIREBAR_SHORT_PARTS  = 5
+#FIREBAR_HARD_BIT     = 8
+#FIREBAR_LONG_PARTS   = 11
+#OBJ_FIREBAR          = 13
+#FIREBAR_WAKE_MARGIN  = 48
+#FIREBAR_ERASE_MARGIN = 72
+#FIREBAR_REACH        = 96
+
+;; THE PODOBOO (smbdis 8144 InitPodoboo, 9187 MovePodoboo, 11293 PlayerEnemyCollision, 13669
+;; CheckForPodoboo). It waits below the screen (#PODOBOO_WAIT_Y: the cartridge's high byte 2, y 2) on its interval timer (objPopTimer,
+;; counted by UpdateIntervalTimers{}); when that runs out it leaps from there (#PODOBOO_LAUNCH and the random byte's 256ths, the register's
+;; byte after its slot's own) and waits (the byte's low four bits ORed with #PODOBOO_MIN_INTERVALS, the cartridge's ORA #$06: so 6, 7, 14 or
+;; 15 intervals) before the next. It falls by the
+;; cartridge's gravity exactly (FlyCheepGravity{}). Any touch hurts Mario (no stomp), once it is wholly above the screen's bottom; with the
+;; Starman it is knocked back down for this leap (200, the smack; flagged #KOOPA_ST_KNOCKED until its next leap). Fireballs burst on it and
+;; do nothing. Never erased below the screen; #FIREBAR_ERASE_MARGIN out of the view either side. Drawn flipped while falling or knocked:
+;; enemies sheet cell #PODOBOO_CELL, shapes #PRE_PODOBOO and + 1 (flipped).
+#PODOBOO_MIN_INTERVALS = 6
+#OBJ_PODOBOO           = 14
+#PODOBOO_CELL          = 25
+#PODOBOO_WAIT_Y        = 258
+#PRE_PODOBOO           = #PRE_FLY_CHEEP + 3
+
+;; THE SMALL LIFTS AND THE SWAYING PLATFORM (smbdis 8956 PlatLiftUp and PlatLiftDown, 9131 RunSmallPlatform,
+;; 10978 MoveSmallPlatform, 11743 SmallPlatformCollision, 14309 DrawSmallPlatform, 10927 XMovingPlatform, 8930 CommonPlatCode, the
+;; large platform's draw). Both are #OBJ_LIFT, told apart by objAux (#LIFT_KIND_*). A small lift moves as the large one does (up or down
+;; at #LIFT_SPEED, its one-byte y wrapping) but is #SMALL_LIFT_W across, #LIFT_SHIFT right of its data's x (PosPlatform), its box
+;; #SMALL_LIFT_BOX_BOTTOM deep, and a pair: a second one #LIFT_TWIN_GAP below it, wrapping too, each with its box (none in the status
+;; bar, above y 32). The swaying platform goes left and right by two counters (objAnimFrame the primary, objAnimTimer the secondary, to
+;; #XPLAT_SECONDARY_MAX) and carries Mario. In a castle a large platform is #CASTLE_LIFT_W across (DrawLargePlatform hides its last
+;; two tiles there). Pictures: the items sheet's at #SMALL_LIFT_SHEET_X and #CASTLE_LIFT_SHEET_X (#PRE_SMALL_LIFT, #PRE_CASTLE_LIFT).
+;; The platform that moves up and down (1-3's; smbdis 8914 InitVertPlatform, 10896 YMovingPlatform) is
+;; #LIFT_KIND_VERT: a large platform swinging about a centre (StepSwing{}), objStartY its top and objRiseTarget its centre; still and above
+;; its top it creeps down a pixel on the ticks whose low bits under #SWING_CREEP_MASK (a variant constant) are clear. The large lifts (up
+;; and down, 1-2's) are #LIFT_SHIFT right of their data's x too (LargeLiftUp and LargeLiftDown run PlatLiftUp and PlatLiftDown).
+#LIFT_KIND_LARGE       = 0
+#LIFT_KIND_SMALL       = 1
+#LIFT_KIND_SWAY        = 2
+#LIFT_KIND_VERT        = 3
+#SMALL_LIFT_BOX_BOTTOM = 6
+#LIFT_SHIFT            = 12
+#XPLAT_SECONDARY_MAX   = 14
+#SMALL_LIFT_W          = 24
+#CASTLE_LIFT_W         = 32
+#LIFT_TWIN_GAP         = 128
+#SMALL_LIFT_SHEET_X    = 936
+#CASTLE_LIFT_SHEET_X   = 960
+
+;; BOWSER (smbdis 8504 InitBowser, 10134 RunBowser, 10151 BowserControl, 10264 BowserGfxHandler, 11123
+;; HandleEnemyFBallCol, 11120 BowserIdentities). One pool object (the cartridge's two, front and rear): objX and objY his front's top left,
+;; objDir his way (he starts facing right, the cartridge's $df), objAux his pacing speed (2 at first, then 1 or -1), objPopTimer his frame
+;; timer (EnemyFrameTimer: the jump's wait, or the chase), objVelY, objFractionY and objRiseStep his fall (FlyCheepGravity{}), objState
+;; #KOOPA_ST_KNOCKED once the Starman has knocked him. bowserOrigX where he started and bowserMaxRange how far he paces from it this
+;; time (#BOWSER_RANGE_*: the cartridge's PRandomRange as distances), bowserFeetCounter, bowserBodyControls (bit 7 the mouth open, bit 0
+;; the feet), bowserFireBreathTimer, bowserFlameTimerCtrl, bowserHitPoints (#BOWSER_HIT_POINTS fireballs). He stands at
+;; #BOWSER_GROUND_Y; his rear is #BOWSER_HALF_W behind his front and #BOWSER_REAR_DROP lower; each half's box is #BOWSER_BOX_* (control
+;; $0a). Beaten by fireballs he is world 2's Koopa (BowserIdentities), knocked off, 5000. Pictures: enemies sheet cells #BOWSER_CELL on
+;; (front with the mouth open, rear with the feet one way, the other, front with the mouth shut, the flame), shapes #PRE_BOWSER + 0 to 3
+;; facing left, + 4 to 7 facing right, + 8 to 11 upside down (front shut, rear: left, then right), + 12 and 13 the flame.
+#BOWSER_KOOPA_SPEED = -512
+#BOWSER_BOX_LEFT    = 0
+#BOWSER_BOX_TOP     = 2
+#BOWSER_HIT_POINTS  = 5
+#BOWSER_REAR_DROP   = 8
+#OBJ_BOWSER         = 15
+#BOWSER_HALF_W      = 16
+#BOWSER_BOX_RIGHT   = 16
+#BOWSER_RANGE_2     = 17
+#BOWSER_BOX_BOTTOM  = 21
+#BOWSER_RANGE_0     = 33
+#BOWSER_CELL        = 35
+#BOWSER_RANGE_3     = 49
+#BOWSER_RANGE_1     = 65
+#BOWSER_GROUND_Y    = 128
+#BOWSER_PACE_LIMIT  = $c8
+#BOWSER_FALLEN_Y    = 224
+#PRE_BOWSER         = #PRE_PODOBOO + 4
+#PRE_SMALL_LIFT     = #PRE_PODOBOO + 2
+#PRE_CASTLE_LIFT    = #PRE_PODOBOO + 3
+
+;; BOWSER'S FLAME (smbdis 8548 FlameYPosData, 8554 InitBowserFlame, 8590 SpawnFromMouth, 9115
+;; RunBowserFlame, 10315 SetFlameTimer, 10324 ProcBowserFlame, 11164 ChkOtherEnemies). The frenzy's kind #FRENZY_KIND_FLAME is the
+;; cartridge's EnemyFrenzyBuffer holding $15: set by the 2-4 marker (the fire frenzy) and by Bowser each time his mouth shuts. While it is
+;; set and the frenzy's timer is out, a flame comes into a free pool slot: from Bowser's mouth if he is in the pool (#FLAME_MOUTH_X left
+;; of his x, #FLAME_MOUTH_Y below his y; the kind then clears), else #FLAME_SPAWN_GAP px past the view's right edge at its height, the
+;; timer the next flame wait plus #FLAME_FRENZY_EXTRA (the kind stays). One pool object: objX and objY its left and top (#FLAME_W by
+;; #FLAME_H), objFractionX its sideways force (Enemy_X_MoveForce), objAux the height it goes to (flameHeights(), by its random byte),
+;; objVelY its step there (-1, 1, or 0 from the right edge, already there), objState #KOOPA_ST_KNOCKED once the Starman has hit it (it
+;; goes on, unseen and harmless, as the cartridge's). Its box is control $08 (#FLAME_BOX_*); a fireball bursts on it and it is not
+;; touched. Erased #FLAME_ERASE_MARGIN px out of the view either side. Shapes #PRE_FLAME and + 1, its two pictures in turn.
+#FLAME_BOX_TOP      = 4
+#FLAME_BOX_LEFT     = 6
+#FLAME_H            = 8
+#FLAME_BOX_BOTTOM   = 8
+#FLAME_MOUTH_Y      = 8
+#FLAME_BOX_RIGHT    = 10
+#FLAME_MOUTH_X      = 14
+#OBJ_FLAME          = 16
+#FLAME_W            = 24
+#FLAME_SPAWN_GAP    = 32
+#FLAME_ERASE_MARGIN = 72
+#PRE_FLAME          = #PRE_BOWSER + 12
+#PRE_RETAINER       = #PRE_BOWSER + 14
+#PRE_RED_PARATROOPA = #PRE_RETAINER + 1
+#PRE_RETAINER_ZOOL  = #PRE_RED_PARATROOPA + 4
+
+;; THE SKY BONUS (smbdis 5524 VineEntr, 2856 Entrance_GameTimerSetup, 5644 PlayerHole, 2742 GetAreaMusic).
+;; Climbing out of the top (climbAreaChange) is #AREA_EVENT_VINE: the area's vine link (tableAreaVineLink) names the sky, entered by mode
+;; #ARRIVE_VINE: Mario at x #VINE_ENTRY_X, y #VINE_ENTRY_Y (below the screen), a vine grows from there up to #VINE_HEIGHT_FULL, then he
+;; climbs it by himself (collision off) until his y is below #VINE_ENTRY_STOP_Y, steps off to the right (walking by himself, vineWalkOut) and has
+;; the controls from x #VINE_ENTRY_READY_X. The vine's column is the one #VINE_ENTRY_X + 8 falls in. A cloud-type area (tableAreaCloud) is left
+;; by falling to #CLOUD_EXIT_Y (a fall of three screens, the cartridge's Player_Y_HighPos 4): #AREA_EVENT_FALL, the area's fall link
+;; (tableAreaFallLink), entered by mode #ARRIVE_DROP: dropped in from the top at #FALL_ENTRY_X on the page of the link. It has the cloud music
+;; and no pit death.
+#AREA_EVENT_VINE      = 3
+#ARRIVE_DROP          = 3
+#AREA_EVENT_FALL      = 4
+#ARRIVE_VINE          = 4
+#PLAYER_ST_VINE_ENTRY = 9
+
+;; THE CASTLE'S END (smbdis 12127 HandleAxeMetatile, 1112 VictoryMode, 10067 BridgeCollapseData, 10073
+;; BridgeCollapse, 10095 RemoveBridge, 10142 KillAllEnemies). Mario's box on the area's Axe cell (areaAxeX, areaAxeY), not rising: the
+;; state #PLAYER_ST_AXE (the cartridge's victory mode: nothing else moves, the clock stops), the axe gone at once, his speed the walk's.
+;; castleEndTask #CASTLE_END_COLLAPSE: while Bowser is in the pool and standing, his feet's counter runs and each time it is out (then
+;; #BRIDGE_STEP_TICKS) a piece goes, with the blast and the shatter: the axe, the chain (a cell left and down), then the bridge from
+;; the axe end (a row lower, #BRIDGE_PIECES to the left), #BRIDGE_SEQUENCE in all; after the last he drops (#BOWSER_ST_DROPPED, his fall's
+;; sound) and falls until #BOWSER_FALLEN_Y. Then, or at once with no Bowser standing: the music stops, every object goes, the frenzy is
+;; over, and the task is #CASTLE_END_WALK. Its first tick (SetupVictoryMode): the end-of-castle music, the scroll lock lifted, the state
+;; #PLAYER_ST_ENDWALK, and the destination the page after the one the view's right edge is on (castleWalkDestX). Then (PlayerVictoryWalk)
+;; Mario walks right on his own physics until #CASTLE_WALK_STOP_DX into that page, while the view scrolls on its own (CastleScroll{},
+;; 1 px and #CASTLE_SCROLL_FRACTION 256ths a tick) until its left edge reaches the page (or the area's end); with both done,
+;; #CASTLE_END_MESSAGES (PrintVictoryMessages): "THANK YOU MARIO!" at once, the second message #CASTLE_MSG_SECOND ticks later, both in
+;; the HUD glyphs into the world (DrawCastleText{}: x from the destination, the cartridge's nametable rows); at #CASTLE_MSG_END,
+;; #CASTLE_END_DELAY for 6 intervals (WorldEndTimer); then the next level (#LIFE_REPLAY, PlayerEndWorld: no COURSE CLEAR).
+;; The retainer (the area's Retainer object, areaRetainerX and areaRetainerY, the cartridge's fixed $b8) is drawn whenever in view,
+;; #RETAINER_DRAW_DY above his y (every picture ends on its 16x32 cell's bottom row): in world 1 Robocod, enemies sheet cell
+;; #RETAINER_CELL, shape #PRE_RETAINER; in world 2 Zool, cell #RETAINER_ZOOL_CELL, shape #PRE_RETAINER_ZOOL (game-data/derived/npcs.png).
+#RETAINER_DRAW_DY    = -8
+#CASTLE_END_COLLAPSE = 1
+#CASTLE_END_WALK     = 2
+#CASTLE_END_MESSAGES = 3
+#CASTLE_END_DELAY    = 4
+#CASTLE_END_DONE     = 5
+#PLAYER_ST_AXE       = 10
+#BRIDGE_PIECES       = 13
+#BRIDGE_SEQUENCE     = 15
+#CASTLE_TEXT_LOWER_X = 40
+#FALL_ENTRY_X        = 40
+#RETAINER_CELL       = 41
+#RETAINER_ZOOL_CELL  = 44
+#VINE_ENTRY_X        = 56
+#CASTLE_TEXT_UPPER_X = 64
+#BOWSER_ST_DROPPED   = 64
+#VINE_ENTRY_COLUMN_X = 64
+#VINE_ENTRY_READY_X  = 72
+#CASTLE_TEXT_UPPER_Y = 80
+#CASTLE_WALK_STOP_DX = 96
+#CASTLE_TEXT_LOWER_Y = 112
+#VINE_ENTRY_STOP_Y   = 153
+#VINE_ENTRY_Y        = 240
+#CLOUD_EXIT_Y        = 768
+
+;; The slide, from the cartridge: Mario's climb down is a speed of 1 plus a carry every tick (Climb_Y_SpeedData and MForceData,
+;; smbdis 6036-6040, ClimbingSub 5966) and the flag's descent is 1 plus a carry too (FlagpoleRoutine, 6579): both 2 px a tick.
+;; #FLAGPOLE_FRAME_TIME is the climb animation's step; it has not been checked against the cartridge.
+#FLAGPOLE_SLIDE      = 2
+#FLAGPOLE_FLAG_STEP  = 2
+#FLAGPOLE_FRAME_TIME = 4
+
+;; The end of the level (see sparkydave.levelend.blitz.ab3). The player y values (the pole's bands, where he hangs and where the slide
+;; ends) are the cartridge's plus 16: the cartridge's player y is the top of a 32 px envelope, this game's the top of a 16 px sprite.
+;; The flag's and the number's y values are sprite positions and are the cartridge's own ($aa, $b0). The pole's bands (the cartridge's
+;; $22, $50, $68, $90), where a sliding Mario hangs ($9e), where the slide ends (flag $aa, or Mario $a2), where the number starts ($b0)
+;; and its offset from the flag, and the climb's 14 px side-step. #CASTLE_STOP_DX is added to his x before it is compared with the door
+;; object's left edge: 0 hides him as his left edge enters the doorway the object covers.
+#CASTLE_STOP_DX         = 0
+#POLE_NUMBER_STEP       = 2
+#FIREWORK_SLOTS         = 6
+#FIREWORK_PICTURE_TICKS = 8
+#POLE_STEP_OFF_DX       = 14
+#POLE_NUMBER_DX         = 20
+#STAR_FLAG_RISE         = 30
+#FIREWORK_INTERVAL      = 32
+#FIREWORK_ORIGIN_DX     = 48
+#STAR_FLAG_SHEET_CELL   = 49
+#POLE_Y_2000            = 50
+#TIME_BONUS_POINTS      = 50
+#POLE_Y_800             = 96
+#POLE_Y_400             = 120
+#END_DELAY_TICKS        = 126
+#CASTLE_TOP_Y           = 128
+#POLE_Y_100             = 160
+#PRE_STAR_FLAG          = 169
+#POLE_FLAG_END_Y        = 170
+#POLE_STOP_Y            = 174
+#POLE_NUMBER_START_Y    = 176
+#POLE_END_Y             = 178
+#FIREWORK_POINTS        = 500
+
+;; Areas and pipes (see sparkydave.pipes.blitz.ab3 and sparkydave.areas.blitz.ab3).
+;; The pipe moves are 48 ticks (ChangeAreaTimer $30); he comes back up from below the
+;; bottom of the screen (the cartridge's $f0 plus 16) at x 56 into the screen
+;; ($38) and is free when his top is above #PIPE_UP_READY_Y (its $91 plus 16); in the
+;; bonus room he drops in with no control until his top is below #BONUS_DROP_READY_Y
+;; (its $30 plus 16). #PIPE_SIDE_COLS is the exit pipe's mouth, body and junction.
+#AREA_MAIN            = 0
+#PEN_AREA_SKY         = 0
+#AREA_BONUS           = 1
+#AREA_EVENT_ENTER     = 1
+#PEN_AREA_BRICK       = 1
+#TILE_SET_UNDERGROUND = 1
+#TILE_SET_WATER       = 2
+#AREA_EVENT_RETURN    = 2
+#PEN_AREA_BRICK_LIGHT = 2
+#TILE_SET_CASTLE      = 3
+#PIPE_SIDE_COLS       = 3
+#MAX_PALETTE_ZONES    = 4
+#PLAYER_ST_PIPE_DOWN  = 5
+#PLAYER_ST_PIPE_SIDE  = 6
+
+;; The area types of the cartridge's tables (the generated area table carries them as numbers; the build checks
+;; these agree with manifest.AREA_TYPES): they pick the palette and the music.
+#AREA_TYPE_WATER       = 0
+#AREA_TYPE_GROUND      = 1
+#AREA_TYPE_UNDERGROUND = 2
+#AREA_TYPE_CASTLE      = 3
+
+;; The back playfield's kind (the cartridge's background scenery; the generated area table carries them as numbers and
+;; the build checks these agree with manifest.AREA_SCENERY): the back playfield has a strip for each but none (manifest.SCENERY_STRIPS,
+;; the area table's backStrip()).
+;; #AREA_BOX_NONE is where an area's flagpole, castle door, star flag or entry pipe is when it has none: nowhere Mario can be.
+#AREA_BOX_NONE  = -1000
+#SCENERY_NONE   = 0
+#SCENERY_CLOUDS = 1
+#SCENERY_HILLS  = 2
+#SCENERY_TREES  = 3
+#SCENERY_WATER  = 4
+
+;; Where the flag waits in an area with no flagpole: in the bitmap, right of anything the camera shows (no area without a flagpole is
+;; shown past column 222). #HALFWAY_START_Y is where a restart at the halfway page puts him whatever the area's own start was (the
+;; cartridge's entrance control 2: the header's $b0 plus 16).
+#HALFWAY_START_Y = 192
+#FLAG_PARKED_X   = 3552
+
+#PLAYER_ST_PIPE_UP  = 7
+#PLAYER_ST_DROP     = 8
+#RETURN_SCREEN_X    = 56
+#BONUS_DROP_READY_Y = 64
+#PIPE_UP_READY_Y    = 161
+#RETURN_START_Y     = 256
+
+;; The title logo, one 176x88 picture (assets/title-logo.iff). Bitmap slots are scarce, so it is loaded into the digit sheet's slot once
+;; the floating numbers' digits are cut, cut into one shape, and the slot is left: see LoadLogo{} and CutLogoShape{}. #HUD_G_MENU_CURSOR
+;; is the title menu's cursor.
+#LOGO_BM           = 9
+#HUD_G_MENU_CURSOR = 41
+#LOGO_H            = 88
+#LOGO_W            = 176
+#LOGO_SHAPE        = 183
+
+;; Cover screens (see sparkydave.cover.blitz.ab3 and the main project's SCREENS note). The cover is bitmap slot 11. #COVER_BLANK_TICKS is how long
+;; the blank cover stays up after the reload it hides (two frames' worth of sim ticks, so a black frame is always seen). #SHOW_TITLE is
+;; 1 to show the title (an overlay over the attract mode, ShowTitle{}) at the start and after a game over, 0 to go straight to the lives
+;; screen. #COVER_END is the end screen after the last level, shown until Return (or fire). #COVER_CONTINUE is not a cover: it is only
+;; used as a chain's next step (coverNext), the continue screen after TIME UP, which HandleLifeEvent{} opens.
+#COVER_NONE        = 0
+#COVER_BLANK       = 1
+#SHOW_TITLE        = 1
+#COVER_LIVES       = 2
+#COVER_BLANK_TICKS = 2
+#COVER_TIMEUP      = 3
+#COVER_GAMEOVER    = 4
+#COVER_TITLE       = 5
+#COVER_MENU        = 6
+#LIFE_RESET        = 6
+#COVER_END         = 7
+#LIFE_TITLE        = 7
+#LIFE_START_GAME   = 8
+#COVER_CONTINUE    = 8
+#COVER_BM          = 11
+
+;; The back playfield's bitmap: the 768 px strip (#BACK_STRIP_W columns, from the area table) followed by its first #VIEW_W + #FETCH_GUARD
+;; pixels again, so x can wrap at 768 with no seam. It is stamped for the start area's scenery at start (EnsureBackStrip{}), for another
+;; scenery as its area is entered, and again when the title or pause overlay, which uses it as a canvas, goes (RestoreBackStrip{}).
+#BACK_BM = 12
+
+;; The title overlay: while the title is up the back bitmap is its canvas, two pages of #OVERLAY_PAGE_W (the view and the fetch guard)
+;; at x 0 and x #OVERLAY_PAGE_W. A change is drawn on the page not shown, which is then shown, so the title never flickers.
+#OVERLAY_PAGE_W = #VIEW_W + #FETCH_GUARD
+
+;; The attract mode behind the title (AdvanceAttract{}): the camera's phase. Its speed and timings
+;; are in the variant files (#ATTRACT_STEP, #ATTRACT_HOLD_TICKS, #ATTRACT_BLANK_TICKS), since they
+;; count sim ticks.
+#ATTRACT_OFF    = 0
+#ATTRACT_SCROLL = 1
+#ATTRACT_HOLD   = 2
+#ATTRACT_BLANK  = 3
+
+;; The overlay's screens (overlayScreenWanted, overlayScreenShown): none, the title, the options page, the pause menu, the jukebox, the
+;; palette page and the game over's continue.
+#SCREEN_NONE     = 0
+#SCREEN_TITLE    = 1
+#SCREEN_OPTIONS  = 2
+#SCREEN_PAUSE    = 3
+#SCREEN_JUKEBOX  = 4
+#SCREEN_PALETTE  = 5
+#SCREEN_CONTINUE = 6
+
+;; The continue screen: its two rows (YES, NO) and its lines on the page: GAME OVER where the GAME OVER cover has
+;; it (y 128), CONTINUE, the rows #TITLE_LINE apart, and how many are left (none shown for INFINITE). The rows are centred as a block
+;; #CONTINUE_MENU_W wide: the mushroom, its gap and the three letters of YES.
+#CONTINUE_YES       = 0
+#CONTINUE_NO        = 1
+#CONTINUE_ROWS      = 2
+#CONTINUE_MENU_W    = 40
+#CONTINUE_HEADING_Y = 128
+#CONTINUE_ASK_Y     = 152
+#CONTINUE_ROWS_Y    = 168
+#CONTINUE_LEFT_Y    = 208
+
+;; The menus' rows: the title's three (the game, the level it starts at, the options), the options page's (#OPT_*; its last three rows and #OPTIONS_ROWS are the look files':
+;; the All-Stars look has no palette row), the pause menu's
+;; three (#PAUSE_*) and the palette page's four (#PAL_PAGE_*: the palette, the area look and Mario's colours to see it with, BACK), each the
+;; row's number; and the two axes of menuAxisHeld() (#MENU_AXIS_*).
+#OPT_KEYBOARD         = 0
+#PAUSE_RESUME         = 0
+#PAL_PAGE_CHOICE      = 0
+#MENU_AXIS_VERTICAL   = 0
+#MENU_AXIS_HORIZONTAL = 1
+#OPT_JOYSTICK         = 1
+#PAUSE_OPTIONS        = 1
+#TITLE_LEVEL          = 1
+#PAL_PAGE_LOOK        = 1
+#OPT_KEYS             = 2
+#PAUSE_QUIT           = 2
+#TITLE_OPTIONS        = 2
+#PAL_PAGE_MARIO       = 2
+#TITLE_ROWS           = 3
+#OPT_JUMP_BUFFER      = 3
+#PAUSE_ROWS           = 3
+#PAL_PAGE_BACK        = 3
+#OPT_COYOTE           = 4
+#PAL_PAGE_ROWS        = 4
+#OPT_CONTINUES        = 5
+#OPT_SOUND            = 6
+
+;; The options and pause pages' layout on a page: the cursor's, the labels' and the values'
+;; columns, the heading's row, the first row (#TITLE_LINE apart) and the hint's row.
+#MENU_HEADING_Y = 40
+#MENU_ROWS_Y    = 56
+#MENU_HINT_Y    = 232
+
+;; The jukebox page (sparkydave.jukebox.blitz.ab3): its rows (#JKB_*), its layout on a page (the heading, the stage from #JKB_STAGE_TOP
+;; to the ground at #JKB_GROUND_Y, the rows from #JKB_ROWS_Y a #JKB_ROW_PITCH apart, the readout line; the columns are #MENU_*), the
+;; highest hop of a character, and the NES look's sky pen in the backdrop's scenes (#JKB_SKY_PEN, an atlas pen the scenery does not
+;; use). The backdrop is a pre-cut scene from the stage's top down (sparkydave.jukebox-scenes.data.ab3, ShowJukeboxScene{}).
+;; The four characters are spread evenly across the view: the first at #JKB_CHAR_X, each next one #JKB_CHAR_PITCH further on (16 wide,
+;; so 38 between them and 39 at each end: the 192 px they leave, in five equal gaps to the whole pixel).
+#JKB_SONG        = 0
+#JKB_EFFECT      = 1
+#JKB_PAN         = 2
+#JKB_FILTER      = 3
+#JKB_PULSE       = 4
+#JKB_TRIANGLE    = 5
+#JKB_NOISE       = 6
+#JKB_DEFAULTS    = 7
+#JKB_BACK        = 8
+#JKB_ROWS        = 9
+#JKB_SKY_PEN     = 9
+#JKB_ROW_PITCH   = 12
+#JKB_HEADING_Y   = 36
+#JKB_CHAR_X      = 39
+#JKB_STAGE_MAX_H = 40
+#JKB_STAGE_TOP   = 48
+#JKB_CHAR_PITCH  = 54
+#JKB_GROUND_Y    = 112
+#JKB_ROWS_Y      = 122
+#JKB_READOUT_Y   = 232
+
+;; The back's two bands (sparkydave.parallax.blitz.ab3): the hills' band starts at world list line
+;; #BAND_LINE (bitmap row #VIEW_TOP + 80 = 112, among the back's empty rows between the clouds at 32
+;; to 79 and the hills at 160 to 207). Two CustomStrings: 2 instructions each (a no-op and the wait)
+;; plus 4 and 5 moves, so 13 custom instructions on list 1, the second string from slot 6. The
+;; CopList object's custom area pointer is its eighth long (displaylib.ab3, NEWTYPE .mycop), and
+;; the value words of the moves are at these byte offsets in it. #BAND_BLOCK_MASK is an x in
+;; quarter pixels less its 32 px fine part (#FINE_MASK, in quarter pixels). The copper registers: the even (back) planes' pointers,
+;; high word, and BPLCON1.
+#FETCH_OFF_SLOTS       = 4
+#BAND_STRING_B_SLOT    = 6
+#SKY_STRING_SLOTS      = 7
+#BAND_POKE_FIRST       = 10
+#BAND_CUSTOMS          = 13
+#MYCOP_CUSTOMS         = 28
+#BAND_POKE_SECOND      = 34
+#BAND_LINE             = 80
+#FINE_MASK             = 127
+#BPL2PTH               = $E4
+#BPL4PTH               = $EC
+#BPL6PTH               = $F4
+#BPL8PTH               = $FC
+#BPLCON0               = $100
+#BPLCON1               = $102
+#BPLCON3               = $106
+#COLOR00               = $180
+#COPPER_NOP            = $1fe
+#PLAYFIELD2_OFFSET_HUD = $0c00
+#BAND_BLOCK_MASK       = $FF80
+#BAND_LINE_AWAY        = #BAND_LINE + #HUD_H + #LIST_GAP
+;; The back's colour offset 16 as list 1 has it (BPLCON3 $0c00 by default, XOR #PLAYFIELD2_OFFSET_16): the second HUD string sets it. The default's
+;; bits are all in #PLAYFIELD2_OFFSET_16, so the XOR is a subtraction: $1000.
+#BPLCON3_BACK = #PLAYFIELD2_OFFSET_16 - #PLAYFIELD2_OFFSET_HUD
+;; BPLCON3's BRDRBLNK (enabled by ECSENA, BPLCON0's bit 0, which the library sets, so a BPLCON0 written by a string keeps it). With it
+;; on, the border is black, and so is any line inside the window that fetches no planes. It is on only from the world's last line to
+;; the HUD's first, so the frame is black above the HUD (where the HUD list loads the palette) and below the world, while the picture's
+;; sides and the 3 line gap under the HUD (no planes) stay pen 0. Every switch is a string at a line's end, because a header's BPLCON3
+;; lands part way along a line (a half black line under the HUD). So the HUD list's and list 2's headers have it on, as it already is
+;; there, and list 1's off, as it already is there; the world's end string (WorldEndString{}) sets it and each list's start string
+;; (#START_SLOTS, ShowHudStart{}) clears it.
+#START_SLOTS  = 3
+#BORDER_BLANK = $20
+;; List 2's custom area: its start string, then with #HUD_OVER_WORLD its two HUD strings (BuildBandStrings{}): the first is a no-op, a wait and four
+;; pointer moves (#BAND_STRING_B_SLOT slots), the second a no-op, a wait and six moves, the four and BPLCON1 and BPLCON3 (#HUD_STRING_B_SLOTS);
+;; the hills' strings follow at slot #AWAY_BAND_SLOT (the world's strings from #AWAY_WORLD_SLOT, in list 1's order), so their pokes are 4 bytes a
+;; slot on; without it the hills' strings follow the start string. InitBand{} checks the registers are where these say, and rebuilds the strings
+;; every frame if not.
+#HUD_STRING_B_SLOTS    = 2 + 6
+#HUD_STRING_SLOTS      = #BAND_STRING_B_SLOT + #HUD_STRING_B_SLOTS
+#BAND_SLOT_1           = #SKY_EARLY_BANDS*#SKY_STRING_SLOTS
+#BAND_POKE_FIRST_1     = #BAND_POKE_FIRST + 4*#BAND_SLOT_1
+#BAND_POKE_SECOND_1    = #BAND_POKE_SECOND + 4*#BAND_SLOT_1
+#HUD_POKE_FIRST        = #BAND_POKE_FIRST + 4*#START_SLOTS
+#HUD_POKE_SECOND       = #BAND_POKE_SECOND + 4*#START_SLOTS
+#AWAY_WORLD_SLOT       = #START_SLOTS + #HUD_STRING_SLOTS*#HUD_OVER_WORLD
+#AWAY_BAND_SLOT        = #AWAY_WORLD_SLOT + #BAND_SLOT_1
+#AWAY_CUSTOMS          = #BAND_CUSTOMS + #AWAY_WORLD_SLOT
+#BAND_POKE_FIRST_AWAY  = #BAND_POKE_FIRST + 4*#AWAY_BAND_SLOT
+#BAND_POKE_SECOND_AWAY = #BAND_POKE_SECOND + 4*#AWAY_BAND_SLOT
+
+;; The speeds: the clouds' and the hills' share of the camera's movement, one of #PARALLAX_PRESETS
+;; pairs (globals.ab3, parallaxCloudRate() and parallaxHillRate()), #PARALLAX_DEFAULT at start.
+;; In debug mode Help steps through them and the HUD shows "P" and the number (Help is refused by
+;; the redefine screen, KeyAllowed{}).
+#PARALLAX_DEFAULT = 2
+#PARALLAX_PRESETS = 6
+
+; NES button bits. Right is 1 and left is 2, so they also work as facing values.
+#MARIO_BTN_RIGHT = $01
+#MARIO_BTN_LEFT  = $02
+#MARIO_BTN_DOWN  = $04
+; Up climbs a vine (nothing else reads it): the UP key (the cursor Up unless redefined, #KEY_UP) and the joystick's stick up.
+#MARIO_BTN_UP  = $08
+#MARIO_BTN_RUN = $40
+;; The fire button, a bit of its own so the run button and the fire button can be two keys.
+;; The cartridge's B is both; #MARIO_BTN_FIRE sits where its Select bit is, which this
+;; engine never sets (the heldBits test in PrepareGroundMotion{} leaves it out).
+#MARIO_BTN_FIRE = $20
+#MARIO_BTN_JUMP = $80
+
+
+
+
+; Numbers the same in both builds: the jump halt, the run timer, the side-collision timer.
+#MARIO_JUMP_HALT = 1
+#MARIO_RUN_TIME  = 10
+; Big Mario's vertical speed after breaking a brick (BrickShatter sets $fe).
+#BRICK_BREAK_SPEED_Y = -2
+#MARIO_SIDECOLLIDE   = 16
+#MARIO_SCROLL_CATCH  = 112
+#MARIO_FALL_FRAC     = $80
+
+;; The water's surface, the same in both builds: above it a stroke does not lift him and the surface force pushes him under (ProcSwim
+;; and InitJS's cmp #$14, in the cartridge's y; this game's y is the top of the 16 px sprite, 16 lower).
+#SWIM_SURFACE_Y = 36
+;; Big Mario's head while swimming (ChkCollSize's second probe set, BlockBufferAdderData 7: the head at y $02, not $04),
+;; 2 px above #PROBE_TOP_Y_BIG; his feet and sides are as on land.
+#PROBE_TOP_Y_BIG_SWIM = -14
+
+;; The display refresh is 50 or 60 Hz (#SIM_HZ_PAL plus #SIM_HZ_STEP when the machine is NTSC); the sim's rate
+;; (#SIM_HZ) is in the physics variant, and the sound engine's is always #SOUND_HZ. Cap is ticks per frame.
+#SIM_MAX_TICKS = 2
+#SIM_HZ_STEP   = 10
+#SIM_HZ_PAL    = 50
+
+;; ---------------------------------------------------------------
+;; Tile-collision geometry
+;; ---------------------------------------------------------------
+;; The NES tile-collision box is 12x14, inset 2 px on the left, right and
+;; top and flush at the bottom, sampled at five points that serve all four
+;; directions: the top edge at its centre, the bottom edge at both ends,
+;; and each side edge at its own extreme. The cartridge reaches these numbers through a 32 px OAM envelope with small Mario's art at
+;; the bottom; this game blits one 16 px shape, so the offsets are rebased by -16 on Y. The geometry is identical; only the arithmetic
+;; differs. See the main project's PLAYER_HITBOX note section 4.2.
+;;
+;; The player's bounding box is a second, separate box used for enemy
+;; collision: small Mario is 10x12 at (+3, +4). Big Mario is 12x24 at
+;; (+2, +8) and crouching is 12x12 at (+2, +20), both in a 32-px sprite, so
+;; those need no rebasing either. Moving items, Goombas and Koopas read this box.
+
+;; Tile-collision probes, relative to the sprite top left.
+;;
+;; The head probe moves with Mario's size and NOTHING ELSE about the box does.
+;; From the ROM's two probe sets (the main project's PLAYER_HITBOX note section 4.3: adder indices
+;; 0-6 standing big, 14-20 small) both put the FEET at Y+32 and span the same
+;; 12 px horizontally, X+2 to X+13. Only the head differs -- Y+4 standing big,
+;; Y+18 small -- so big is 28 px tall against small's 14 and the delta is 14 px.
+;; #PROBE_TOP_Y_BIG is that delta applied to #PROBE_TOP_Y. The horizontal box is
+;; already right for both sizes, so growing changes one number and not a box.
+#PROBE_TOP_Y_BIG    = -12
+#PROBE_SIDE_Y_UPPER = -8
+#PROBE_TOP_Y        = 2
+#PROBE_SIDE_X1      = 2
+#PROBE_FOOT_X1      = 3
+#PROBE_TOP_X        = 8
+#PROBE_SIDE_Y       = 8
+#PROBE_FOOT_X2      = 12
+#PROBE_SIDE_X2      = 13
+#PROBE_FOOT_Y       = 16
+
+;; Sub-tile gates. The ROM tests the low nybble of the player's own Y, not
+;; the probe's, so these transfer across the rebasing unchanged. The head
+;; gate lets Mario rise through the first 4 px of a ceiling; the foot gate
+;; refuses to land once he is #MT_FEET_MIN_SUBTILE px or more into a tile row (5 on NTSC, 6 on PAL,
+;; in sparkydave.physics.ab3) and impedes horizontal motion instead. Both are safe while the worst
+;; fall step, #MARIO_FALL_MAX + 1, is no more than #MT_FEET_MIN_SUBTILE: then the residues playerY
+;; mod 16 takes while falling always include one below it. The VARIANTS check in
+;; tools/check_source_split.py enforces that for both variants. See the main project's PLAYER_HITBOX note
+;; section 4.4.
+#MT_HEAD_MIN_SUBTILE = 4
+#MT_HEAD_MIN_Y       = 16
+
+; The box shape itself, derived from the probes above rather than used.
+#HITBOX_INSET  = 2
+#HITBOX_WIDTH  = 12
+#HITBOX_HEIGHT = 14
+
+;; Enemy-collision bounding box. See the note above for the -16 Y rebasing: the cartridge states these against the 32 px sprite
+;; envelope and this game blits one 16 px shape, so every Y here is 16 less than the cartridge's.
+;;
+;; Small: $03,$14,$0d,$20 -> x+3..x+13, y+4..y+16 (10 wide, 12 tall).
+;; Big: $02,$08,$0e,$20 -> x+2..x+14, y-8..y+16 (12 wide, 24 tall). The top is
+;; negative because a 24-tall box whose feet are at y+16 starts 8 px above the
+;; sprite origin, which is exactly where DrawPlayer{} lifts big Mario's blit to.
+#BOUND_TOP_BIG    = -8
+#BOUND_LEFT_BIG   = 2
+#BOUND_LEFT       = 3
+#BOUND_TOP        = 4
+#BOUND_RIGHT      = 13
+#BOUND_RIGHT_BIG  = 14
+#BOUND_BOTTOM     = 16
+#BOUND_BOTTOM_BIG = 16
+
+;; END OF CONSTANTS

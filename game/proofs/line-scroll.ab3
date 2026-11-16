@@ -1,0 +1,428 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; line-scroll.ab3 -- can the back playfield's clouds and hills scroll at their own speeds?
+;; Compile in UAE. Not part of the game. Third proof of the scrolling options in
+;; the main project's AMIGA_RENDERER note ("Parallax and scrolling options"), built on
+;; dual-playfield.ab3 (proved 2026-10-14: the first bitmap given to DisplayBitMap is the
+;; front, the back's colours start at entry 8, fetch mode 3 holds).
+;;
+;; Two things are new here:
+;; 1. DisplayScroll. Per line of the list it writes BPLCON1 and the two modulos, from two
+;;    arrays of quicks, one per playfield: each entry is how far that line moves from the
+;;    line above (read from the library source, displaylib.ab3). It needs 3 custom copper
+;;    instructions a line (InitCopList customs -3) and must follow DisplayBitMap, whose x
+;;    it starts from. Here the front's array is all zeros and the back's has one entry at
+;;    the band boundary, the hills' x less the clouds' x, so the clouds above it and the
+;;    hills below it scroll at different speeds from one bitmap.
+;; 2. The back's colour offset. BPLCON3's PF2OF is 8 by default, so the back's pens 1 to 7
+;;    share entries 9 to 15 with the front: 24 colours, not 32. DisplayControls XORs its
+;;    BPLCON3 argument with the library's default $c00, so $1c00 makes PF2OF 16 and gives
+;;    the back entries 16 to 31 of its own.
+;;
+;; The camera moves the front back and forth; the clouds follow at a quarter of its speed
+;; and the hills at half. Keys: Space switches the back to drift (clouds 1 px a frame,
+;; hills 2, both wrapping at 768) and back. P switches the back's colour offset between 16
+;; (start) and 8. Esc quits and writes line-scroll-results.txt.
+;;
+;; What to look at and report
+;; 1. The clouds (top band) and the hills (bottom band) move at different speeds, both
+;;    smoothly, and the pillars (front) are untouched by it.
+;; 2. No torn, doubled or garbage line at the band boundary (about two thirds of the way
+;;    down between the clouds and the hills) or anywhere else.
+;; 3. The back is blue with the offset at 16 and yellow at 8 (press P). If P does nothing,
+;;    say which colour it is.
+;; 4. In drift mode, the bright markers in both bands pass with no jump at the wrap.
+;; 5. The HUD band and the 3 line gap are as clean as in dual-playfield.ab3.
+;; The results file has the bob load (72 lines in dual-playfield.ab3), so the copper's
+;; extra 3 instructions a line can be seen, and the time DisplayScroll itself takes.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE = $40
+#RAW_KEY_ESC   = $45
+#RAW_KEY_P     = $19
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 32
+
+;; 4 planes, smooth scroll, AGA colours, fetch mode 3; the world adds dual playfield and
+;; counts 8 planes (two playfields of 4).
+#HUD_FLAGS   = $13014
+#WORLD_FLAGS = $13038
+
+;; DisplayScroll's per-line copper instructions.
+#LINE_CUSTOMS = -3
+
+;; BPLCON3 is the library default $c00 XOR this: PF2OF 16 rather than 8.
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the shape source.
+#BM_A     = 0
+#BM_B     = 1
+#BM_BACK  = 2
+#BM_HUD   = 3
+#BM_SHAPE = 4
+#FRONT_W  = 1024
+#BACK_W   = 1152
+#PERIOD   = 768
+#WORLD_H  = 256
+#HUD_W    = 384
+
+;; The band boundary: bitmap row 112 (between the clouds at 40 to 79 and the hills at 140
+;; to 207), list line 112 - #VIEW_TOP. Its entry moves the lines below it.
+#BOUNDARY_ROW   = 112
+#BOUNDARY_ENTRY = 79
+
+#BOB_SHAPE  = 0
+#TILE       = 16
+#BOB_BYTES  = 16384
+
+#BOBS        = 8
+#WORK_LINE   = 80
+#HOLD_FRAMES = 75
+#LINES_PAL   = 312
+
+;; The front scrolls back and forth between 0 and this: the bitmap less the view and a
+;; 64 pixel fetch guard.
+#SCROLL_MAX = 640
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+driftMode.w = False
+spaceWasDown.w = False
+offsetSixteen.w = True
+pWasDown.w = False
+scrollX.q = 0
+scrollStep.q = 1.25
+scrollDir.q = scrollStep
+cloudX.q = 0
+hillX.q = 0
+cloudDrift.q = 0
+hillDrift.q = 0
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+bobFrames.l = 0
+bobSum.l = 0
+bobMax.l = 0
+scrollLines.l = 0
+scrollSum.l = 0
+scrollMax.l = 0
+wrapCount.l = 0
+
+Dim frontDelta.q(#VIEW_H)
+Dim backDelta.q(#VIEW_H)
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_SHAPE, 16, #TILE, 4
+
+;; 0 the sky; 1 to 7 reds; 8 to 15 yellows; 16 black; 17 to 23 blues; 24 to 31 greys.
+;; Which group a layer shows in says where its colours start.
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+For colourIndex.w = 1 To 7
+  AGAPalRGB 0, colourIndex, 100 + colourIndex*22, 0, 0
+  AGAPalRGB 0, colourIndex + 8, 100 + colourIndex*22, 100 + colourIndex*22, 0
+  AGAPalRGB 0, colourIndex + 16, 0, 0, 100 + colourIndex*22
+  AGAPalRGB 0, colourIndex + 24, 60 + colourIndex*25, 60 + colourIndex*25, 60 + colourIndex*25
+Next
+AGAPalRGB 0, 8, 255, 255, 0
+AGAPalRGB 0, 16, 0, 0, 0
+AGAPalRGB 0, 24, 40, 40, 40
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; The front: ground in pens 1 and 2, a tall pillar in pen 3 every 128 px, and one line
+;; in pen 7 on column 0 and on column 319.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 1
+    If columnIndex MOD 2 = 1 Then pen = 2
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 40, pillarX + 23, 207, 3
+  Next
+  Boxf 0, #VIEW_TOP, 0, 239, 7
+  Boxf #VIEW_W - 1, #VIEW_TOP, #VIEW_W - 1, 239, 7
+End Statement
+
+;; One cloud and one hill per 192 px, four in the 768 px period, drawn again at x + 768
+;; where it fits so the bitmap's last 384 px repeat its first. A marker in each band at
+;; x = 0 and x = 768.
+Statement DrawBackPiece{pieceX.w}
+  Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+  Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+  Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+  Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+End Statement
+
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    DrawBackPiece{pieceX}
+  Next
+  Boxf 0, 36, 3, 95, 7
+  Boxf #PERIOD, 36, #PERIOD + 3, 95, 7
+  Boxf 0, 128, 3, 207, 7
+  Boxf #PERIOD, 128, #PERIOD + 3, 207, 7
+End Statement
+
+Statement MakeShapes{}
+  Use BitMap #BM_SHAPE
+  Cls 0
+  Circlef 7, 7, 7, 4
+  Circlef 7, 7, 3, 7
+  GetaShape #BOB_SHAPE, 0, 0, #TILE, #TILE
+End Statement
+
+BBlitMode CookieMode
+MakeShapes{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+Use BitMap #BM_HUD
+Cls 0
+Boxf 8, 4, 15, 11, 7
+
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, #LINE_CUSTOMS
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+DisplayScroll 1, &frontDelta(0), &backDelta(0)
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  If RawStatus(#RAW_KEY_SPACE)
+    If spaceWasDown = False Then driftMode = NOT driftMode
+    spaceWasDown = True
+  Else
+    spaceWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_P)
+    If pWasDown = False
+      offsetSixteen = NOT offsetSixteen
+      If offsetSixteen = True
+        DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+      Else
+        DisplayControls 1, 0, 0, 0
+      EndIf
+    EndIf
+    pWasDown = True
+  Else
+    pWasDown = False
+  EndIf
+
+  ;; The front: held at 0 at the start, then back and forth.
+  If frameCount >= #HOLD_FRAMES
+    scrollX = scrollX + scrollDir
+    If scrollX >= #SCROLL_MAX Then scrollDir = -scrollStep
+    If scrollX <= 0
+      scrollX = 0
+      scrollDir = scrollStep
+    EndIf
+  EndIf
+  viewX = Int(scrollX)
+
+  ;; The back's two bands: a quarter and a half of the front, or drifting and wrapping.
+  If driftMode = False
+    cloudX = scrollX/4
+    hillX = scrollX/2
+  Else
+    cloudDrift = cloudDrift + 1
+    If cloudDrift >= #PERIOD Then cloudDrift = cloudDrift - #PERIOD
+    hillDrift = hillDrift + 2
+    If hillDrift >= #PERIOD
+      hillDrift = hillDrift - #PERIOD
+      wrapCount = wrapCount + 1
+    EndIf
+    cloudX = cloudDrift
+    hillX = hillDrift
+  EndIf
+  backDelta(#BOUNDARY_ENTRY) = hillX - cloudX
+
+  ;; The same bob load as fetch-mode.ab3 and dual-playfield.ab3.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  For bobIndex.w = 0 To #BOBS - 1
+    BBlit drawBuf, #BOB_SHAPE, viewX + 20 + bobIndex*36, 112 + (bobIndex MOD 2)*48
+  Next
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+
+  VWait
+  DisplayBitMap 1, drawBm, scrollX, #VIEW_TOP, #BM_BACK, cloudX, #VIEW_TOP
+  startLine = RasterLine{}
+  DisplayScroll 1, &frontDelta(0), &backDelta(0)
+  endLine = RasterLine{}
+  scrollLines = endLine - startLine
+  If scrollLines < 0 Then scrollLines = scrollLines + #LINES_PAL
+
+  If frameCount >= 10
+    bobFrames = bobFrames + 1
+    bobSum = bobSum + bobLines
+    If bobLines > bobMax Then bobMax = bobLines
+    scrollSum = scrollSum + scrollLines
+    If scrollLines > scrollMax Then scrollMax = scrollLines
+  EndIf
+
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/line-scroll-results.txt")
+  FileOutput 0
+  NPrint "line-scroll: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", customs ", #LINE_CUSTOMS, ", ", frameCount, " frames"
+  If bobFrames > 0
+    NPrint "bob load (", #BOBS, " bobs from line ", #WORK_LINE, "): average lines ", bobSum/bobFrames, ", worst ", bobMax
+    NPrint "DisplayScroll each frame: average lines ", scrollSum/bobFrames, ", worst ", scrollMax
+  EndIf
+  NPrint "wraps of the hills in drift mode: ", wrapCount
+  If offsetSixteen = True
+    NPrint "back colour offset at exit: 16"
+  Else
+    NPrint "back colour offset at exit: 8"
+  EndIf
+  NPrint ""
+  NPrint "dual-playfield.ab3 measured 72 lines average for the same bob load."
+  NPrint "The picture is the main result: report the five points at the top of the proof."
+  CloseFile 0
+EndIf
+End

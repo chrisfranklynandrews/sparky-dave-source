@@ -1,0 +1,468 @@
+;; display-edge.ab3 -- which pixel columns are really on screen at the left and right edges,
+;; on the game's own two-list display, and what the library puts in the window registers.
+;; Compile in UAE. Not part of the game. Proof for the HUD text that looks one pixel off
+;; the left edge, and for the 321 px window.
+;;
+;; Two strips on the game's own lists, with the game's own flags:
+;;   TOP strip (list 0, where the HUD is), 16 lines
+;;   LOWER strip (list 1, where the world is), 48 lines
+;; Both show a bitmap that has a column ruler painted into it:
+;;   left edge:   x 0 RED, x 1 GREEN, x 2 BLUE, x 3 WHITE, then black, then YELLOW at x 8
+;;   a WHITE line every 16 px from x 16 (so a tile column can be counted)
+;;   right edge:  x 316 YELLOW, 317 WHITE, 318 RED, 319 GREEN, 320 BLUE, 321 WHITE
+;;
+;; RESULT (2026-10-12, both emulators): the library's window is 129 to 449, 320 wide, but its
+;; fetch starts a word early so column 0 sits at pixel 128 and is hidden; DisplayAdjust -1 and -1
+;; (one Z, one X) gives red first and green last in both. See the main project's AMIGA_RENDERER note, "The display window".
+;;
+;; Run 1 (2026-10-11) showed: AmigaForever shows columns 0 to 320 (321 columns), FS-UAE
+;; shows 1 to 320 (320 columns). Column 321 is hidden in both.
+;;
+;; THE WINDOW REGISTERS. DISPLAYLIB.guide gives the copper-list object's layout (coppos is
+;; its second long, the copper list's place in Chip RAM), so this proof reads the library's
+;; own copper list and writes the display registers it set to
+;; display-edge-results.txt: DIWSTRT, DIWSTOP, DDFSTRT, DDFSTOP, BPLCON1, FMODE (and DIWHIGH
+;; if the library writes one), with the window width worked out from them. The width of a
+;; window is (256 + the stop's horizontal byte) minus the start's.
+;;
+;; THE ADJUSTMENT. DisplayAdjust moves the window edges; in the older hw-scroll proof one
+;; unit of DIWSTRT was one lores pixel. Keys (each rebuilds both lists, the picture may
+;; flicker; the adjustments apply to both lists):
+;;   A / Z   DIWSTRT +1 / -1     (the window's left edge: +1 moves it right, hiding a column)
+;;   S / X   DIWSTOP +1 / -1     (the window's right edge: -1 moves it left)
+;;   R       back to the library's own window (no adjustment)
+;;   1       the TOP strip with the literal form (as the HUD does it, the starting state)
+;;   2       the TOP strip with a variable x (the extended form, as the world does it)
+;;   Esc     quit (the results file is written then)
+;;
+;; What to try, in each emulator (AmigaForever and FS-UAE):
+;;   - Find the adjustment that makes the coloured columns start at RED (x 0) and end at
+;;     GREEN (x 319): exactly 320 columns, with BLUE (x 320) just gone. Note the A/Z and
+;;     S/X presses you used (the results file records them).
+;;   - If the same adjustment gives exactly that picture in both emulators, the game can use
+;;     it. If they want different adjustments, the emulators disagree and no setting can
+;;     satisfy both: then only a safe margin helps.
+;;   - Quit with Esc and read display-edge-results.txt (the first line pair is the library's
+;;     own window, before any adjustment).
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_1   = $01
+#RAW_KEY_2   = $02
+#RAW_KEY_A   = $20
+#RAW_KEY_S   = $21
+#RAW_KEY_R   = $13
+#RAW_KEY_Z   = $31
+#RAW_KEY_X   = $32
+
+#COPPER_FLAGS  = $10014
+#TOP_YPOS   = 44
+#TOP_H      = 16
+#LOWER_YPOS = 63
+#LOWER_H    = 48
+#BM_W       = 336
+
+;; What the copper list says, per list (0 top, 1 lower).
+Dim copDiwStart.l(1)
+Dim copDiwStop.l(1)
+Dim copDdfStart.l(1)
+Dim copDdfStop.l(1)
+Dim copBplcon1.l(1)
+Dim copFmode.l(1)
+Dim copDiwHigh.l(1)
+Dim firstDiwStart.l(1)
+Dim firstDiwStop.l(1)
+Dim firstDdfStart.l(1)
+Dim firstDdfStop.l(1)
+Dim firstBplcon1.l(1)
+Dim firstFmode.l(1)
+;; key-settings.ab3 -- proof for redefinable keys (the main project's journal notes). It answers three things
+;; before anything is built into the game:
+;;   1. Can a key be captured by scanning RawStatus over every raw code, and can the keys be named?
+;;   2. Can a settings file be written in the middle of a running Blitz display, by a Statement
+;;      that switches to QAMIGA (the library's "Amiga mode without touching the display") and
+;;      back, and does RawStatus still work afterwards?
+;;   3. Does the file round trip: loaded at the next start, and read back equal to what was kept?
+;; Run it twice. The first run has no file (or an old one): press a key for each of the six bars
+;; as it turns yellow (LEFT, RIGHT, DOWN, JUMP, RUN, FIRE, top to bottom). Esc, Return, F1 to F3
+;; and Caps Lock are refused (the bar flashes red); a key already given to an earlier bar is
+;; refused too. After the sixth the file is saved, then press any key within ten seconds (to show
+;; the keys still read), or just wait. The second run loads the file at start and the results say so.
+;; Results: game/proofs/results/key-settings-results.txt. The settings file is
+;; game/proofs/key-settings-test.dat (not committed).
+
+WBStartup
+
+#RAW_KEY_ESC            = $45
+#RAW_KEY_RETURN         = $44
+#COPPER_FLAGS         = $10014
+#KEY_COUNT         = 6
+#KEY_LAST          = $67
+#BM_W              = 336
+#BAR_STEP          = 32
+#SAVE_DELAY_FRAMES = 50
+#WAIT_AFTER_SAVE   = 500
+
+settingsPath$ = "sparky-dave:game/proofs/key-settings-test.dat"
+
+Dim keyNames$(127)
+Dim keyMap.w(5)
+Dim defaultMap.w(5)
+Dim fileMap.w(5)
+Dim actionNames$(5)
+Dim checkLog$(80)
+Dim captureLog$(40)
+checkCount.w = 0
+checkFailed.w = 0
+captureLogCount.w = 0
+loadedAtStart.w = False
+fileModeRead.w = 0
+controlModeKept.w = 0
+rejectedReserved.w = 0
+rejectedDuplicate.w = 0
+captureIndex.w = 0
+flashFrames.w = 0
+savedOk.w = False
+saveAttempted.w = False
+keysAliveAfterSave.w = False
+framesAfterSave.w = 0
+readbackMatches.w = False
+
+actionNames$(0) = "LEFT"
+actionNames$(1) = "RIGHT"
+actionNames$(2) = "DOWN"
+actionNames$(3) = "JUMP"
+actionNames$(4) = "RUN"
+actionNames$(5) = "FIRE"
+defaultMap(0) = $4f
+defaultMap(1) = $4e
+defaultMap(2) = $4d
+defaultMap(3) = $40
+defaultMap(4) = $63
+defaultMap(5) = $64
+
+; Record one named self-check for the results file.
+Statement Check{label$, conditionNow.w}
+  SHARED checkCount, checkFailed, checkLog$()
+  checkCount = checkCount + 1
+  If conditionNow <> False
+    checkLog$(checkCount) = "PASS  " + label$
+  Else
+    checkLog$(checkCount) = "FAIL  " + label$
+    checkFailed = checkFailed + 1
+  EndIf
+End Statement
+
+Statement SetKeyName{code.w, text$}
+  SHARED keyNames$()
+  keyNames$(code) = text$
+End Statement
+
+; The names, for a US keyboard (raw codes are positions, the legend depends on the keymap).
+Statement BuildKeyNames{}
+  SHARED keyNames$()
+  rowText$ = "1234567890"
+  For index.w = 0 To 9
+    SetKeyName{1 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "QWERTYUIOP"
+  For index.w = 0 To 9
+    SetKeyName{$10 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "ASDFGHJKL"
+  For index.w = 0 To 8
+    SetKeyName{$20 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "ZXCVBNM"
+  For index.w = 0 To 6
+    SetKeyName{$31 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  For index.w = 1 To 9
+    SetKeyName{$4f + index, "F" + Chr$(48 + index)}
+  Next
+  SetKeyName{$59, "F10"}
+  SetKeyName{$00, "`"}
+  SetKeyName{$0b, "-"}
+  SetKeyName{$0c, "="}
+  SetKeyName{$0d, "\"}
+  SetKeyName{$1a, "["}
+  SetKeyName{$1b, "]"}
+  SetKeyName{$28, ";"}
+  SetKeyName{$29, "'"}
+  SetKeyName{$38, ","}
+  SetKeyName{$39, "."}
+  SetKeyName{$3a, "/"}
+  SetKeyName{$0f, "PAD 0"}
+  SetKeyName{$1d, "PAD 1"}
+  SetKeyName{$1e, "PAD 2"}
+  SetKeyName{$1f, "PAD 3"}
+  SetKeyName{$2d, "PAD 4"}
+  SetKeyName{$2e, "PAD 5"}
+  SetKeyName{$2f, "PAD 6"}
+  SetKeyName{$3d, "PAD 7"}
+  SetKeyName{$3e, "PAD 8"}
+  SetKeyName{$3f, "PAD 9"}
+  SetKeyName{$3c, "PAD ."}
+  SetKeyName{$43, "ENTER"}
+  SetKeyName{$4a, "PAD -"}
+  SetKeyName{$5a, "PAD ("}
+  SetKeyName{$5b, "PAD )"}
+  SetKeyName{$5c, "PAD /"}
+  SetKeyName{$5d, "PAD *"}
+  SetKeyName{$5e, "PAD +"}
+  SetKeyName{$40, "SPACE"}
+  SetKeyName{$41, "BACKSPACE"}
+  SetKeyName{$42, "TAB"}
+  SetKeyName{$44, "RETURN"}
+  SetKeyName{$45, "ESC"}
+  SetKeyName{$46, "DEL"}
+  SetKeyName{$4c, "UP"}
+  SetKeyName{$4d, "DOWN"}
+  SetKeyName{$4e, "RIGHT"}
+  SetKeyName{$4f, "LEFT"}
+  SetKeyName{$5f, "HELP"}
+  SetKeyName{$60, "LSHIFT"}
+  SetKeyName{$61, "RSHIFT"}
+  SetKeyName{$62, "CAPS"}
+  SetKeyName{$63, "CTRL"}
+  SetKeyName{$64, "LALT"}
+  SetKeyName{$65, "RALT"}
+  SetKeyName{$66, "LAMIGA"}
+  SetKeyName{$67, "RAMIGA"}
+End Statement
+
+; The keys no action may take: the ones the game itself uses outside play.
+Function.w KeyAllowed{code.w}
+  If code < 0 OR code > #KEY_LAST Then Function Return False
+  If code = #RAW_KEY_ESC OR code = #RAW_KEY_RETURN Then Function Return False
+  If code >= $50 AND code <= $52 Then Function Return False
+  If code = $62 Then Function Return False
+  Function Return True
+End Function
+
+; Read the settings file into fileMap() and fileModeRead. False when there is no file, or its
+; first line is not the header, or a code is out of range.
+Function.w ReadSettingsFile{}
+  SHARED settingsPath$, fileMap(), fileModeRead
+  If Exists(settingsPath$) = 0 Then Function Return False
+  If ReadFile(0, settingsPath$) = 0 Then Function Return False
+  FileInput 0
+  headerText$ = Edit$(20)
+  readOk.w = False
+  If headerText$ = "SPARKYKEYS1"
+    readOk = True
+    For index.w = 0 To #KEY_COUNT - 1
+      fileMap(index) = Val(Edit$(8))
+      If KeyAllowed{fileMap(index)} = False Then readOk = False
+    Next
+    fileModeRead = Val(Edit$(8))
+  EndIf
+  CloseFile 0
+  Function Return readOk
+End Function
+
+; Write the settings file from keyMap() and controlModeKept. Returns True if the file opened.
+Function.w WriteSettingsFile{}
+  SHARED settingsPath$, keyMap(), controlModeKept
+  If WriteFile(0, settingsPath$) = 0 Then Function Return False
+  FileOutput 0
+  NPrint "SPARKYKEYS1"
+  For index.w = 0 To #KEY_COUNT - 1
+    NPrint keyMap(index)
+  Next
+  NPrint controlModeKept
+  CloseFile 0
+  Function Return True
+End Function
+
+;; ---- start: names, self-checks, load ----
+BuildKeyNames{}
+Check{"name of $31 is Z", keyNames$($31) = "Z"}
+Check{"name of $10 is Q", keyNames$($10) = "Q"}
+Check{"name of $37 is M", keyNames$($37) = "M"}
+Check{"name of $01 is 1, $0a is 0", keyNames$($01) = "1" AND keyNames$($0a) = "0"}
+Check{"name of $50 is F1, $58 is F9, $59 is F10", keyNames$($50) = "F1" AND keyNames$($58) = "F9" AND keyNames$($59) = "F10"}
+Check{"name of $63 is CTRL, $64 is LALT", keyNames$($63) = "CTRL" AND keyNames$($64) = "LALT"}
+Check{"Esc, Return, F1, F2, F3, Caps refused", KeyAllowed{$45} = False AND KeyAllowed{$44} = False AND KeyAllowed{$50} = False AND KeyAllowed{$51} = False AND KeyAllowed{$52} = False AND KeyAllowed{$62} = False}
+Check{"Z, Space, Ctrl, Right Alt, F4 allowed", KeyAllowed{$31} <> False AND KeyAllowed{$40} <> False AND KeyAllowed{$63} <> False AND KeyAllowed{$65} <> False AND KeyAllowed{$53} <> False}
+Check{"out of range refused", KeyAllowed{-1} = False AND KeyAllowed{$68} = False}
+
+For index.w = 0 To #KEY_COUNT - 1
+  keyMap(index) = defaultMap(index)
+Next
+If ReadSettingsFile{} <> False
+  loadedAtStart = True
+  For index.w = 0 To #KEY_COUNT - 1
+    keyMap(index) = fileMap(index)
+  Next
+  controlModeKept = fileModeRead
+EndIf
+
+BLITZ
+
+; The first raw code held, or -1.
+Function.w ScanPressedKey{}
+  foundCode.w = -1
+  scanCode.w = 0
+  While foundCode < 0 AND scanCode <= #KEY_LAST
+    If RawStatus(scanCode) <> 0 Then foundCode = scanCode
+    scanCode = scanCode + 1
+  Wend
+  Function Return foundCode
+End Function
+
+; One bar a key: grey waiting, yellow now, green kept; a red flash on a refused key.
+Statement DrawBars{}
+  SHARED captureIndex, flashFrames, savedOk, saveAttempted
+  Use BitMap 0
+  Boxf 0, 0, #BM_W - 1, 255, 0
+  For index.w = 0 To #KEY_COUNT - 1
+    penNow.w = 1
+    If index < captureIndex Then penNow = 3
+    If index = captureIndex
+      penNow = 2
+      If flashFrames > 0 Then penNow = 4
+    EndIf
+    Boxf 40, 16 + index*#BAR_STEP, 280, 16 + index*#BAR_STEP + 24, penNow
+  Next
+  If saveAttempted <> False
+    penNow = 4
+    If savedOk <> False Then penNow = 5
+    Boxf 40, 216, 280, 240, penNow
+  EndIf
+End Statement
+
+;; Save in the middle of the display: out to Amiga mode without touching the display, write,
+;; wait for the disk (BlitzProgrammers.guide, "QAmiga mode": about 250 frames to be safe), and
+;; back. Only the file commands are inside the switch.
+Statement SaveWhileRunning{}
+  SHARED savedOk, saveAttempted
+  saveAttempted = True
+  QAMIGA
+  savedOk = WriteSettingsFile{}
+  VWait #SAVE_DELAY_FRAMES
+  BLITZ
+End Statement
+
+BitMap 0, #BM_W, 256, 4
+Use BitMap 0
+InitCopList 0, 44, 256, #COPPER_FLAGS, 8, 16, 0
+DisplayAdjust 0, 0, 0, 0, -1, -1
+CreateDisplay 0
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 90, 90, 90
+AGAPalRGB 0, 2, 255, 255, 0
+AGAPalRGB 0, 3, 0, 255, 0
+AGAPalRGB 0, 4, 255, 0, 0
+AGAPalRGB 0, 5, 0, 120, 255
+DisplayPalette 0, 0
+BlitzKeys On
+DisplayBitMap 0, 0, 0, 0
+
+keyWasHeld.w = True
+frameNumber.l = 0
+quitNow.w = False
+While quitNow = False
+  VWait
+  frameNumber = frameNumber + 1
+  If RawStatus(#RAW_KEY_ESC) <> 0 Then quitNow = True
+  If flashFrames > 0 Then flashFrames = flashFrames - 1
+  pressedCode.w = ScanPressedKey{}
+  If captureIndex < #KEY_COUNT
+    If pressedCode < 0
+      keyWasHeld = False
+    Else
+      If keyWasHeld = False
+        keyWasHeld = True
+        duplicateNow.w = False
+        For earlier.w = 0 To captureIndex - 1
+          If keyMap(earlier) = pressedCode Then duplicateNow = True
+        Next
+        If KeyAllowed{pressedCode} = False
+          rejectedReserved = rejectedReserved + 1
+          flashFrames = 15
+        Else
+          If duplicateNow <> False
+            rejectedDuplicate = rejectedDuplicate + 1
+            flashFrames = 15
+          Else
+            keyMap(captureIndex) = pressedCode
+            captureLogCount = captureLogCount + 1
+            captureLog$(captureLogCount) = actionNames$(captureIndex) + " = $" + Hex$(pressedCode) + " (" + keyNames$(pressedCode) + ") at frame " + Str$(frameNumber)
+            captureIndex = captureIndex + 1
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+    DrawBars{}
+    If captureIndex = #KEY_COUNT
+      SaveWhileRunning{}
+      DrawBars{}
+      framesAfterSave = 0
+    EndIf
+  Else
+    framesAfterSave = framesAfterSave + 1
+    If pressedCode >= 0 Then keysAliveAfterSave = True
+    If keysAliveAfterSave <> False OR framesAfterSave >= #WAIT_AFTER_SAVE Then quitNow = True
+  EndIf
+Wend
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+
+If saveAttempted <> False
+  If ReadSettingsFile{} <> False
+    readbackMatches = True
+    For index.w = 0 To #KEY_COUNT - 1
+      If fileMap(index) <> keyMap(index) Then readbackMatches = False
+    Next
+    If fileModeRead <> controlModeKept Then readbackMatches = False
+  EndIf
+EndIf
+
+If WriteFile(0, "sparky-dave:game/proofs/results/key-settings-results.txt")
+  FileOutput 0
+  NPrint "key-settings"
+  NPrint ""
+  NPrint "SELF-CHECKS (", checkCount, ", failed ", checkFailed, ")"
+  For index.w = 1 To checkCount
+    NPrint checkLog$(index)
+  Next
+  NPrint ""
+  If loadedAtStart <> False
+    NPrint "START: a settings file was found and loaded (so a second run, if keys were given before)"
+  Else
+    NPrint "START: no valid settings file, the defaults were used"
+  EndIf
+  NPrint ""
+  NPrint "CAPTURED THIS RUN (", captureLogCount, " of ", #KEY_COUNT, ")"
+  For index.w = 1 To captureLogCount
+    NPrint "  ", captureLog$(index)
+  Next
+  NPrint "  refused as reserved: ", rejectedReserved, "   refused as duplicate: ", rejectedDuplicate
+  NPrint ""
+  NPrint "SAVE (QAMIGA, then ", #SAVE_DELAY_FRAMES, " frames of wait, then BLITZ)"
+  If saveAttempted <> False
+    NPrint "  attempted: yes   file opened and written: ", savedOk
+    NPrint "  read back equals what was kept: ", readbackMatches
+    NPrint "  a key read after the save, within ", #WAIT_AFTER_SAVE, " frames: ", keysAliveAfterSave, " (after ", framesAfterSave, " frames)"
+  Else
+    NPrint "  not reached (not all six keys were given)"
+  EndIf
+  NPrint ""
+  NPrint "KEY MAP NOW (at the end of this run; at the start of it if nothing was captured)"
+  For index.w = 0 To #KEY_COUNT - 1
+    NPrint "  ", actionNames$(index), " = $", Hex$(keyMap(index)), " ", keyNames$(keyMap(index))
+  Next
+  NPrint ""
+  NPrint "ALL NAMES"
+  For code.w = 0 To #KEY_LAST
+    If Len(keyNames$(code)) > 0 Then NPrint "  $", Hex$(code), " ", keyNames$(code)
+  Next
+  CloseFile 0
+EndIf
+End

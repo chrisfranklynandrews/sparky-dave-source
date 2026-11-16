@@ -1,0 +1,53 @@
+;; video-standard.ab3 -- can a small program tell the launcher whether this machine is PAL or
+;; NTSC, through its AmigaDOS return code? Compile in UAE. Not part of the game.
+;; Proof for the launcher (the pal-ntsc-variants plan (git history), step 7).
+;;
+;; RUN 1 (2026-10-13): the detection is right in both profiles (the results files say NTSC and
+;; PAL), but the script saw NTSC on both: the return code did not reach IF WARN. So the
+;; answer now also goes out as a flag file, which a script reads with IF EXISTS.
+;;
+;; It reads NTSC (False in PAL, True in NTSC: the main project's BLITZ_CONVENTIONS note) and ends with
+;;   return code 0 on an NTSC machine,
+;;   return code 5 on a PAL one (5 is WARN, so a script can ask IF WARN).
+;; It also creates RAM:sparky-video-pal on a PAL machine (and deletes it on an NTSC one), and writes proofs/video-standard-results.txt with what it saw and the code it meant.
+;;
+;; Run it in UAE in PAL mode and in NTSC mode, each time with
+;;   execute sparky-dave:S/run-proof
+;; and then, in the same shell:
+;;   execute sparky-dave:prove-video
+;; (the file prove-video at the repo root does the same, then reads the flag file).
+;; The script must say PAL under the PAL profile and NTSC under the NTSC one. If the code
+;; does not come through (always NTSC, or always PAL), tell me which.
+
+WBStartup
+
+videoIsNtsc.w = NTSC
+If videoIsNtsc = True
+  exitCode.l = 0
+Else
+  exitCode.l = 5
+EndIf
+
+If WriteFile(0, "sparky-dave:game/proofs/results/video-standard-results.txt")
+  FileOutput 0
+  NPrint "video-standard"
+  If videoIsNtsc = True
+    NPrint "this machine reports NTSC; intended return code ", exitCode
+  Else
+    NPrint "this machine reports PAL; intended return code ", exitCode
+  EndIf
+  CloseFile 0
+EndIf
+
+If videoIsNtsc = True
+  If Exists("RAM:sparky-video-pal") Then KillFile "RAM:sparky-video-pal"
+Else
+  If WriteFile(1, "RAM:sparky-video-pal")
+    FileOutput 1
+    NPrint "pal"
+    CloseFile 1
+  EndIf
+EndIf
+
+PutReg d0, exitCode
+End d0

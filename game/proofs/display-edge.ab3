@@ -1,0 +1,254 @@
+;; display-edge.ab3 -- which pixel columns are really on screen at the left and right edges,
+;; on the game's own two-list display, and what the library puts in the window registers.
+;; Compile in UAE. Not part of the game. Proof for the HUD text that looks one pixel off
+;; the left edge, and for the 321 px window.
+;;
+;; Two strips on the game's own lists, with the game's own flags:
+;;   TOP strip (list 0, where the HUD is), 16 lines
+;;   LOWER strip (list 1, where the world is), 48 lines
+;; Both show a bitmap that has a column ruler painted into it:
+;;   left edge:   x 0 RED, x 1 GREEN, x 2 BLUE, x 3 WHITE, then black, then YELLOW at x 8
+;;   a WHITE line every 16 px from x 16 (so a tile column can be counted)
+;;   right edge:  x 316 YELLOW, 317 WHITE, 318 RED, 319 GREEN, 320 BLUE, 321 WHITE
+;;
+;; RESULT (2026-10-12, both emulators): the library's window is 129 to 449, 320 wide, but its
+;; fetch starts a word early so column 0 sits at pixel 128 and is hidden; DisplayAdjust -1 and -1
+;; (one Z, one X) gives red first and green last in both. See the main project's AMIGA_RENDERER note, "The display window".
+;;
+;; Run 1 (2026-10-11) showed: AmigaForever shows columns 0 to 320 (321 columns), FS-UAE
+;; shows 1 to 320 (320 columns). Column 321 is hidden in both.
+;;
+;; THE WINDOW REGISTERS. DISPLAYLIB.guide gives the copper-list object's layout (coppos is
+;; its second long, the copper list's place in Chip RAM), so this proof reads the library's
+;; own copper list and writes the display registers it set to
+;; display-edge-results.txt: DIWSTRT, DIWSTOP, DDFSTRT, DDFSTOP, BPLCON1, FMODE (and DIWHIGH
+;; if the library writes one), with the window width worked out from them. The width of a
+;; window is (256 + the stop's horizontal byte) minus the start's.
+;;
+;; THE ADJUSTMENT. DisplayAdjust moves the window edges; in the older hw-scroll proof one
+;; unit of DIWSTRT was one lores pixel. Keys (each rebuilds both lists, the picture may
+;; flicker; the adjustments apply to both lists):
+;;   A / Z   DIWSTRT +1 / -1     (the window's left edge: +1 moves it right, hiding a column)
+;;   S / X   DIWSTOP +1 / -1     (the window's right edge: -1 moves it left)
+;;   R       back to the library's own window (no adjustment)
+;;   1       the TOP strip with the literal form (as the HUD does it, the starting state)
+;;   2       the TOP strip with a variable x (the extended form, as the world does it)
+;;   Esc     quit (the results file is written then)
+;;
+;; What to try, in each emulator (AmigaForever and FS-UAE):
+;;   - Find the adjustment that makes the coloured columns start at RED (x 0) and end at
+;;     GREEN (x 319): exactly 320 columns, with BLUE (x 320) just gone. Note the A/Z and
+;;     S/X presses you used (the results file records them).
+;;   - If the same adjustment gives exactly that picture in both emulators, the game can use
+;;     it. If they want different adjustments, the emulators disagree and no setting can
+;;     satisfy both: then only a safe margin helps.
+;;   - Quit with Esc and read display-edge-results.txt (the first line pair is the library's
+;;     own window, before any adjustment).
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_1   = $01
+#RAW_KEY_2   = $02
+#RAW_KEY_A   = $20
+#RAW_KEY_S   = $21
+#RAW_KEY_R   = $13
+#RAW_KEY_Z   = $31
+#RAW_KEY_X   = $32
+
+#COPPER_FLAGS  = $10014
+#TOP_YPOS   = 44
+#TOP_H      = 16
+#LOWER_YPOS = 63
+#LOWER_H    = 48
+#BM_W       = 336
+
+;; What the copper list says, per list (0 top, 1 lower).
+Dim copDiwStart.l(1)
+Dim copDiwStop.l(1)
+Dim copDdfStart.l(1)
+Dim copDdfStop.l(1)
+Dim copBplcon1.l(1)
+Dim copFmode.l(1)
+Dim copDiwHigh.l(1)
+Dim firstDiwStart.l(1)
+Dim firstDiwStop.l(1)
+Dim firstDdfStart.l(1)
+Dim firstDdfStop.l(1)
+Dim firstBplcon1.l(1)
+Dim firstFmode.l(1)
+Dim firstDiwHigh.l(1)
+adjustStart.l = 0
+adjustStop.l = 0
+topForm.w = 1
+snapshotTaken.w = False
+lockHeld.w = False
+
+BLITZ
+
+;; The ruler, into the current bitmap, all its height.
+Statement DrawRuler{rulerHeight.w}
+  Boxf 0, 0, #BM_W - 1, rulerHeight - 1, 0
+  For tickX = 16 To 320 Step 16
+    Boxf tickX, 0, tickX, rulerHeight - 1, 4
+  Next
+  Boxf 0, 0, 0, rulerHeight - 1, 1
+  Boxf 1, 0, 1, rulerHeight - 1, 2
+  Boxf 2, 0, 2, rulerHeight - 1, 3
+  Boxf 3, 0, 3, rulerHeight - 1, 4
+  Boxf 8, 0, 8, rulerHeight - 1, 5
+  Boxf 316, 0, 316, rulerHeight - 1, 5
+  Boxf 317, 0, 317, rulerHeight - 1, 4
+  Boxf 318, 0, 318, rulerHeight - 1, 1
+  Boxf 319, 0, 319, rulerHeight - 1, 2
+  Boxf 320, 0, 320, rulerHeight - 1, 3
+  Boxf 321, 0, 321, rulerHeight - 1, 4
+End Statement
+
+;; Reads the display registers out of list copNumber's copper list: the copper's MOVE
+;; instructions are pairs of words, the register's offset and its value (a WAIT or SKIP has
+;; bit 0 of the first word set).
+Statement ReadCopper{copNumber.w}
+  SHARED copDiwStart(), copDiwStop(), copDdfStart(), copDdfStop(), copBplcon1(), copFmode(), copDiwHigh()
+  copperBase.l = Peek.l(Addr CopList(copNumber) + 4)
+  copDiwStart(copNumber) = -1
+  copDiwStop(copNumber) = -1
+  copDdfStart(copNumber) = -1
+  copDdfStop(copNumber) = -1
+  copBplcon1(copNumber) = -1
+  copFmode(copNumber) = -1
+  copDiwHigh(copNumber) = -1
+  For instruction = 0 To 399
+    registerWord.l = Peek.w(copperBase + instruction*4) AND $ffff
+    valueWord.l = Peek.w(copperBase + instruction*4 + 2) AND $ffff
+    If registerWord = $008e Then copDiwStart(copNumber) = valueWord
+    If registerWord = $0090 Then copDiwStop(copNumber) = valueWord
+    If registerWord = $0092 Then copDdfStart(copNumber) = valueWord
+    If registerWord = $0094 Then copDdfStop(copNumber) = valueWord
+    If registerWord = $0102 Then copBplcon1(copNumber) = valueWord
+    If registerWord = $01fc Then copFmode(copNumber) = valueWord
+    If registerWord = $01e4 Then copDiwHigh(copNumber) = valueWord
+  Next
+End Statement
+
+;; Both lists, with the adjustment, and the picture on them.
+Statement ApplyDisplay{}
+  SHARED adjustStart, adjustStop, topForm
+  SHARED snapshotTaken, firstDiwStart(), firstDiwStop(), firstDdfStart(), firstDdfStop()
+  SHARED firstBplcon1(), firstFmode(), firstDiwHigh()
+  SHARED copDiwStart(), copDiwStop(), copDdfStart(), copDdfStop(), copBplcon1(), copFmode(), copDiwHigh()
+  zeroX.q = 0
+  InitCopList 0, #TOP_YPOS, #TOP_H, #COPPER_FLAGS, 8, 16, 0
+  InitCopList 1, #LOWER_YPOS, #LOWER_H, #COPPER_FLAGS, 8, 0, 0
+  If snapshotTaken = False
+    ;; The library's own window, before any adjustment.
+    ReadCopper{0}
+    ReadCopper{1}
+    For copNumber = 0 To 1
+      firstDiwStart(copNumber) = copDiwStart(copNumber)
+      firstDiwStop(copNumber) = copDiwStop(copNumber)
+      firstDdfStart(copNumber) = copDdfStart(copNumber)
+      firstDdfStop(copNumber) = copDdfStop(copNumber)
+      firstBplcon1(copNumber) = copBplcon1(copNumber)
+      firstFmode(copNumber) = copFmode(copNumber)
+      firstDiwHigh(copNumber) = copDiwHigh(copNumber)
+    Next
+    snapshotTaken = True
+  EndIf
+  DisplayAdjust 0, 0, 0, 0, adjustStart, adjustStop
+  DisplayAdjust 1, 0, 0, 0, adjustStart, adjustStop
+  CreateDisplay 0, 1
+  AGAPalRGB 0, 0, 0, 0, 0
+  AGAPalRGB 0, 1, 255, 0, 0
+  AGAPalRGB 0, 2, 0, 255, 0
+  AGAPalRGB 0, 3, 0, 0, 255
+  AGAPalRGB 0, 4, 255, 255, 255
+  AGAPalRGB 0, 5, 255, 255, 0
+  DisplayPalette 0, 0
+  BlitzKeys On
+  If topForm = 1
+    DisplayBitMap 0, 0, 0, 0
+  Else
+    DisplayBitMap 0, 0, zeroX, 0
+  EndIf
+  DisplayBitMap 1, 1, zeroX, 0
+  ReadCopper{0}
+  ReadCopper{1}
+End Statement
+
+BitMap 0, #BM_W, #TOP_H, 4
+Use BitMap 0
+DrawRuler{#TOP_H}
+BitMap 1, #BM_W, #LOWER_H, 4
+Use BitMap 1
+DrawRuler{#LOWER_H}
+
+ApplyDisplay{}
+
+While RawStatus(#RAW_KEY_ESC) = 0
+  VWait
+  keyNow.w = 0
+  If RawStatus(#RAW_KEY_1) Then keyNow = 1
+  If RawStatus(#RAW_KEY_2) Then keyNow = 2
+  If RawStatus(#RAW_KEY_A) Then keyNow = 3
+  If RawStatus(#RAW_KEY_Z) Then keyNow = 4
+  If RawStatus(#RAW_KEY_S) Then keyNow = 5
+  If RawStatus(#RAW_KEY_X) Then keyNow = 6
+  If RawStatus(#RAW_KEY_R) Then keyNow = 7
+  If keyNow = 0
+    lockHeld = False
+  Else
+    If lockHeld = False
+      lockHeld = True
+      If keyNow = 1 Then topForm = 1
+      If keyNow = 2 Then topForm = 2
+      If keyNow = 3 Then adjustStart = adjustStart + 1
+      If keyNow = 4 Then adjustStart = adjustStart - 1
+      If keyNow = 5 Then adjustStop = adjustStop + 1
+      If keyNow = 6 Then adjustStop = adjustStop - 1
+      If keyNow = 7
+        adjustStart = 0
+        adjustStop = 0
+      EndIf
+      ApplyDisplay{}
+    EndIf
+  EndIf
+Wend
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+
+;; One list's registers, a short line each (AmiBlitz source lines are limited to 250
+;; characters).
+Statement PrintRegisters{copNumber.w, diwStart.l, diwStop.l, ddfStart.l, ddfStop.l, bplcon1.l, fmode.l, diwHigh.l}
+  NPrint "list ", copNumber, ":"
+  NPrint "  DIWSTRT $", Hex$(diwStart), "   DIWSTOP $", Hex$(diwStop), "   DIWHIGH $", Hex$(diwHigh)
+  NPrint "  DDFSTRT $", Hex$(ddfStart), "   DDFSTOP $", Hex$(ddfStop)
+  NPrint "  BPLCON1 $", Hex$(bplcon1), "   FMODE $", Hex$(fmode)
+  If diwStart >= 0 AND diwStop >= 0
+    windowWidth.l = 256 + (diwStop AND $ff) - (diwStart AND $ff)
+    NPrint "  window: starts at ", diwStart AND $ff, ", stops at ", 256 + (diwStop AND $ff), ", so ", windowWidth, " lores pixels wide"
+  EndIf
+End Statement
+
+If WriteFile(0, "sparky-dave:game/proofs/results/display-edge-results.txt")
+  FileOutput 0
+  NPrint "display-edge"
+  NPrint "A window is (256 + the stop low byte) minus the start low byte wide."
+  NPrint "-1 means a register was not found in the first 400 copper instructions."
+  NPrint ""
+  NPrint "THE LIBRARY OWN WINDOW (before any adjustment)"
+  For copNumber = 0 To 1
+    PrintRegisters{copNumber, firstDiwStart(copNumber), firstDiwStop(copNumber), firstDdfStart(copNumber), firstDdfStop(copNumber), firstBplcon1(copNumber), firstFmode(copNumber), firstDiwHigh(copNumber)}
+  Next
+  NPrint ""
+  NPrint "AT EXIT, with DIWSTRT adjust ", adjustStart, " and DIWSTOP adjust ", adjustStop
+  For copNumber = 0 To 1
+    PrintRegisters{copNumber, copDiwStart(copNumber), copDiwStop(copNumber), copDdfStart(copNumber), copDdfStop(copNumber), copBplcon1(copNumber), copFmode(copNumber), copDiwHigh(copNumber)}
+  Next
+  CloseFile 0
+EndIf
+End

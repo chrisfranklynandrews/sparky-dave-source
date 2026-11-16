@@ -1,0 +1,31 @@
+; Compile and run the Sparky Dave test harness with AmiBlitz 3.13 for every build: each physics
+; variant (NTSC, PAL) in each look (NES, All-Stars), four runs in all, through run-tests-one. Each
+; run writes its own results file, named by the variant and the look:
+;   sparky-dave:game/tests/test-harness-results-ntsc-nes.txt
+;   sparky-dave:game/tests/test-harness-results-pal-nes.txt
+;   sparky-dave:game/tests/test-harness-results-ntsc-allstars.txt
+;   sparky-dave:game/tests/test-harness-results-pal-allstars.txt
+; The test program is a batch run: it plays every scenario, writes its results file, then ends.
+; The variant and the look are the copies of sparkydave.physics.ab3 and sparkydave.look.ab3 in place
+; at compile time, so each run copies its two files over them and puts the committed copies back
+; when it ends: the NTSC physics (tools/check_source_split.py VARIANTS) and the NES look
+; (tools/release_check.py). All four run even when one fails, since a failed assertion can be one
+; build's alone.
+; Compile errors go to game/tests/compile-tests-<variant>-<look>.log.
+
+FAILAT 21
+
+DELETE RAM:sparky-tests-failed QUIET
+
+execute sparky-dave:S/run-tests-one ntsc nes
+execute sparky-dave:S/run-tests-one pal nes
+execute sparky-dave:S/run-tests-one ntsc allstars
+execute sparky-dave:S/run-tests-one pal allstars
+
+IF EXISTS RAM:sparky-tests-failed
+  DELETE RAM:sparky-tests-failed QUIET
+  ECHO "Behaviour tests FAILED (see the results files and the compile logs)"
+  QUIT 20
+ENDIF
+
+ECHO "All behaviour tests passed: NTSC and PAL, NES and All-Stars"

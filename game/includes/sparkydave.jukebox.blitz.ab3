@@ -1,0 +1,499 @@
+;; =======================================================
+;; JUKEBOX PAGE (BLITZ MODE)
+;; =======================================================
+;; The sound's page: its settings (the pan layout, the filter, the
+;; three volumes), every song and every effect to play, and four characters from the game hopping to
+;; each channel's loudness: Mario for pulse 1, a Goomba for pulse 2, a Koopa for the triangle and a
+;; mushroom for the noise, each on the side of the speaker its channel's Paula channel is on. It is an
+;; overlay page over the black cover like the options page, but drawn a part at a time: the static part
+;; on each of the two pages once, then every frame only what changed (a character that moved or changed
+;; frame, erased where that page last drew it; the rows marked dirty), which costs about 35
+;; lines for the stage and 54 for a row's redraw, with room to spare in a frame. The backdrop, the scene of
+;; the song on the SONG row (ShowJukeboxScene{}), is on the front (the cover bitmap), copied in only when it changes.
+;; The menu keys and the way in and out are in sparkydave.cover.blitz.ab3 (OpenJukebox{} and the others).
+
+;; The backdrop: the scene of the song on the SONG row (jukeboxSceneShown), precut by the build
+;; (tools/build_jukebox_scenes.py: the level's tiles over its back strip, the sky over the stage, the ground's top row half) and read into
+;; Fast RAM at start-up (jukeboxScenePixels()), copied into the cover bitmap from the stage's top (#JKB_STAGE_TOP), 32 right of its edge
+;; (the overlay over the cover shows the front from its pixel 32: ShowWorldLists{} in SparkyDave.ab3). By the CPU, as it is not in Chip
+;; RAM: a row at a time, its four planes, top first, so run right after the VWait (UpdateJukeboxPage{}) it keeps ahead of the beam down the
+;; scene; the palette for the scene was written at the end of the frame before (UpdatePalette{}), so both change on the frame it shows.
+Statement ShowJukeboxScene{}
+  SHARED jukeboxScenePixels(), jukeboxSceneShown, jukeboxScenePainted
+  WaitBlitter
+  coverStruct.l = Addr BitMap(#COVER_BM)
+  bytesPerRow.l = Peek.w(coverStruct)
+  plane0.l = Peek.l(coverStruct + 8)
+  plane1.l = Peek.l(coverStruct + 12)
+  plane2.l = Peek.l(coverStruct + 16)
+  plane3.l = Peek.l(coverStruct + 20)
+  sourceAddress.l = &jukeboxScenePixels(jukeboxSceneShown*#JKB_SCENE_LONGS)
+  rowOffset.l = #JKB_STAGE_TOP*bytesPerRow - #SCROLL_BIAS/8
+  For rowIndex.w = 0 To #JKB_SCENE_LINES - 1
+    For planeIndex.w = 0 To 3
+      destAddress.l = plane0 + rowOffset
+      If planeIndex = 1 Then destAddress = plane1 + rowOffset
+      If planeIndex = 2 Then destAddress = plane2 + rowOffset
+      If planeIndex = 3 Then destAddress = plane3 + rowOffset
+      For longIndex.w = 0 To 7
+        Poke.l destAddress, Peek.l(sourceAddress)
+        destAddress = destAddress + 4
+        sourceAddress = sourceAddress + 4
+      Next
+    Next
+    rowOffset = rowOffset + bytesPerRow
+  Next
+  jukeboxScenePainted = jukeboxSceneShown
+End Statement
+
+;; The sound's five settings against a baseline: baseIndex 0 is the jukebox page's, 5 the options page's.
+;; Taken when a page opens (or when the jukebox's BACK accepts what it changed), compared to show
+;; SAVE AND BACK, and put back by Esc, on the hardware too (the layout restarts the audio only if it
+;; differs).
+Statement TakeSoundBaseline{baseIndex.w}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), soundBaseline()
+  soundBaseline(baseIndex) = soundPanNow
+  soundBaseline(baseIndex + 1) = 0
+  If soundFilterChosen <> False Then soundBaseline(baseIndex + 1) = 1
+  For volumeGroup.w = 0 To 2
+    soundBaseline(baseIndex + 2 + volumeGroup) = soundVolumeScale(volumeGroup)
+  Next
+End Statement
+
+Function.w SoundDiffersFromBaseline{baseIndex.w}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), soundBaseline()
+  differs.w = False
+  If soundPanNow <> soundBaseline(baseIndex) Then differs = True
+  filterNow.w = 0
+  If soundFilterChosen <> False Then filterNow = 1
+  If filterNow <> soundBaseline(baseIndex + 1) Then differs = True
+  For volumeGroup.w = 0 To 2
+    If soundVolumeScale(volumeGroup) <> soundBaseline(baseIndex + 2 + volumeGroup) Then differs = True
+  Next
+  Function Return differs
+End Function
+
+Statement RestoreSoundBaseline{baseIndex.w}
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale(), soundBaseline()
+  If soundPanNow <> soundBaseline(baseIndex) Then SoundSetPan{soundBaseline(baseIndex)}
+  soundFilterChosen = False
+  If soundBaseline(baseIndex + 1) = 1 Then soundFilterChosen = True
+  SoundSetFilter{soundFilterChosen}
+  For volumeGroup.w = 0 To 2
+    soundVolumeScale(volumeGroup) = soundBaseline(baseIndex + 2 + volumeGroup)
+  Next
+End Statement
+
+; The sound's defaults, on the hardware too (the jukebox's DEFAULTS).
+Statement RestoreSoundDefaults{}
+  SetSoundDefaults{}
+  SoundApplySettings{}
+End Statement
+
+;; The BACK row's hint while the page has changes: what discards them, Esc. Nothing in a game (a page opened from the pause menu): Esc
+;; does nothing there, and BACK is the way out.
+Function.s DiscardHint{}
+  SHARED coverKind
+  If coverKind <> #COVER_TITLE Then Function Return ""
+  Function Return "ESC DISCARDS"
+End Function
+
+;; A row's label and value. The BACK row says SAVE AND BACK, with ESC DISCARDS beside it, while the sound
+;; differs from what the page opened with.
+Function.s JukeboxRowLabel{rowIndex.w}
+  If rowIndex = #JKB_SONG Then Function Return "SONG"
+  If rowIndex = #JKB_EFFECT Then Function Return "EFFECT"
+  If rowIndex = #JKB_PAN Then Function Return "SOUND LAYOUT"
+  If rowIndex = #JKB_FILTER Then Function Return "FILTER"
+  ; The 256 wide view's label column has 14 glyphs: VOLUME is VOL.
+  If rowIndex = #JKB_PULSE Then Function Return "PULSE VOL"
+  If rowIndex = #JKB_TRIANGLE Then Function Return "TRIANGLE VOL"
+  If rowIndex = #JKB_NOISE Then Function Return "NOISE VOL"
+  If rowIndex = #JKB_DEFAULTS Then Function Return "DEFAULTS"
+  If SoundDiffersFromBaseline{0} <> False Then Function Return "SAVE AND BACK"
+  Function Return "BACK"
+End Function
+
+Function.s JukeboxRowValue{rowIndex.w}
+  SHARED jukeboxSong, jukeboxEffect, jukeboxSongName$(), jukeboxEffectName$()
+  SHARED soundPanNow, soundFilterChosen, soundVolumeScale()
+  If rowIndex = #JKB_SONG Then Function Return jukeboxSongName$(jukeboxSong)
+  If rowIndex = #JKB_EFFECT Then Function Return jukeboxEffectName$(jukeboxEffect)
+  If rowIndex = #JKB_PAN Then Function Return Chr$(49 + soundPanNow)
+  If rowIndex = #JKB_FILTER
+    If soundFilterChosen <> False Then Function Return "ON"
+    Function Return "OFF"
+  EndIf
+  If rowIndex = #JKB_PULSE Then Function Return Chr$(48 + soundVolumeScale(0))
+  If rowIndex = #JKB_TRIANGLE Then Function Return Chr$(48 + soundVolumeScale(1))
+  If rowIndex = #JKB_NOISE Then Function Return Chr$(48 + soundVolumeScale(2))
+  If rowIndex = #JKB_BACK
+    If SoundDiffersFromBaseline{0} <> False Then Function Return DiscardHint{}
+  EndIf
+  Function Return ""
+End Function
+
+;; Text blitted with no clear of each cell, over an area already cleared (a row's value) or over the
+;; same text (a label): half the blitter work of DrawTextInto{}.
+Statement BlitTextInto{targetBitmap.w, glyphText$, textX.w, textY.w}
+  Use BitMap targetBitmap
+  For charIndex.w = 1 To Len(glyphText$)
+    glyphIndex.w = HudGlyphFor{Asc(Mid$(glyphText$, charIndex, 1))}
+    If glyphIndex >= 0 Then Blit #HUD_SHAPE_BASE + glyphIndex, textX + (charIndex - 1)*8, textY
+  Next
+End Statement
+
+;; One row on one page: its cursor cell and value area cleared (a label never changes, but the BACK
+;; row's does, so it is cleared and blitted again), then the cursor if it is the chosen row and the
+;; value. The row number #JKB_ROWS is the readout line.
+Statement DrawJukeboxRow{pageIndex.w, rowIndex.w}
+  SHARED jukeboxCursor, jukeboxReadout$
+  pageX.w = OverlayPageX{pageIndex}
+  Use BitMap #BACK_BM
+  If rowIndex = #JKB_ROWS
+    Boxf pageX, #JKB_READOUT_Y, pageX + #VIEW_W - 1, #JKB_READOUT_Y + 7, 0
+    BlitTextInto{#BACK_BM, jukeboxReadout$, pageX + (#VIEW_W - Len(jukeboxReadout$)*8)/2, #JKB_READOUT_Y}
+    Statement Return
+  EndIf
+  rowY.w = #JKB_ROWS_Y + rowIndex*#JKB_ROW_PITCH
+  Boxf pageX + #MENU_CURSOR_X, rowY, pageX + #MENU_CURSOR_X + 7, rowY + 7, 0
+  Boxf pageX + #MENU_VALUE_X, rowY, pageX + #VIEW_W - 1, rowY + 7, 0
+  If rowIndex = #JKB_BACK
+    Boxf pageX + #MENU_LABEL_X, rowY, pageX + #MENU_VALUE_X - 1, rowY + 7, 0
+    BlitTextInto{#BACK_BM, JukeboxRowLabel{rowIndex}, pageX + #MENU_LABEL_X, rowY}
+  EndIf
+  If rowIndex = jukeboxCursor Then Blit #HUD_SHAPE_BASE + #HUD_G_MENU_CURSOR, pageX + #MENU_CURSOR_X, rowY
+  BlitTextInto{#BACK_BM, JukeboxRowValue{rowIndex}, pageX + #MENU_VALUE_X, rowY}
+End Statement
+
+;; Only a row's cursor cell, on a page: an 8x8 clear and, if it is the chosen row, the mushroom. A cursor
+;; move draws two of these (about 6 lines) where it drew two whole rows (50 to 75 lines each in the game).
+Statement DrawJukeboxCursor{pageIndex.w, rowIndex.w}
+  SHARED jukeboxCursor
+  pageX.w = OverlayPageX{pageIndex}
+  rowY.w = #JKB_ROWS_Y + rowIndex*#JKB_ROW_PITCH
+  Use BitMap #BACK_BM
+  Boxf pageX + #MENU_CURSOR_X, rowY, pageX + #MENU_CURSOR_X + 7, rowY + 7, 0
+  If rowIndex = jukeboxCursor Then Blit #HUD_SHAPE_BASE + #HUD_G_MENU_CURSOR, pageX + #MENU_CURSOR_X, rowY
+End Statement
+
+; A row (or the readout) to be drawn whole on both pages (flag 1).
+Statement MarkJukeboxRow{rowIndex.w}
+  SHARED jukeboxRowDirty()
+  jukeboxRowDirty(rowIndex) = 1
+  jukeboxRowDirty(#JKB_ROWS + 1 + rowIndex) = 1
+End Statement
+
+; A row's cursor cell alone to be drawn on both pages (flag 2), unless the whole row already is.
+Statement MarkJukeboxCursor{rowIndex.w}
+  SHARED jukeboxRowDirty()
+  If jukeboxRowDirty(rowIndex) = 0 Then jukeboxRowDirty(rowIndex) = 2
+  If jukeboxRowDirty(#JKB_ROWS + 1 + rowIndex) = 0 Then jukeboxRowDirty(#JKB_ROWS + 1 + rowIndex) = 2
+End Statement
+
+Statement MarkAllJukeboxRows{}
+  For rowIndex.w = 0 To #JKB_ROWS
+    MarkJukeboxRow{rowIndex}
+  Next
+End Statement
+
+; The rows marked for a page, drawn and cleared.
+Statement DrawDirtyJukeboxRows{pageIndex.w}
+  SHARED jukeboxRowDirty()
+  For rowIndex.w = 0 To #JKB_ROWS
+    flagNow.w = jukeboxRowDirty(pageIndex*(#JKB_ROWS + 1) + rowIndex)
+    If flagNow = 1 Then DrawJukeboxRow{pageIndex, rowIndex}
+    If flagNow = 2 Then DrawJukeboxCursor{pageIndex, rowIndex}
+    If flagNow <> 0
+      jukeboxRowDirty(pageIndex*(#JKB_ROWS + 1) + rowIndex) = 0
+    EndIf
+  Next
+End Statement
+
+;; Everything on a page that does not move: cleared, the heading, the speakers' letters and the labels,
+;; then every row. The page then shows no character.
+Statement DrawJukeboxStatic{pageIndex.w}
+  SHARED jukeboxDrawnShape(), jukeboxRowDirty()
+  pageX.w = OverlayPageX{pageIndex}
+  Use BitMap #BACK_BM
+  Boxf pageX, 0, pageX + #OVERLAY_PAGE_W - 1, #WORLD_H - 1, 0
+  DrawTextCentredAt{#BACK_BM, "JUKEBOX", pageX, #JKB_HEADING_Y}
+  DrawTextInto{#BACK_BM, "L", pageX + 16, #JKB_HEADING_Y}
+  DrawTextInto{#BACK_BM, "R", pageX + #VIEW_W - 24, #JKB_HEADING_Y}
+  For rowIndex.w = 0 To #JKB_ROWS - 1
+    DrawTextInto{#BACK_BM, JukeboxRowLabel{rowIndex}, pageX + #MENU_LABEL_X, #JKB_ROWS_Y + rowIndex*#JKB_ROW_PITCH}
+  Next
+  For channelIndex.w = 0 To 3
+    jukeboxDrawnShape(pageIndex*4 + channelIndex) = -1
+  Next
+  For rowIndex.w = 0 To #JKB_ROWS
+    jukeboxRowDirty(pageIndex*(#JKB_ROWS + 1) + rowIndex) = 1
+  Next
+  DrawDirtyJukeboxRows{pageIndex}
+End Statement
+
+;; The shape and the height of a channel's character (the game's pre-cut shapes): Mario (his jump
+;; frame while he is off the ground, else standing), a Goomba and a Koopa walking, a mushroom.
+Function.w JukeboxCharacterShape{channelIndex.w}
+  SHARED jukeboxHopHeight(), jukeboxFrame
+  If channelIndex = 0
+    If jukeboxHopHeight(0) > 0 Then Function Return #PRE_SMALL_R + #MARIO_F_JUMP
+    Function Return #PRE_SMALL_R + #MARIO_F_IDLE
+  EndIf
+  If channelIndex = 1 Then Function Return #PRE_GOOMBA + ((jukeboxFrame/8) AND 1)
+  If channelIndex = 2 Then Function Return #PRE_KOOPA + 2 + ((jukeboxFrame/8) AND 1)
+  Function Return #PRE_MUSHROOM
+End Function
+
+Function.w JukeboxCharacterHeight{channelIndex.w}
+  If channelIndex = 2 Then Function Return #KOOPA_H
+  Function Return #TILE
+End Function
+
+;; The character in a channel's place on a page, only if it is not already as it should be there:
+;; erased where this page last drew it, then drawn at its height above the ground.
+Statement DrawJukeboxCharacter{pageIndex.w, channelIndex.w, characterX.w}
+  SHARED jukeboxHopHeight(), jukeboxDrawnShape(), jukeboxDrawnX(), jukeboxDrawnY(), jukeboxMarioX, jukeboxMarioY, jukeboxMarioJump
+  pageX.w = OverlayPageX{pageIndex}
+  slotIndex.w = pageIndex*4 + channelIndex
+  heightNow.w = JukeboxCharacterHeight{channelIndex}
+  shapeSlot.w = JukeboxCharacterShape{channelIndex}
+  drawY.w = #JKB_GROUND_Y - heightNow - jukeboxHopHeight(channelIndex)
+  ; Mario is the hardware sprite in the 15 colour look (ShowMarioSprite{} shows him from these), not a bob on the page.
+  If channelIndex = 0 AND #MARIO_SPRITE_COLOURS = 15
+    jukeboxMarioX = characterX
+    jukeboxMarioY = drawY
+    jukeboxMarioJump = False
+    If jukeboxHopHeight(0) > 0 Then jukeboxMarioJump = True
+    Statement Return
+  EndIf
+  If jukeboxDrawnShape(slotIndex) = shapeSlot AND jukeboxDrawnX(slotIndex) = characterX AND jukeboxDrawnY(slotIndex) = drawY Then Statement Return
+  Use BitMap #BACK_BM
+  If jukeboxDrawnShape(slotIndex) >= 0
+    Boxf pageX + jukeboxDrawnX(slotIndex), jukeboxDrawnY(slotIndex), pageX + jukeboxDrawnX(slotIndex) + 15, jukeboxDrawnY(slotIndex) + heightNow - 1, 0
+  EndIf
+  Blit shapeSlot, pageX + characterX, drawY
+  jukeboxDrawnShape(slotIndex) = shapeSlot
+  jukeboxDrawnX(slotIndex) = characterX
+  jukeboxDrawnY(slotIndex) = drawY
+End Statement
+
+;; One frame's hop for a channel: it rises at once to the height its loudness asks for (the engine's
+;; level, 0 to 15, times the group's volume step) and falls back under gravity (the speed grows a
+;; pixel a frame).
+Statement UpdateJukeboxHop{channelIndex.w}
+  SHARED jukeboxHopHeight(), jukeboxHopSpeed(), apuState(), soundVolumeScale()
+  groupIndex.w = 0
+  If channelIndex = 2 Then groupIndex = 1
+  If channelIndex = 3 Then groupIndex = 2
+  levelNow.w = apuState(channelIndex*16 + #AP_LEVEL)
+  targetHeight.w = (levelNow*soundVolumeScale(groupIndex)*8)/15
+  If targetHeight > #JKB_STAGE_MAX_H Then targetHeight = #JKB_STAGE_MAX_H
+  If targetHeight > jukeboxHopHeight(channelIndex)
+    jukeboxHopHeight(channelIndex) = targetHeight
+    jukeboxHopSpeed(channelIndex) = 0
+  Else
+    jukeboxHopSpeed(channelIndex) = jukeboxHopSpeed(channelIndex) + 1
+    jukeboxHopHeight(channelIndex) = jukeboxHopHeight(channelIndex) - jukeboxHopSpeed(channelIndex)
+    If jukeboxHopHeight(channelIndex) < 0
+      jukeboxHopHeight(channelIndex) = 0
+      jukeboxHopSpeed(channelIndex) = 0
+    EndIf
+  EndIf
+End Statement
+
+;; The stage on one page: the four characters, each on the side of the speaker its channel's Paula
+;; channel is on (channels 0 and 3 are the left, 1 and 2 the right), in channel order, in four evenly
+;; spaced places (#JKB_CHAR_X, #JKB_CHAR_PITCH): the left side's two the first and second, the right's the third and fourth.
+Statement DrawJukeboxStage{pageIndex.w}
+  SHARED soundPaulaChannel()
+  leftCount.w = 0
+  rightCount.w = 0
+  For channelIndex.w = 0 To 3
+    paulaNow.w = soundPaulaChannel(channelIndex)
+    If paulaNow = 0 OR paulaNow = 3
+      DrawJukeboxCharacter{pageIndex, channelIndex, #JKB_CHAR_X + leftCount*#JKB_CHAR_PITCH}
+      leftCount = leftCount + 1
+    Else
+      DrawJukeboxCharacter{pageIndex, channelIndex, #JKB_CHAR_X + (2 + rightCount)*#JKB_CHAR_PITCH}
+      rightCount = rightCount + 1
+    EndIf
+  Next
+End Statement
+
+; A song asked for now (area music loops; an event tune plays once).
+Statement StartJukeboxSong{startIndex.w}
+  SHARED jukeboxSongEvent(), jukeboxSongBit(), jukeboxSongName$(), jukeboxReadout$, jukeboxPlaying
+  If jukeboxSongEvent(startIndex) <> False
+    SoundEventMusic{jukeboxSongBit(startIndex)}
+  Else
+    SoundAreaMusic{jukeboxSongBit(startIndex)}
+  EndIf
+  jukeboxPlaying = startIndex
+  jukeboxReadout$ = "PLAYING " + jukeboxSongName$(startIndex)
+  MarkJukeboxRow{#JKB_ROWS}
+End Statement
+
+;; The song shown on the SONG row, started (the row's change starts it): at once if none plays; else the music silenced first
+;; and the new one started the next tick (jukeboxPending), since the engine keeps one request a tick and an event tune would hold off an
+;; area one. A change while one waits only changes which.
+Statement PlayJukeboxSong{}
+  SHARED jukeboxSong, jukeboxPlaying, jukeboxPending
+  If jukeboxPending >= 0
+    jukeboxPending = jukeboxSong
+    Statement Return
+  EndIf
+  If jukeboxPlaying >= 0
+    SoundAreaMusic{#MUSIC_SILENCE}
+    SoundEventMusic{#MUSIC_SILENCE}
+    jukeboxPending = jukeboxSong
+    jukeboxPlaying = -1
+    Statement Return
+  EndIf
+  StartJukeboxSong{jukeboxSong}
+End Statement
+
+; Return on the SONG row: the music stopped if any plays (or waits), else the song shown started again from its start.
+Statement PressJukeboxSong{}
+  SHARED jukeboxPlaying, jukeboxPending, jukeboxReadout$
+  If jukeboxPlaying >= 0 OR jukeboxPending >= 0
+    SoundAreaMusic{#MUSIC_SILENCE}
+    SoundEventMusic{#MUSIC_SILENCE}
+    jukeboxPlaying = -1
+    jukeboxPending = -1
+    jukeboxReadout$ = "SILENT"
+    MarkJukeboxRow{#JKB_ROWS}
+    Statement Return
+  EndIf
+  PlayJukeboxSong{}
+End Statement
+
+;; Once a sim tick, before the keys: the song waiting for the silence before it starts, and an event
+;; tune that has ended on its own (the engine's event buffer is empty) leaves the readout.
+Statement UpdateJukeboxSongState{}
+  SHARED jukeboxPending, jukeboxPlaying, jukeboxSongEvent(), soundState(), jukeboxReadout$
+  If jukeboxPending >= 0
+    StartJukeboxSong{jukeboxPending}
+    jukeboxPending = -1
+    Statement Return
+  EndIf
+  If jukeboxPlaying >= 0
+    If jukeboxSongEvent(jukeboxPlaying) <> False AND soundState(#SS_EVENT_MUSIC_BUFFER) = 0 AND soundState(#SS_EVENT_MUSIC_QUEUE) = 0
+      jukeboxPlaying = -1
+      jukeboxReadout$ = "SILENT"
+      MarkJukeboxRow{#JKB_ROWS}
+    EndIf
+  EndIf
+End Statement
+
+; Return on the EFFECT row: the effect shown, over whatever is playing.
+Statement PlayJukeboxEffect{}
+  SHARED jukeboxEffect, jukeboxEffectGroup(), jukeboxEffectBit(), jukeboxEffectName$(), jukeboxReadout$
+  If jukeboxEffectGroup(jukeboxEffect) = 0 Then SoundSquare1{jukeboxEffectBit(jukeboxEffect)}
+  If jukeboxEffectGroup(jukeboxEffect) = 1 Then SoundSquare2{jukeboxEffectBit(jukeboxEffect)}
+  If jukeboxEffectGroup(jukeboxEffect) = 2 Then SoundNoise{jukeboxEffectBit(jukeboxEffect)}
+  jukeboxReadout$ = "EFFECT " + jukeboxEffectName$(jukeboxEffect)
+  MarkJukeboxRow{#JKB_ROWS}
+End Statement
+
+;; Left (-1) or right (1) on the chosen row: the song or the effect stepped round its list, the layout
+;; round the five, the filter flipped, a volume step up or down (0 to 9). Every change is audible at once,
+;; and the BACK row is marked as its words depend on whether anything differs from the baseline.
+Statement ChangeJukeboxRow{changeNow.w}
+  SHARED jukeboxCursor, jukeboxSong, jukeboxEffect, soundPanNow, soundFilterChosen, soundVolumeScale()
+  SHARED jukeboxBackChanged, jukeboxSceneShown, jukeboxSceneOfSong()
+  ; The SONG row: its scene shown (the palette at once, the picture after the VWait: UpdateJukeboxPage{}) and the song started.
+  If jukeboxCursor = #JKB_SONG
+    jukeboxSong = (jukeboxSong + changeNow + #JUKEBOX_SONGS) MOD #JUKEBOX_SONGS
+    jukeboxSceneShown = jukeboxSceneOfSong(jukeboxSong)
+    PlayJukeboxSong{}
+  EndIf
+  If jukeboxCursor = #JKB_EFFECT
+    jukeboxEffect = (jukeboxEffect + changeNow + #JUKEBOX_EFFECTS) MOD #JUKEBOX_EFFECTS
+  EndIf
+  If jukeboxCursor = #JKB_PAN
+    SoundSetPan{(soundPanNow + changeNow + #SOUND_PAN_LAYOUTS) MOD #SOUND_PAN_LAYOUTS}
+  EndIf
+  If jukeboxCursor = #JKB_FILTER
+    soundFilterChosen = NOT soundFilterChosen
+    SoundSetFilter{soundFilterChosen}
+  EndIf
+  If jukeboxCursor >= #JKB_PULSE AND jukeboxCursor <= #JKB_NOISE
+    volumeGroup.w = jukeboxCursor - #JKB_PULSE
+    volumeNew.w = soundVolumeScale(volumeGroup) + changeNow
+    If volumeNew >= 0 AND volumeNew <= 9 Then soundVolumeScale(volumeGroup) = volumeNew
+  EndIf
+  MarkJukeboxRow{jukeboxCursor}
+  ; The BACK row's words change only when the sound first differs from the baseline, or stops differing.
+  backChangedNow.w = SoundDiffersFromBaseline{0}
+  If backChangedNow <> jukeboxBackChanged
+    jukeboxBackChanged = backChangedNow
+    MarkJukeboxRow{#JKB_BACK}
+  EndIf
+End Statement
+
+;; Ends a part of UpdateJukeboxPage{} for the frame time report, in debug mode only: the lines since the last
+;; mark are added to the part (0 the static draw, 1 the hops, 2 the stage, 3 the rows), or not counted
+;; for -1, the start. JukeboxTimeEnd{} closes the frame (the whole page's lines).
+Statement JukeboxTimeMark{part.w}
+  SHARED debugMode, soundFrameLines, jukeboxMarkLine, jukeboxFrameLines, jukeboxPartSum(), jukeboxPartMax()
+  If debugMode = False Then Statement Return
+  lineNow.l = RasterLine{}
+  If part >= 0
+    segmentLines.l = SegmentLines{jukeboxMarkLine, lineNow, soundFrameLines}
+    jukeboxPartSum(part) = jukeboxPartSum(part) + segmentLines
+    If segmentLines > jukeboxPartMax(part) Then jukeboxPartMax(part) = segmentLines
+    jukeboxFrameLines = jukeboxFrameLines + segmentLines
+  EndIf
+  jukeboxMarkLine = lineNow
+End Statement
+
+Statement JukeboxTimeEnd{}
+  SHARED debugMode, jukeboxTimedFrames, jukeboxFrameLines, jukeboxTotalSum, jukeboxTotalMax
+  If debugMode = False Then Statement Return
+  jukeboxTimedFrames = jukeboxTimedFrames + 1
+  jukeboxTotalSum = jukeboxTotalSum + jukeboxFrameLines
+  If jukeboxFrameLines > jukeboxTotalMax Then jukeboxTotalMax = jukeboxFrameLines
+  jukeboxFrameLines = 0
+End Statement
+
+;; Once a frame, from the main loop right after the vertical blank, while the jukebox is the screen wanted:
+;; on the page not shown, the static part if that page has not had it yet (both do, the first frames), the
+;; hops from the engine's levels (the last frame's ticks), the characters that changed and the rows
+;; marked, then that page is the one the next frame shows (overlayBackX, which the main loop reads right
+;; after its VWait). Drawn in the blank, the blitter has the bus: mid-frame, after the world, the same
+;; work ran about three times slower.
+Statement UpdateJukeboxPage{}
+  SHARED overlayPageShown, overlayBackX, overlayScreenShown, jukeboxPageReady(), jukeboxFrame, pageScreenDrawn()
+  SHARED jukeboxScenePainted, jukeboxSceneShown
+  ; A new scene on the backdrop first, while the beam is above it (ShowJukeboxScene{}).
+  If jukeboxScenePainted <> jukeboxSceneShown Then ShowJukeboxScene{}
+  If overlayScreenShown <> #SCREEN_JUKEBOX
+    jukeboxPageReady(0) = False
+    jukeboxPageReady(1) = False
+  EndIf
+  hiddenPage.w = 1 - overlayPageShown
+  JukeboxTimeMark{-1}
+  If jukeboxPageReady(hiddenPage) = False
+    DrawJukeboxStatic{hiddenPage}
+    jukeboxPageReady(hiddenPage) = True
+  EndIf
+  JukeboxTimeMark{0}
+  jukeboxFrame = jukeboxFrame + 1
+  For channelIndex.w = 0 To 3
+    UpdateJukeboxHop{channelIndex}
+  Next
+  JukeboxTimeMark{1}
+  DrawJukeboxStage{hiddenPage}
+  JukeboxTimeMark{2}
+  DrawDirtyJukeboxRows{hiddenPage}
+  JukeboxTimeMark{3}
+  JukeboxTimeEnd{}
+  ; The page holds the jukebox now: the options page that comes next is drawn whole on it.
+  pageScreenDrawn(hiddenPage) = #SCREEN_JUKEBOX
+  overlayPageShown = hiddenPage
+  overlayBackX = OverlayPageX{hiddenPage}
+  overlayScreenShown = #SCREEN_JUKEBOX
+End Statement
+
+;; END OF JUKEBOX PAGE (BLITZ MODE)

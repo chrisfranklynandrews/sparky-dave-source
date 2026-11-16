@@ -1,0 +1,308 @@
+;; =======================================================
+;; PHYSICS AND TIMING CONSTANTS -- PAL
+;; =======================================================
+;; The numbers that differ between the two builds, here the game's own PAL variant (50 sim ticks a second): the NTSC game retuned
+;; with the PAL cartridge's speed and timer compensation, and scaled to 50 ticks a second where the PAL cartridge kept the NTSC
+;; numbers. What each constant is, its ROM label and both variants' values are in the main project's PHYSICS_VARIANTS note.
+;; tools/build_variant.py copies this file, or the NTSC one, over sparkydave.physics.ab3, which is the one the game includes:
+;; edit the variant files, never the copy.
+
+; The sim's tick rate.
+#SIM_HZ = 50
+
+; Walking and running limits.
+#MARIO_MAX_WALK = 28
+#MARIO_MAX_RUN  = 48
+
+; Friction.
+#MARIO_FRIC_WALK = $00
+#MARIO_FRIC_HIGH = 1
+#MARIO_FRIC_TURN = $80
+#MARIO_FRIC_FAST = $c0
+
+; The jump, by band; the fall force before any jump.
+#MARIO_JUMP_FAST        = -6
+#MARIO_JUMP_SLOW        = -5
+#MARIO_JUMP_INITFORCE_2 = 0
+#MARIO_FALL_MAX         = 5
+#MARIO_GRAV_RISE_1      = $2d
+#MARIO_GRAV_RISE_0      = $30
+#MARIO_JUMP_INITFORCE_0 = $34
+#MARIO_JUMP_INITFORCE_1 = $34
+#MARIO_GRAV_RISE_2      = $38
+#MARIO_GRAV_FALL_INIT   = $70
+#MARIO_GRAV_FALL_1      = $90
+#MARIO_GRAV_FALL_0      = $a8
+#MARIO_GRAV_FALL_2      = $d0
+
+; Speed cutoffs.
+#MARIO_SPD_SKIDGFX  = 10
+#MARIO_SPD_SKIDSTOP = 13
+#MARIO_SPD_ANIM     = 16
+#MARIO_SPD_JUMPWALK = 18
+#MARIO_SPD_AIR      = 29
+#MARIO_SPD_JUMPFAST = 29
+#MARIO_SPD_RUNFLAG  = 32
+#MARIO_SPD_FASTFRIC = 39
+
+; Walk frame timing.
+#MARIO_ANIM_FAST = 2
+#MARIO_ANIM_MID  = 3
+#MARIO_ANIM_SLOW = 5
+
+;; Jump forgiveness windows (not the cartridge's): low about 60 ms and 80 ms, medium about 100 ms
+;; and 140 ms, high about 160 ms and 200 ms.
+#JUMP_BUFFER_LOW_TICKS  = 3
+#COYOTE_LOW_TICKS       = 4
+#JUMP_BUFFER_TICKS      = 5
+#COYOTE_TICKS           = 7
+#JUMP_BUFFER_HIGH_TICKS = 8
+#COYOTE_HIGH_TICKS      = 10
+
+; Floor tolerance.
+#MT_FEET_MIN_SUBTILE = 6
+
+; The timers, and the block bounce (14 ticks, not the ROM's 12: see the reference).
+#BLOCK_BOUNCE_SPEED      = -2
+#GOOMBA_SQUASH_INTERVALS = 2
+#KOOPA_REVIVE_INTERVALS  = 13
+#MARIO_BLOCKBOUNCE       = 14
+#INTERVAL_PERIOD         = 18
+#HUD_TIME_TICKS          = 20
+#PIPE_TICKS              = 40
+#PLANT_WAIT_TICKS        = 53
+#BLOCK_BOUNCE_GRAVITY    = $58
+
+; Enemies.
+#ENEMY_WALK_SPEED = 10
+#SHELL_SPEED      = 56
+#LIFT_RIGHT_SPEED = 256
+#LIFT_SPEED       = 288
+
+;; How far into a lift's top Mario's feet may be and still land on it (ProcLPlatCollisions, smbdis 11797: the cartridge's 6). One
+;; tick must not carry his feet from above the top to past it: here his top fall is 5 px and a carry (6) and an up lift's 288 256ths
+;; 1 or 2, so 8; with the cartridge's 6 he falls through 1-2's up lifts. NTSC keeps 6.
+#LIFT_LAND_WINDOW = 8
+
+;; The jumpspring: the PAL cartridge's own numbers ($f8 and $f2; and the rise force $40 it defines where the NTSC listing leaves it
+;; as the landing set it, $70).
+#SPRING_FORCE_A    = -14
+#SPRING_FORCE      = -8
+#SPRING_RISE_FORCE = $40
+
+; Fireballs.
+#FIREBALL_SPEED_X  = 76
+#FIREBALL_GRAVITY  = 96
+#FIREBALL_FALL_MAX = 1280
+#FIREBALL_START_VY = 1280
+
+;; Swimming (a water area). A stroke's rise, fall and start force and its speed (JumpMForceData, FallMForceData, InitMForceData and
+;; PlayerYSpdData, entry 5), the same in a whirlpool (entry 6), the force above the surface (ProcSwim), the ticks a stroke may follow
+;; another while he still rises (JumpSwimTimer), the whirlpool's pull (WhirlpoolActivate) and the sea floor's top speed
+;; (MaxRightXSpdData, entry 2, only a water area's).
+;; Not the PAL cartridge's, which keeps the NTSC numbers for the swim (only the sea floor's speed is its own): scaled to 50 ticks a
+;; second (forces x1.44, speeds x1.2 as whole pixels and a start force, the timer x5/6), chosen in play against the PAL listing's.
+;; The whirlpool's top speed of 1 is not scaled.
+#SWIM_SPEED         = -2
+#WHIRL_SPEED        = -2
+#WHIRL_RISE_FORCE   = $06
+#WHIRL_FALL_FORCE   = $0d
+#SWIM_FALL_FORCE    = $0e
+#SWIM_RISE_FORCE    = $13
+#MARIO_MAX_SEAFLOOR = 19
+#WHIRL_PULL_FORCE   = $17
+#SWIM_STROKE_TICKS  = 27
+#SWIM_SURFACE_FORCE = $23
+#SWIM_INITFORCE     = $33
+#WHIRL_INITFORCE    = $cd
+
+;; The Bloober (the main project's OBJECT_SYSTEM note, "The Bloober"): the mask of the random bits that must
+;; all be clear for it to aim afresh (BlooberBitmasks, entry 0: hard mode's entry 1 is not built), how near Mario's y it comes
+;; before its next swim (ChkNearPlayer's adc), the ticks between its swim's speed steps (ProcSwimmingB's every eighth frame), a swim
+;; speed of 1 in sixteenths of a pixel a tick (2 is twice it), its float down in sixteenths a tick (a pixel every other frame), and a
+;; beaten one's first speed (SetStun: the cartridge's -1 px a tick x1.2, as its fall is, in 256ths)
+;; and its fall (MoveEnemySlowVert: the force, and the top speed in 256ths).
+;; Not the PAL cartridge's (which re-aims on 1 tick in 8, comes within 12 px and keeps the 8-tick step): scaled to 50 ticks a second
+;; as Mario's strokes are. The step 8 ticks x5/6 (6.7, so 7); the speeds x1.2 in sixteenths; the
+;; float half a pixel x1.2; the fall's force x1.44 and its top x1.2; the aim the NTSC chance (1 in 64, the nearest mask to 1 in
+;; 53); the distance unscaled.
+#BLOOBER_STUN_SPEED  = -307
+#BLOOBER_SWIM_TICKS  = 7
+#BLOOBER_FLOAT_SPEED = 10
+#BLOOBER_NEAR_Y      = 16
+#BLOOBER_SPEED_STEP  = 19
+#BLOOBER_FALL_FORCE  = $16
+#BLOOBER_AIM_MASK    = $3f
+#BLOOBER_FALL_MAX    = 614
+
+;; The swimming Cheep-Cheep and its frenzy: the grey one's and the red one's swim left in 256ths of a
+;; pixel a tick (SwimCCXMoveData), its bob up and down in 256ths (MoveSwimmingCheepCheep's $20), the ticks between two of the frenzy's
+;; Cheep-Cheeps (FrenzyEnemyTimer's $20) and between its two pictures (EnemyAnimTimingBMask's $08).
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second as the Bloober and Mario's strokes
+;; are (the speeds x1.2, the timers x5/6; the bob's 15 px is a distance, unscaled).
+#CHEEP_FRAME_TICKS = 7
+#FRENZY_TICKS      = 27
+#CHEEP_BOB_SPEED   = $26
+#CHEEP_SPEED_GREY  = $4d
+#CHEEP_SPEED_RED   = $9a
+
+;; The flying Cheep-Cheeps (smbdis 8419 InitFlyingCheepCheep, 9922 MoveFlyingCheepCheep, 7704 ImposeGravity): the
+;; launch's speed (whole pixels a tick, up), the gravity in 256ths a tick (its top fall speed in whole pixels), the nudge to the speed's
+;; fraction near some heights (PRandomSubtracter), the sideways speeds in sixteenths (FlyCCXSpeedData) and the frenzy's timers
+;; (FlyCCTimerData); beaten, the stun's speed up (SetStun's $fd) and the fall (MoveJ_EnemyVertically: $1c, top speed 3).
+;; Not the PAL cartridge's (which retunes them: launch -6, gravity 23, faster sideways, no nudge, so its flyers jump about 27 px lower
+;; and sooner): scaled to 50 ticks a second as the swimmers are, chosen in play (model: tools/record/fly_cheep_model.py). Speeds x1.2,
+;; forces x1.44, timers x5/6, each rounded; the stun's -3.6 and the beaten top speed's 3.6 to the nearest whole (-4, 4).
+#FLY_CHEEP_LAUNCH       = -6
+#FLY_CHEEP_STUN_SPEED   = -4
+#FLY_CHEEP_BEATEN_MAX   = 4
+#FLY_CHEEP_FALL_MAX     = 6
+#FLY_CHEEP_SPEED_1      = 6
+#FLY_CHEEP_SPEED_2      = 7
+#FLY_CHEEP_TIMER_0      = 13
+#FLY_CHEEP_SPEED_7      = 14
+#FLY_CHEEP_SPEED_0      = 17
+#FLY_CHEEP_SPEED_3      = 17
+#FLY_CHEEP_GRAVITY      = 19
+#FLY_CHEEP_SPEED_6      = 19
+#FLY_CHEEP_NUDGE        = 23
+#FLY_CHEEP_SPEED_11     = 24
+#FLY_CHEEP_TIMER_2      = 27
+#FLY_CHEEP_SPEED_10     = 29
+#FLY_CHEEP_SPEED_4      = 34
+#FLY_CHEEP_SPEED_8      = 36
+#FLY_CHEEP_SPEED_5      = 38
+#FLY_CHEEP_BEATEN_FORCE = 40
+#FLY_CHEEP_SPEED_9      = 41
+#FLY_CHEEP_TIMER_3      = 60
+#FLY_CHEEP_TIMER_1      = 80
+
+;; The firebars (smbdis 8366 FirebarSpinSpdData): the spin, in 256ths of a 32nd of a turn a tick, slow
+;; ($1b, $1d, $1f) and fast ($1c, $1e).
+;; The PAL listing's (its FirebarSpinSpdData: "faster speed to compensate FPS difference"), which are the NTSC numbers scaled x1.2:
+;; a turn takes 3.41 s or 2.44 s in both builds.
+#FIREBAR_SPEED_SLOW = $30
+#FIREBAR_SPEED_FAST = $43
+
+;; The Podoboo (smbdis 9187 MovePodoboo, 7642 MoveJ_EnemyVertically): its leap's speed (whole pixels a tick,
+;; up) and the 256ths the random byte (with d7 set) gives it, ((byte OR $80)*#PODOBOO_FORCE_TIMES)/5 - #PODOBOO_FORCE_LESS; the gravity in
+;; 256ths a tick and its top fall speed; a Starman's knock's speed up (SetStun's $fd).
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second as the swimmers and flyers are. The leap's
+;; speed (-7 and a random half to whole pixel, so -6.5 to -6) times 1.2 is -8 and the random byte times 6/5 less 102 (-7.8 to -7.2); the
+;; gravity x1.44 and its top speed and the stun's x1.2 to the nearest whole (as the flyer's beaten fall).
+#PODOBOO_LAUNCH      = -8
+#PODOBOO_STUN_SPEED  = -4
+#PODOBOO_FALL_MAX    = 4
+#PODOBOO_FORCE_TIMES = 6
+#PODOBOO_FORCE       = 40
+#PODOBOO_FORCE_LESS  = 102
+
+;; The platform that moves up and down (1-3's; smbdis 10896 YMovingPlatform, 7673 MovePlatformUp
+;; and MovePlatformDown, 7704 ImposeGravity; StepSwing{}): the pull in 256ths of a pixel a tick, down while it is above its centre and
+;; the down force less the up force from its centre on, and its top speed (whole pixels; not reached, it tops out under 2 px a tick).
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second (tools/record/swing_model.py). Its reach is set by
+;; its centre, a distance, so only the forces change, x1.44 to the nearest whole with the up force kept twice the down: its moving swing
+;; 5.52 s against NTSC's 5.50 (the pause at its top, where it creeps back down, is the rounding's: 0.6 s against 0.9).
+#VPLAT_SPEED_MAX  = 3
+#VPLAT_DOWN_FORCE = 7
+#VPLAT_UP_FORCE   = 14
+
+;; The swing's creep (YMovingPlatform, ProcMoveRedPTroopa; StepSwing{}): with no speed and above its top, a swinging platform or Red
+;; Paratroopa moves down a pixel on the ticks whose low bits under this mask are clear.
+;; Every eighth tick, as NTSC's eighth frame, not scaled (a creep of 6.25 px a second against 7.5): it only runs while the swing is
+;; still above its top, and how long that is already differs between the builds by the 256ths' rounding (0.6 s against 0.9).
+#SWING_CREEP_MASK = 7
+
+;; The Red Paratroopa (1-3's; smbdis 9377 ProcMoveRedPTroopa, 7611 MoveRedPTroopaUp and Down, 7704
+;; ImposeGravity; StepSwing{}): the pull in 256ths of a pixel a tick, down while it is above its centre and the down force less the up
+;; force from its centre on, and its top speed (whole pixels; not reached, it tops out under 1.3 px a tick).
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second (tools/record/swing_model.py), as the platform's:
+;; the forces x1.44 to the nearest whole, the up kept twice the down: a swing 6.74 s against NTSC's 6.82, the same reach.
+#RED_PARA_SPEED_MAX  = 2
+#RED_PARA_DOWN_FORCE = 4
+#RED_PARA_UP_FORCE   = 8
+
+;; The platform that sways from side to side (smbdis 10927 XMovingPlatform, 9423 XMoveCntr_Platform, 9443
+;; MoveWithXMCntrs): its counters step #XPLAT_STEP_RATE 64ths of a step a tick, and its speed is the secondary counter times
+;; #XPLAT_SPEED, in 256ths of a pixel a tick.
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second (a step every 3.37 ticks for 3.33, the
+;; speed x1.19 for 1.2): it sways 53 px and back in 4 s, as on NTSC.
+#XPLAT_STEP_RATE = 19
+#XPLAT_SPEED     = 19
+
+;; Bowser (smbdis 8504 InitBowser, 10151 BowserControl, 7635 MoveEnemySlowVert): his pacing step (on the
+;; ticks #BOWSER_STEP_RATE 64ths reach a whole step: every fourth frame), his turn to face left (#BOWSER_FACE_RATE: every sixteenth), the
+;; feet's and the chase's timers, the fire breath's first wait and the mouth's, his gravity and top fall speed, his jump (speed and its
+;; 256ths), the Starman's knock; the jump's waits (PRandomRange as a timer) and the flame's waits (FlameTimerData).
+;; Not the PAL cartridge's (it retunes only his gravity, MoveEnemySlowVert's $12, and the flame waits, FlameTimerData's $80, $30, $30,
+;; $80, $80, $80, $30, $50): scaled to 50 ticks a second like every other enemy in this variant (the timers x5/6, the steps in 64ths
+;; so a step and a turn come as often a second as on NTSC, the jump's -2.4 as -3 and 154 256ths, the gravity x1.44; the pacing
+;; distances and the top fall speed unscaled).
+#BOWSER_STUN_SPEED   = -4
+#BOWSER_JUMP_SPEED   = -3
+#BOWSER_FALL_MAX     = 2
+#BOWSER_FACE_RATE    = 5
+#BOWSER_WAIT_2       = 14
+#BOWSER_STEP_RATE    = 19
+#BOWSER_FORCE        = 22
+#BOWSER_FEET_TICKS   = 27
+#BOWSER_CHASE_TICKS  = 27
+#BOWSER_MOUTH_TICKS  = 27
+#BOWSER_WAIT_0       = 28
+#BOWSER_WAIT_3       = 41
+#BOWSER_FLAME_WAIT_1 = 53
+#BOWSER_FLAME_WAIT_5 = 53
+#BOWSER_FLAME_WAIT_6 = 53
+#BOWSER_WAIT_1       = 54
+#BOWSER_JUMP_FORCE   = 154
+#BOWSER_FLAME_WAIT_0 = 159
+#BOWSER_FLAME_WAIT_2 = 159
+#BOWSER_FLAME_WAIT_3 = 159
+#BOWSER_FLAME_WAIT_4 = 159
+#BOWSER_FLAME_WAIT_7 = 159
+#BOWSER_FIRE_FIRST   = 186
+
+;; The firebars' flicker (the main project's OPTIMISATION note, entry 16): with this many bars in view or more, a frame draws only every other ball of
+;; each, the other half on the next (each bitmap of the pair always the same half), so each ball shows every other frame.
+;; PAL: never (0); its frame has the room (the main project's OPTIMISATION note, entry 16).
+#FIREBAR_FLICKER_BARS = 0
+
+;; Bowser's flame (smbdis 8554 InitBowserFlame, 10324 ProcBowserFlame): its sideways force in
+;; 256ths a tick (taken from its force each tick, a pixel more when it borrows, as well as the pixel), its steps up or down to its
+;; height (in 64ths a tick), the frenzy's wait after the flame wait, and how often its picture turns (in 64ths of a turn a tick).
+;; Not the PAL cartridge's (it retunes the force to $70, 1.44 px a frame): scaled like every other enemy in this variant,
+;; scaled to 50 ticks a second (the speeds x1.2: 1.5 px a tick and 1.2 steps in 64ths, the timer x5/6, the picture's turn as often a
+;; second as on NTSC).
+#FLAME_FRENZY_EXTRA = 27
+#FLAME_PICTURE_RATE = 38
+#FLAME_STEP_RATE    = 77
+#FLAME_FORCE        = 128
+
+;; The bridge's collapse (smbdis 10095 RemoveBridge): ticks between its pieces.
+;; Scaled: 4 frames x5/6, the nearest whole tick, so the bridge goes in 0.9 s, not NTSC's 1.0 s.
+#BRIDGE_STEP_TICKS = 3
+
+;; The castle's end (smbdis 1144 PlayerVictoryWalk, 1176 PrintVictoryMessages): the view's own scroll
+;; to the retainer's page (256ths a tick over 1 px), and the ticks from the first message to the second and to the end timer.
+;; Scaled: 1.8 px a tick (1 and 205 256ths), the frames x5/6.
+#CASTLE_MSG_SECOND      = 107
+#CASTLE_SCROLL_FRACTION = 205
+#CASTLE_MSG_END         = 213
+
+;; The air bubbles: the shared timer between two, long or short by a random bit (BubbleTimerData), and the
+;; rise in 256ths of a pixel a tick, fast or slow by a random bit (Bubble_MForceData).
+;; Not the PAL cartridge's, which keeps the NTSC numbers: scaled to 50 ticks a second (the timers x5/6, the speeds x1.2).
+#BUBBLE_TICKS_SHORT = 27
+#BUBBLE_TICKS_LONG  = 53
+#BUBBLE_RISE_SLOW   = 96
+#BUBBLE_RISE_FAST   = 306
+
+;; The title's attract mode (not the cartridge's): the camera's step in 1/256 px a tick, the hold
+;; on the castle (2 s) and the black cover after it (half a second). The step is a whole pixel in
+;; both builds (50 px a second on PAL, 60 on NTSC): with the front at fractions of a pixel the title
+;; overlay moves side to side.
+#ATTRACT_BLANK_TICKS = 25
+#ATTRACT_HOLD_TICKS  = 100
+#ATTRACT_STEP        = 256
+
+;; END OF PHYSICS AND TIMING CONSTANTS -- PAL

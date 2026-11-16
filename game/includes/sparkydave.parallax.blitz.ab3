@@ -1,0 +1,341 @@
+;; =======================================================
+;; PARALLAX (BLITZ MODE)
+;; =======================================================
+;; The back playfield's two bands at their own speeds (the main project's AMIGA_RENDERER note, "Parallax and scrolling options"). The back
+;; bitmap (#BACK_BM)
+;; holds the clouds (rows 2 to 4) and the hills (rows 10 to 12), with empty rows between. The
+;; world list's header shows the back at the clouds' x (DisplayBitMap); at list line #BAND_LINE
+;; two copper strings move it to the hills' x for the rest of the list:
+;;   at line #BAND_LINE - 2: the pointers of back planes 0 and 1 (BPL2PT, BPL4PT)
+;;   at line #BAND_LINE - 1: back planes 2 and 3 (BPL6PT, BPL8PT), and BPLCON1
+;; Split over two lines so each group fits in the horizontal blank; the rows there are empty in
+;; the back, so a line half way through the change shows nothing. BPLCON1 holds the front's fine
+;; scroll too, so its front part is the one the header already has: the front does not move.
+;; The values are worked out the way displaylib.ab3 does for a dual playfield (_displaydbmap2 and
+;; its bp1 table): x in quarter pixels; the low bits (#FINE_MASK, 32 px at fetch mode 1 or 2) are the fine delay, 255 less them (so
+;; 128 to 255: the delay's bits 6 and 7 are always set, and fetch modes 1 and 2 ignore them, as displaylib's own table does); the
+;; rest, 4 bytes to 32 px, is added to the row's plane pointer (rounded down, so a negative x, the lead-in at the left, is the block
+;; before: #SCROLL_BIAS).
+;; The strings are built once (InitBand{}); each frame UpdateBand{} pokes BPLCON1's word from two
+;; tables, and the eight pointer words only when the hills cross into another 32 px block. The strings are found through the
+;; CopList object's custom area (Addr CopList, its eighth long), and used only if both strings' first register words are where that
+;; layout says; otherwise the strings are rebuilt every frame (about 44 lines, against about 3).
+
+; A 16 bit value as the signed word Mki$ and Poke.w take.
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+;; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels, in the playfield 1
+;; bits: delay bits 0-1 at 8-9, bits 2-5 at 0-3, bits 6-7 at 10-11 (checked against displaylib's
+;; bp1 table). Playfield 2's part is this times 16.
+Function.l ScrollPart{delay.l}
+  Function Return(delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+;; An x in pixels as the display library takes it, in quarter pixels, rounded DOWN: the library keeps x as 16.16 fixed and shifts it,
+;; so a position of -0.01 is the quarter -1 (the block before, delay 0). Int() does not floor: it would give 0 there (the next block,
+;; delay 255), and everything below #BAND_LINE would be drawn 64 pixels off for a frame whenever the front's x crosses a multiple of
+;; 64 with a fraction.
+Function.l QuarterPixels{position.q}
+  scaled.q = position*4
+  quarter.l = Int(scaled)
+  If quarter > scaled Then quarter = quarter - 1
+  Function Return quarter
+End Function
+
+;; A back plane's pointer for a band, for an x in quarter pixels: planes 0 and 1 are set at the end of the list line before the band's
+;; for the next line's row, planes 2 and 3 a line later, so a row further. firstRow is the row of the planes 0 and 1: the hills' band
+;; (BandPlanePointer{}) or the HUD's end (CloudPlanePointer{}). The one place the sum is written: the strings and the pokes use it.
+Function.l RowPlanePointer{planeIndex.w, quarter.l, firstRow.l}
+  SHARED backPlane(), backBytesPerRow
+  Function Return backPlane(planeIndex) + (firstRow + planeIndex/2)*backBytesPerRow + ((quarter - (quarter AND #FINE_MASK))/32)
+End Function
+
+Function.l BandPlanePointer{planeIndex.w, hillQuarter.l}
+  Function Return RowPlanePointer{planeIndex, hillQuarter, #VIEW_TOP + #BAND_LINE - 1}
+End Function
+
+; The same for the clouds at the HUD's end in list 2: the back is the HUD to line #HUD_END_LINE - 2 and the clouds' rows from there.
+Function.l CloudPlanePointer{planeIndex.w, cloudQuarter.l}
+  Function Return RowPlanePointer{planeIndex, cloudQuarter, #AWAY_TOP + #HUD_END_LINE - 1}
+End Function
+
+;; The strings, built from scratch with CustomString: once at start, and every frame only if the poke check failed. frontX, cloudX and
+;; hillX in pixels, as given to DisplayBitMap. List 1: the hills' two. List 2: the same two (from slot #AWAY_BAND_SLOT, and #HUD_H +
+;; #LIST_GAP lines further in: the same rows of the back), and with #HUD_OVER_WORLD two before them, at the HUD's end.
+Statement BuildBandStrings{frontX.q, cloudX.q, hillX.q}
+  frontQuarter.l = QuarterPixels{frontX}
+  cloudQuarter.l = QuarterPixels{cloudX}
+  hillQuarter.l = QuarterPixels{hillX}
+  control.l = ScrollPart{255 - (frontQuarter AND #FINE_MASK)} + ScrollPart{255 - (hillQuarter AND #FINE_MASK)}*16
+  pointer0.l = BandPlanePointer{0, hillQuarter}
+  pointer1.l = BandPlanePointer{1, hillQuarter}
+  firstString$ = Mki$(#BPL2PTH) + Mki$(SignedWord{pointer0/65536}) + Mki$(#BPL2PTH + 2) + Mki$(SignedWord{pointer0})
+  firstString$ = firstString$ + Mki$(#BPL4PTH) + Mki$(SignedWord{pointer1/65536}) + Mki$(#BPL4PTH + 2) + Mki$(SignedWord{pointer1})
+  pointer2.l = BandPlanePointer{2, hillQuarter}
+  pointer3.l = BandPlanePointer{3, hillQuarter}
+  secondString$ = Mki$(#BPL6PTH) + Mki$(SignedWord{pointer2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{pointer2})
+  secondString$ = secondString$ + Mki$(#BPL8PTH) + Mki$(SignedWord{pointer3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{pointer3})
+  secondString$ = secondString$ + Mki$(#BPLCON1) + Mki$(SignedWord{control})
+  CustomString 1, #BAND_SLOT_1, #BAND_LINE - 2, firstString$
+  CustomString 1, #BAND_SLOT_1 + #BAND_STRING_B_SLOT, #BAND_LINE - 1, secondString$
+  CustomString 2, #AWAY_BAND_SLOT, #BAND_LINE_AWAY - 2, firstString$
+  CustomString 2, #AWAY_BAND_SLOT + #BAND_STRING_B_SLOT, #BAND_LINE_AWAY - 1, secondString$
+  If #HUD_OVER_WORLD = 1
+    ;; The HUD's end: the back's planes to the clouds' rows and x, the front's and the clouds' fine scroll, and the back's colour offset
+    ;; 16 (the lines before it have offset 0, the front's own colours, for the HUD).
+    hudControl.l = ScrollPart{255 - (frontQuarter AND #FINE_MASK)} + ScrollPart{255 - (cloudQuarter AND #FINE_MASK)}*16
+    cloud0.l = CloudPlanePointer{0, cloudQuarter}
+    cloud1.l = CloudPlanePointer{1, cloudQuarter}
+    hudFirst$ = Mki$(#BPL2PTH) + Mki$(SignedWord{cloud0/65536}) + Mki$(#BPL2PTH + 2) + Mki$(SignedWord{cloud0})
+    hudFirst$ = hudFirst$ + Mki$(#BPL4PTH) + Mki$(SignedWord{cloud1/65536}) + Mki$(#BPL4PTH + 2) + Mki$(SignedWord{cloud1})
+    cloud2.l = CloudPlanePointer{2, cloudQuarter}
+    cloud3.l = CloudPlanePointer{3, cloudQuarter}
+    hudSecond$ = Mki$(#BPL6PTH) + Mki$(SignedWord{cloud2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{cloud2})
+    hudSecond$ = hudSecond$ + Mki$(#BPL8PTH) + Mki$(SignedWord{cloud3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{cloud3})
+    hudSecond$ = hudSecond$ + Mki$(#BPLCON1) + Mki$(SignedWord{hudControl}) + Mki$(#BPLCON3) + Mki$(SignedWord{#BPLCON3_BACK})
+    CustomString 2, #START_SLOTS, #HUD_END_LINE - 2, hudFirst$
+    CustomString 2, #START_SLOTS + #BAND_STRING_B_SLOT, #HUD_END_LINE - 1, hudSecond$
+  EndIf
+End Statement
+
+; The eight pointer words in one list's custom area, for the hills' x in quarter pixels, from the offsets of that list's strings.
+Statement PokeBandPointersAt{customs.l, hillQuarter.l, firstOffset.l, secondOffset.l}
+  pointer.l = BandPlanePointer{0, hillQuarter}
+  Poke.w customs + firstOffset, SignedWord{pointer/65536}
+  Poke.w customs + firstOffset + 4, SignedWord{pointer}
+  pointer = BandPlanePointer{1, hillQuarter}
+  Poke.w customs + firstOffset + 8, SignedWord{pointer/65536}
+  Poke.w customs + firstOffset + 12, SignedWord{pointer}
+  pointer = BandPlanePointer{2, hillQuarter}
+  Poke.w customs + secondOffset, SignedWord{pointer/65536}
+  Poke.w customs + secondOffset + 4, SignedWord{pointer}
+  pointer = BandPlanePointer{3, hillQuarter}
+  Poke.w customs + secondOffset + 8, SignedWord{pointer/65536}
+  Poke.w customs + secondOffset + 12, SignedWord{pointer}
+End Statement
+
+; Both lists' (list 2's strings are the same, #AWAY_BAND_SLOT slots on).
+Statement PokeBandPointers{hillQuarter.l}
+  SHARED bandCustoms, bandCustomsAway
+  PokeBandPointersAt{bandCustoms, hillQuarter, #BAND_POKE_FIRST_1, #BAND_POKE_SECOND_1}
+  PokeBandPointersAt{bandCustomsAway, hillQuarter, #BAND_POKE_FIRST_AWAY, #BAND_POKE_SECOND_AWAY}
+End Statement
+
+; List 2's HUD strings' values each frame (#HUD_OVER_WORLD): the clouds' pointers and BPLCON1 for where the camera and the clouds are.
+Statement PokeHudEnd{frontQuarter.l, cloudQuarter.l}
+  SHARED bandCustomsAway
+  pointer.l = CloudPlanePointer{0, cloudQuarter}
+  Poke.w bandCustomsAway + #HUD_POKE_FIRST, SignedWord{pointer/65536}
+  Poke.w bandCustomsAway + #HUD_POKE_FIRST + 4, SignedWord{pointer}
+  pointer = CloudPlanePointer{1, cloudQuarter}
+  Poke.w bandCustomsAway + #HUD_POKE_FIRST + 8, SignedWord{pointer/65536}
+  Poke.w bandCustomsAway + #HUD_POKE_FIRST + 12, SignedWord{pointer}
+  pointer = CloudPlanePointer{2, cloudQuarter}
+  Poke.w bandCustomsAway + #HUD_POKE_SECOND, SignedWord{pointer/65536}
+  Poke.w bandCustomsAway + #HUD_POKE_SECOND + 4, SignedWord{pointer}
+  pointer = CloudPlanePointer{3, cloudQuarter}
+  Poke.w bandCustomsAway + #HUD_POKE_SECOND + 8, SignedWord{pointer/65536}
+  Poke.w bandCustomsAway + #HUD_POKE_SECOND + 12, SignedWord{pointer}
+  hudControl.l = ScrollPart{255 - (frontQuarter AND #FINE_MASK)} + ScrollPart{255 - (cloudQuarter AND #FINE_MASK)}*16
+  Poke.w bandCustomsAway + #HUD_POKE_SECOND + 16, SignedWord{hudControl}
+End Statement
+
+;; Once a frame, right after the world list's DisplayBitMap: frontX is the front's x, cloudX the clouds' and hillX the
+;; hills' (0, 0 and 0 while a cover is up, so the cover's lower half is not shifted).
+Statement UpdateBand{frontX.q, cloudX.q, hillX.q}
+  SHARED bandPokeOk, bandLastHillBlock, frontScrollPart(), backScrollPart(), bandCustoms, bandCustomsAway
+  If bandPokeOk = False
+    BuildBandStrings{frontX, cloudX, hillX}
+    Statement Return
+  EndIf
+  frontQuarter.l = QuarterPixels{frontX}
+  cloudQuarter.l = QuarterPixels{cloudX}
+  hillQuarter.l = QuarterPixels{hillX}
+  control.l = frontScrollPart(frontQuarter AND #FINE_MASK) + backScrollPart(hillQuarter AND #FINE_MASK)
+  Poke.w bandCustoms + #BAND_POKE_SECOND_1 + 16, SignedWord{control}
+  Poke.w bandCustomsAway + #BAND_POKE_SECOND_AWAY + 16, SignedWord{control}
+  ;; Only while list 2 is wanted or on show: it first comes up on a frame this runs for (ShowWorldLists{} asks for it), and its strings
+  ;; are not read before the next.
+  If #HUD_OVER_WORLD = 1 AND HudAwayActive{} <> False Then PokeHudEnd{frontQuarter, cloudQuarter}
+  hillBlock.l = hillQuarter AND #BAND_BLOCK_MASK
+  If hillBlock <> bandLastHillBlock
+    bandLastHillBlock = hillBlock
+    PokeBandPointers{hillQuarter}
+  EndIf
+End Statement
+
+;; Once, after CreateDisplay: the back's plane addresses (the Blitz BitMap object: bytes per row
+;; at 0, the plane pointers from 8), the BPLCON1 tables, the strings, and the poke check.
+Statement InitBand{}
+  SHARED backPlane(), backBytesPerRow, frontScrollPart(), backScrollPart(), bandCustoms, bandCustomsAway
+  SHARED bandPokeOk, bandLastHillBlock
+  backBytesPerRow = Peek.w(Addr BitMap(#BACK_BM))
+  For planeIndex.w = 0 To 3
+    backPlane(planeIndex) = Peek.l(Addr BitMap(#BACK_BM) + 8 + planeIndex*4)
+  Next
+  For fineIndex.w = 0 To #FINE_MASK
+    frontScrollPart(fineIndex) = ScrollPart{255 - fineIndex}
+    backScrollPart(fineIndex) = ScrollPart{255 - fineIndex}*16
+  Next
+  ; The border blank's start strings (palette.blitz.ab3).
+  ShowHudStart{}
+  BuildBandStrings{0, 0, 0}
+  ; The NES look's only other string, after the band's (the All-Stars look writes it with the sky's).
+  If #LOOK_ALLSTARS = 0 Then ShowWorldEnd{#BAND_CUSTOMS}
+  bandLastHillBlock = 0
+  bandPokeOk = False
+  bandCustoms = Peek.l(Addr CopList(1) + #MYCOP_CUSTOMS)
+  bandCustomsAway = Peek.l(Addr CopList(2) + #MYCOP_CUSTOMS)
+  If bandCustoms <> 0 AND bandCustomsAway <> 0
+    If Peek.w(bandCustoms + #BAND_POKE_FIRST_1 - 2) = #BPL2PTH AND Peek.w(bandCustomsAway + #BAND_POKE_FIRST_AWAY - 2) = #BPL2PTH
+      If Peek.w(bandCustoms + #BAND_POKE_SECOND_1 - 2) = #BPL6PTH AND Peek.w(bandCustomsAway + #BAND_POKE_SECOND_AWAY - 2) = #BPL6PTH
+        bandPokeOk = True
+        ; With the HUD's strings in list 2 they follow its start string: the same registers as list 1's, #START_SLOTS slots on.
+        If #HUD_OVER_WORLD = 1
+          If Peek.w(bandCustomsAway + #HUD_POKE_FIRST - 2) <> #BPL2PTH OR Peek.w(bandCustomsAway + #HUD_POKE_SECOND - 2) <> #BPL6PTH
+            bandPokeOk = False
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+End Statement
+
+;; A back x as the display's: the look's lead-in added, and a negative result wrapped into the strip (the back is periodic at
+;; #BACK_STRIP_W*#TILE, the strip's first view's width again after it), so the band's pointer and delay see only the non-negative x
+;; they were written for: the hills jumped back for a frame as the x crossed 0 (the 256 look's -32 at the camera's left).
+Function.q BackViewX{backX.q}
+  backX = backX + #SCROLL_BIAS
+  If backX < 0 Then backX = backX + #BACK_STRIP_W*#TILE
+  Function Return backX
+End Function
+
+;; The world, once a frame, right after the vertical blank: the world page and the back's x on the lists to be shown, the
+;; hills' band, and the switch between the HUD and world lists (0 and 1) and the one tall world list (2) when
+;; hudAwayWanted has changed. CreateDisplay takes effect at the next frame, so the list still on show in the frame it is
+;; called must have its pointers current too: on the frame the switch is made both lists are given the page (if only the new list
+;; is, the figure shows corrupt for a frame). Otherwise only the list on show is. List 2 is given
+;; the whole palette as it is switched to; UpdatePalette{} keeps it current while it is on show or wanted.
+;; The tall list's page: with the HUD in the back playfield its header is the HUD's rows (x 0, y 0), and the strings take it to the clouds at
+;; line #HUD_END_LINE; otherwise the back is at the back's x. The one place the list is given a page: ShowWorldLists{} and PresentCoverFrame{}.
+;; So backX is used only when #HUD_OVER_WORLD is 0: with the HUD in the back (1, the game's setting) it is ignored, and the strings set
+;; the back's x from the clouds on. It stays a parameter for the other setting.
+Statement GiveAwayListPage{bitmapIndex.w, frontX.q, backX.q}
+  If #HUD_OVER_WORLD = 1
+    DisplayBitMap 2, bitmapIndex, frontX, #AWAY_TOP, #BACK_BM, #SCROLL_BIAS, 0
+  Else
+    DisplayBitMap 2, bitmapIndex, frontX, #AWAY_TOP, #BACK_BM, backX, #AWAY_TOP
+  EndIf
+End Statement
+
+;; Mario's sprite out of the way on both world lists, below the picture: the one place that parks him (HideMarioSpriteNow{} and
+;; ShowMarioSprite{} both call it, so a change to one cannot leave a cover frame with a sprite showing).
+;; The big swim poses' second pair (channel #SWIM_CHANNEL, the 15 colour look) out of the way on both world lists: when he leaves a swim pose,
+;; and with him whenever he is parked. swimPairShown says whether it may be on show, so it is parked once, not every frame.
+Statement ParkSwimPair{}
+  SHARED swimPairShown
+  If #MARIO_SPRITE_COLOURS <> 15 Then Statement Return
+  For listIndex.w = 1 To 2
+    DisplaySprite listIndex, 0, 0, #SPRITE_HIDDEN_Y, #SWIM_CHANNEL
+  Next
+  swimPairShown = False
+End Statement
+
+Statement ParkMarioSprite{}
+  For listIndex.w = 1 To 2
+    DisplaySprite listIndex, 0, 0, #SPRITE_HIDDEN_Y, 0
+  Next
+  ParkSwimPair{}
+End Statement
+
+;; Mario's sprite out of the way on both world lists, for a cover shown outside the main loop (PresentCoverFrame{}): ShowMarioSprite{}
+;; does this each frame of the loop, but a cover's two frames pass without it, so he stayed on the cover.
+Statement HideMarioSpriteNow{}
+  SHARED coverKind
+  If #MARIO_SPRITE = 0 Then Statement Return
+  ;; The lives cover's small Mario (the 15 colour look) is shown here instead: the cover is presented before the reload behind it, which takes seconds with the loop not running,
+  ;; and ShowMarioSprite{} would put him up only when it ends.
+  If coverKind <> #COVER_LIVES OR #MARIO_SPRITE_COLOURS <> 15
+    ParkMarioSprite{}
+    Statement Return
+  EndIf
+  For listIndex.w = 1 To 2
+    listTop.w = #VIEW_TOP
+    If listIndex = 2 Then listTop = #AWAY_TOP
+    DisplaySprite listIndex, MarioSpriteFrame{#MARIO_F_IDLE, #SPRITE_SMALL_FRAMES}, #COVER_MARIO_X - #SCROLL_BIAS, #COVER_MARIO_Y - listTop, 0
+  Next
+  ParkSwimPair{}
+End Statement
+
+Statement ShowWorldLists{bitmapIndex.w, frontX.q, backX.q, hillX.q}
+  SHARED hudAwayShown, hudAwayWanted, bandLastHillBlock
+  ;; The look's lead-in (#SCROLL_BIAS): the x the game means, as the display's, which is negative at the left in the 256 look. The
+  ;; front takes it as it is (the library handles a negative x, and the band uses only its fine part); the back's bands are wrapped.
+  frontX = frontX + #SCROLL_BIAS
+  backX = BackViewX{backX}
+  hillX = BackViewX{hillX}
+  If hudAwayShown = False OR hudAwayWanted = False
+    DisplayBitMap 1, bitmapIndex, frontX, #VIEW_TOP, #BACK_BM, backX, #VIEW_TOP
+  EndIf
+  If HudAwayActive{} <> False Then GiveAwayListPage{bitmapIndex, frontX, backX}
+  UpdateBand{frontX, backX, hillX}
+  If hudAwayWanted <> hudAwayShown
+    If hudAwayWanted = True
+      DisplayPalette 2, 0
+      CreateDisplay 2
+    Else
+      CreateDisplay 0, 1
+    EndIf
+    hudAwayShown = hudAwayWanted
+    ; A new list may start from its built strings: the next frame pokes the pointers again whatever block it is in.
+    bandLastHillBlock = -1
+  EndIf
+End Statement
+
+;; An overlay page's x on the back bitmap: page 0 at 0, page 1 at #OVERLAY_PAGE_W, each moved right by the look's lead-in (minus
+;; #SCROLL_BIAS, 32 in the 256 look, 0 in the NES's) so the x handed to the display, the page's x plus the bias, is never
+;; negative: page 0 at -32 showed the band's lower half a pixel off (the title's logo split on every other option).
+Function.w OverlayPageX{pageIndex.w}
+  Function Return pageIndex*#OVERLAY_PAGE_W - #SCROLL_BIAS
+End Function
+
+;; The back in front of the front (wanted True) or behind it, for the title overlay. DisplayControls
+;; XORs with the list's current values, so each call flips PF2PRI: called only when the state
+;; changes, and overlayFront remembers which way round it is (the main project's AMIGA_RENDERER note, "The
+;; overlay").
+Statement SetOverlayFront{wanted.w}
+  SHARED overlayFront
+  If wanted = overlayFront Then Statement Return
+  DisplayControls 1, #PLAYFIELD2_PRIORITY, 0, 0
+  overlayFront = wanted
+End Statement
+
+;; Debug mode: the speed preset in the HUD band, "P" and its number (1 to #PARALLAX_PRESETS), on the
+;; top row between WORLD and TIME, then "W"
+;; when the world scrolls in whole pixels or "F" with fractions (Del). Shown at start and when Help
+;; or Del changes them (sparkydave.input.ab3).
+Statement ShowParallaxPreset{}
+  SHARED parallaxPreset, debugMode, wholePixelScroll, debugInvincible, allLevelsOpen
+  If debugMode = False AND allLevelsOpen = False Then Statement Return
+  If debugMode <> False
+    DrawHudGlyph{HudGlyphFor{Asc("P")}, #SAFE_MARGIN + 160, 0}
+    DrawHudGlyph{parallaxPreset + 1, #SAFE_MARGIN + 168, 0}
+    If wholePixelScroll = True
+      DrawHudGlyph{HudGlyphFor{Asc("W")}, #SAFE_MARGIN + 176, 0}
+    Else
+      DrawHudGlyph{HudGlyphFor{Asc("F")}, #SAFE_MARGIN + 176, 0}
+    EndIf
+  EndIf
+  ; Invincibility (F7, debug mode or the LEVELS argument): I on, - off.
+  If debugInvincible <> False
+    DrawHudGlyph{HudGlyphFor{Asc("I")}, #SAFE_MARGIN + 184, 0}
+  Else
+    DrawHudGlyph{#HUD_G_DASH, #SAFE_MARGIN + 184, 0}
+  EndIf
+End Statement
+
+;; END OF PARALLAX (BLITZ MODE)

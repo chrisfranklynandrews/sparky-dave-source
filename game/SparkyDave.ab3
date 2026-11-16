@@ -1,0 +1,346 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 2
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 323
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 17
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 80
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; SparkyDave.ab3 -- Super Mario Bros (NES) on the Amiga 1200 (AGA). The top-level file: it lists every include
+;; in compile order, sets up the display and runs the main loop. Compile inside UAE; see Bthe main project's UILD note.
+
+;; Compile for the 68020 (Amiblitz3.guide, "Directives"). The A1200's 68020 multiplies and divides in hardware;
+;; code compiled for the 68000 makes a library call for every long division. MOD is a library call either way
+;; (the main project's OPTIMISATION note).
+OPTIMIZE 1
+
+WBStartup
+
+;; =======================================================
+;; SHARED DEFINITIONS
+;; =======================================================
+
+XINCLUDE "includes/sparkydave.look.ab3"
+XINCLUDE "includes/sparkydave.constants.ab3"
+XINCLUDE "includes/sparkydave.physics.ab3"
+XINCLUDE "includes/sparkydave.machine.ab3"
+XINCLUDE "includes/sparkydave.startup.ab3"
+XINCLUDE "includes/sparkydave.palettes.data.ab3"
+XINCLUDE "includes/sparkydave.mario-allstars.data.ab3"
+XINCLUDE "includes/sparkydave.allstars-palette.data.ab3"
+XINCLUDE "includes/sparkydave.jukebox-scenes.data.ab3"
+XINCLUDE "includes/sparkydave.globals.ab3"
+XINCLUDE "includes/sparkydave.level.meta.ab3"
+XINCLUDE "includes/sparkydave.areas.table.ab3"
+XINCLUDE "includes/sparkydave.map.ab3"
+XINCLUDE "includes/sparkydave.metatile.classes.ab3"
+XINCLUDE "includes/sparkydave.areaload.ab3"
+XINCLUDE "includes/sparkydave.objects.ab3"
+XINCLUDE "includes/sparkydave.player.ab3"
+XINCLUDE "includes/sparkydave.sound.data.ab3"
+XINCLUDE "includes/sparkydave.sound.ab3"
+XINCLUDE "includes/sparkydave.settings.ab3"
+
+;; =======================================================
+;; SUBSYSTEMS -- AMIGA MODE
+;; =======================================================
+
+XINCLUDE "includes/sparkydave.files.ab3"
+XINCLUDE "includes/sparkydave.init.ab3"
+XINCLUDE "includes/sparkydave.reports.ab3"
+
+; Load the first level's start area from its file into mapBuffer() and metatileBuffer() (sparkydave.areaload.ab3).
+startAreaStatus.w = LoadStartArea{}
+If startAreaStatus <> 0
+  NPrint "Sparky Dave cannot start: the area file ", tableAreaFile$(loadFailedArea), " is not good (code ", startAreaStatus, ")."
+  NPrint "Run python tools/build_assets.py on the PC, and execute sparky-dave:S/stage-data."
+  End
+EndIf
+; Load the jukebox page's scenes into Fast RAM (sparkydave.sound.ab3).
+If LoadJukeboxScenes{} = False
+  NPrint "Sparky Dave cannot start: ", jukeboxScenesBin$, " is missing or short."
+  NPrint "Run python tools/build_assets.py on the PC, and execute sparky-dave:S/stage-data."
+  End
+EndIf
+
+chipRamAfterInit = AvailMem_(2)
+chipRamAfterInitLargest = AvailMem_($20002)
+fastRamAfterInit = AvailMem_(4)
+fastRamAfterInitLargest = AvailMem_($20004)
+; System requesters stay off from here on, so a failed disk write fails quietly instead of opening a requester behind the display.
+SystemRequestersOff{}
+
+;; =======================================================
+;; DISPLAY -- BLITZ MODE
+;; =======================================================
+BLITZ
+; The Copper lists start higher on an NTSC machine (the main project's AMIGA_RENDERER note, "NTSC").
+hudLine.w = #HUD_YPOS_PAL
+If videoIsNtsc = True Then hudLine = #HUD_YPOS_NTSC
+;; When Mario is a hardware sprite (#MARIO_SPRITE, set in the look files) the world lists carry the sprite channels, their type
+;; words get the lores sprite flag, the HUD list and list 2 also load the sprite colours, and every list uses sprite bank 2
+;; (BPLCON4 XOR $33: colour entries 32 to 47). The HUD list needs no sprite channels: Mario never enters the HUD band, because
+;; list 2 takes over when he goes up there.
+spriteCount.w = #COPPER_SPRITES
+hudFlags.l = #COPPER_FLAGS
+worldFlags.l = #WORLD_FLAGS
+paletteColours.w = #COPPER_COLORS
+spriteBank.w = 0
+If #MARIO_SPRITE = 1
+  spriteCount = #SPRITE_CHANNELS
+  hudFlags = #COPPER_FLAGS + #SPRITE_FLAG
+  worldFlags = #WORLD_FLAGS + #SPRITE_FLAG
+  paletteColours = #SPRITE_PALETTE_COLOURS
+  spriteBank = #SPRITE_BANK_XOR
+EndIf
+;; Room for extra Copper instructions in each world list: the world's end string (WorldEndString{}) in both looks, and in the
+;; All-Stars look one sky colour string per colour band (SetAllStarsSky{}, sparkydave.palette.blitz.ab3).
+skyCustoms.w = #FETCH_OFF_SLOTS
+If #LOOK_ALLSTARS = 1 Then skyCustoms = #ALLSTARS_SKY_BANDS*#SKY_STRING_SLOTS + #FETCH_OFF_SLOTS
+InitCopList 0, hudLine, #HUD_H, hudFlags, #COPPER_SPRITES, paletteColours, #COPPER_CUSTOMS
+; List 1 has no colour instructions: the HUD list loads the palette once and the colour registers hold it for the rest of the frame.
+InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, worldFlags, spriteCount, 0, #BAND_CUSTOMS + skyCustoms
+;; List 2 replaces lists 0 and 1 while Mario is above the top of the world: a single world list starting on the HUD's first line
+;; (the main project's AMIGA_RENDERER note, "The HUD goes away"). Unlike list 1 it loads the palette (#COPPER_COLORS), as list 0 does, because
+;; list 0's colour load does not run while list 2 is shown; UpdatePalette{} keeps list 2's colours current. It is not shown until needed.
+InitCopList 2, hudLine, #AWAY_H, worldFlags, spriteCount, paletteColours, #AWAY_CUSTOMS + skyCustoms
+;; List 1 puts the back playfield's colours at entries 16 to 31 (#PLAYFIELD2_OFFSET_16). The HUD list and list 2 set the border blank
+;; bit (#BORDER_BLANK: the library leaves it clear in BPLCON3, so the XOR sets it). List 1 does not, so the gap above it shows pen 0.
+DisplayControls 0, 0, #BORDER_BLANK, spriteBank
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, spriteBank
+;; List 2 can show the HUD in the back playfield on its first lines, in the front playfield's colours (back colour offset 0); its
+;; second string switches the offset to 16 (#PLAYFIELD2_OFFSET_16) from the clouds down. Without the HUD in it the offset is 16 throughout.
+If #HUD_OVER_WORLD = 1
+  DisplayControls 2, 0, #PLAYFIELD2_OFFSET_HUD + #BORDER_BLANK, spriteBank
+Else
+  DisplayControls 2, 0, #PLAYFIELD2_OFFSET_16 + #BORDER_BLANK, spriteBank
+EndIf
+;; The fetch and the display window (the main project's AMIGA_RENDERER note, "The display window"; the numbers are in sparkydave.constants.ab3):
+;; 320 pixels are fetched and the window shows the middle 256, the cartridge's own screen width.
+;; The window's top and bottom go in the high bytes of DIWSTRT and DIWSTOP, so it covers the picture's lines only, hudLine to
+;; hudLine + #AWAY_H (DIWSTOP holds the low 8 bits of its line; the hardware supplies the ninth). The library's own window covers the
+;; whole frame, which would show pen 0 above the HUD and below the world, and with it the HUD list's palette load as a lighter line at
+;; the top in PAL. Outside the window is border, black with #BORDER_BLANK (set above; the world's end string sets it again).
+windowStart.l = #DISPLAY_DIWSTART + hudLine*256
+windowStop.l = #DISPLAY_DIWSTOP + (((hudLine + #AWAY_H) AND 255) - #LIBRARY_DIWSTOP_LINE)*256
+DisplayAdjust 0, #DISPLAY_FETCHWID, #DISPLAY_DDFSTART, #DISPLAY_DDFSTOP, windowStart, windowStop
+DisplayAdjust 1, #DISPLAY_FETCHWID, #DISPLAY_DDFSTART, #DISPLAY_DDFSTOP, windowStart, windowStop
+DisplayAdjust 2, #DISPLAY_FETCHWID, #DISPLAY_DDFSTART, #DISPLAY_DDFSTOP, windowStart, windowStop
+CreateDisplay 0, 1
+
+XINCLUDE "includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "includes/sparkydave.sound.blitz.ab3"
+XINCLUDE "includes/sparkydave.timing-marks.blitz.ab3"
+XINCLUDE "includes/sparkydave.map.blitz.ab3"
+XINCLUDE "includes/sparkydave.object-system.blitz.ab3"
+XINCLUDE "includes/sparkydave.debris.blitz.ab3"
+XINCLUDE "includes/sparkydave.floaters.blitz.ab3"
+XINCLUDE "includes/sparkydave.collision.blitz.ab3"
+XINCLUDE "includes/sparkydave.player-state.blitz.ab3"
+XINCLUDE "includes/sparkydave.life.blitz.ab3"
+XINCLUDE "includes/sparkydave.enemies.blitz.ab3"
+XINCLUDE "includes/sparkydave.fireballs.blitz.ab3"
+XINCLUDE "includes/sparkydave.levelend.blitz.ab3"
+XINCLUDE "includes/sparkydave.pipes.blitz.ab3"
+XINCLUDE "includes/sparkydave.object-system-runtime.blitz.ab3"
+XINCLUDE "includes/sparkydave.player.blitz.ab3"
+XINCLUDE "includes/sparkydave.hud.blitz.ab3"
+XINCLUDE "includes/sparkydave.frametime.blitz.ab3"
+XINCLUDE "includes/sparkydave.palette.blitz.ab3"
+XINCLUDE "includes/sparkydave.parallax.blitz.ab3"
+XINCLUDE "includes/sparkydave.jukebox.blitz.ab3"
+XINCLUDE "includes/sparkydave.shapes.blitz.ab3"
+XINCLUDE "includes/sparkydave.tileset.blitz.ab3"
+XINCLUDE "includes/sparkydave.cover.blitz.ab3"
+XINCLUDE "includes/sparkydave.mario-sprite.blitz.ab3"
+XINCLUDE "includes/sparkydave.timing.ab3"
+XINCLUDE "includes/sparkydave.memory.ab3"
+XINCLUDE "includes/sparkydave.init.blitz.ab3"
+XINCLUDE "includes/sparkydave.levels.blitz.ab3"
+XINCLUDE "includes/sparkydave.restart.blitz.ab3"
+XINCLUDE "includes/sparkydave.areas.blitz.ab3"
+XINCLUDE "includes/sparkydave.draw.ab3"
+XINCLUDE "includes/sparkydave.input.ab3"
+
+;; =======================================================
+;; MAIN LOOP
+;; =======================================================
+
+;; The first screen, before the first frame: the title over the start of 1-1, or the lives screen. All the loading above
+;; happened behind black.
+If #SHOW_TITLE = 1
+  ShowTitle{}
+Else
+  ShowCover{#COVER_LIVES}
+EndIf
+
+While quitFlag = False
+
+    ReadControls{}
+    HandleLifeEvent{}
+    HandleAreaEvent{}
+    FrameTimeBeforeTicks{}
+    RunSimTicks{}
+    FrameTimeAfterTicks{}
+    RunSoundTicks{}
+    FrameTimeAfterSim{}
+    SampleChipRam{}
+    BuildRenderView{}
+    ; Asked before the palette is written, so list 2's colours stay current while it is shown or about to be.
+    hudAwayWanted = HudAwayNeeded{}
+    DrawFrame{}
+    FrameTimeAfterWorld{}
+    ; The HUD has its own bitmap and Copper list, so it is drawn outside DrawFrame{}.
+    UpdateHud{}
+    ; Redraw the HUD's copy in the back playfield (shown by list 2) when the HUD has changed and Mario is up there.
+    UpdateHudMirror{}
+    FrameTimeAfterHud{}
+    ; Draw any change to the overlay (the title, the options, the pause menu) on the page not being shown.
+    UpdateOverlayPages{}
+    ; After the draw, so the beam is past the HUD list's palette load at line 44.
+    UpdatePalette{}
+    FrameTimeAfterDraw{}
+
+    displayBitmap = drawBitmap
+
+    VWait
+    ; Start timing the display stretch (debug mode only; sparkydave.frametime.blitz.ab3).
+    FrameTimeAfterVWait{}
+    ;; Choose what is shown. It is set here, with the picture, so the order, the picture and the palette all change on one frame:
+    ;;   - the title: the world with the back playfield in front of it, at the page shown, both bands at its x;
+    ;;   - a cover while one is up (the world reloads behind it; the redefine screen and the attract mode's black cover use it too);
+    ;;   - otherwise the world, with the back playfield behind it.
+    ;; The back playfield is always given. During a cover it has the backdrop's colours (UpdatePalette{}), so it never shows through pen 0.
+    ;; ShowWorldLists{} gives the page to the list or lists on show, places the hills' band (sparkydave.parallax.blitz.ab3) from the same
+    ;; front x, and switches to or from list 2 when HudAwayNeeded{} changes. List 2 is never wanted over a cover or an overlay.
+    If OverlayOverWorld{} = True
+      ShowWorldLists{displayBitmap, scrollX, overlayBackX, overlayBackX}
+      SetOverlayFront{True}
+    Else
+      If OverlayOverCover{} = True
+        ;; The options or the pause menu: the overlay in front of the black cover. The cover is plain black, so its x does not matter:
+        ;; -#SCROLL_BIAS keeps the front x at 0, and !COVER_PHASE_X matches the page's sub-pixel phase (see the macro).
+        ShowWorldLists{#COVER_BM, -#SCROLL_BIAS + !COVER_PHASE_X, overlayBackX, overlayBackX}
+        SetOverlayFront{True}
+      Else
+        SetOverlayFront{False}
+        If coverKind <> #COVER_NONE
+          ShowWorldLists{#COVER_BM, 0, 0, 0}
+        Else
+          ShowWorldLists{displayBitmap, scrollX, backScrollX, hillScrollX}
+        EndIf
+      EndIf
+    EndIf
+    ; Show the All-Stars sky's colour strings if the palette update changed them, so the sky changes on the same frame as the picture.
+    ShowAllStarsSky{}
+    ; Move Mario's sprite (#MARIO_SPRITE) on the same frame as the picture, using what DrawPlayer{} decided.
+    ShowMarioSprite{}
+    FrameTimeAfterDisplay{}
+    ;; The debug watch for stray words in the world bitmaps (F10, sparkydave.map.blitz.ab3); it does nothing unless switched on.
+    ;; It runs before FrameTimeStart{}, so its time is not counted as part of the frame.
+    WatchWorldBitmaps{}
+    FrameTimeStart{}
+    ;; Draw the jukebox page straight after the vertical blank, on the page not shown, while the blitter has the bus to itself until
+    ;; the display starts. Drawn mid-frame, after the world, it takes about three times as long.
+    If overlayScreenWanted = #SCREEN_JUKEBOX Then UpdateJukeboxPage{}
+
+    drawBitmap = #PLAY_BM_A + #PLAY_BM_B - displayBitmap
+    drawBuffer = #BOB_BUF_A + #BOB_BUF_B - displayBitmap
+
+Wend
+
+; Stop the audio before leaving, and sort the slow-frame log for the report.
+SoundStop{}
+If debugMode <> False Then SortSlowLog{}
+
+;; =======================================================
+;; SHUTDOWN
+;; =======================================================
+AMIGA
+;; Write any settings not yet saved. Keys are written as they are chosen and the controls choice when the game starts, so this only
+;; catches a choice changed on the title screen before leaving with Esc.
+If settingsDirty <> False
+  If WriteSettings{} <> False Then settingsDirty = False
+EndIf
+; The debug reports, written in debug mode only (sparkydave.reports.ab3).
+WriteDebugReports{}
+If levelLoadFailCode <> 0
+  NPrint "Sparky Dave stopped: the area file ", tableAreaFile$(loadFailedArea), " could not be read (code ", levelLoadFailCode, ")."
+  NPrint "The data drawer must sit next to the program, whole, as it was in the archive."
+EndIf
+; Restore the Shell's (or Workbench's) requesters.
+SystemRequestersBack{}
+; Give the All-Stars look's tile set memory back to the system (sparkydave.tileset.blitz.ab3).
+FreeTileSetCache{}
+End

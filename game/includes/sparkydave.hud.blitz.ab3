@@ -1,0 +1,302 @@
+;; =======================================================
+;; HUD (BLITZ MODE)
+;; =======================================================
+
+;; The HUD is a fixed band: its own bitmap (#HUD_BAND_BM) on its own CopList, so
+;; it never scrolls. See the main project's HUD note. Glyphs come from hud-objects.iff, 44
+;; cells of 8x8, cut once into shapes. Each glyph is a Boxf clear of its 8x8 cell
+;; followed by a Blit. NOT Block: Block only works for shapes 16 wide at x of 0,
+;; 16, 32... and silently snaps an 8 wide glyph onto its neighbour (the main project's BLITZ_CONVENTIONS note).
+;;
+;; Layout, two rows of 8x8 in the 384x16 band (320 shown):
+;;   y 0  MARIO at 0    WORLD at 104    TIME at 192
+;;   y 8  score at 0 (6 digits), coin icon at 48, x at 56, coins at 64 (2 digits),
+;;        world at 104 (digit, dash, digit), time at 192 (3 digits)
+;; The values are game globals. This file only reads them.
+
+; Cut every glyph from the sheet into its shape slot. Once, at start.
+Statement CutHudGlyphs{}
+  SHARED hudGlyph
+  Use BitMap #HUD_BM
+  For hudGlyph = 0 To #HUD_GLYPHS - 1
+    GetaShape #HUD_SHAPE_BASE + hudGlyph, hudGlyph*8, 0, 8, 8
+  Next
+End Statement
+
+;; Whether the tall list (the HUD away) is wanted this frame or still on show: the one rule, for the HUD's copy in the back playfield
+;; (DrawGlyphInto{}, UpdateHudMirror{}), list 2's palette (UpdatePalette{}) and its bitmaps and strings (ShowWorldLists{}).
+Function.w HudAwayActive{}
+  SHARED hudAwayWanted, hudAwayShown
+  If hudAwayWanted <> False Then Function Return True
+  If hudAwayShown <> False Then Function Return True
+  Function Return False
+End Function
+
+; One glyph into any bitmap (the status bar band, the cover), over a cleared 8x8.
+Statement DrawGlyphInto{targetBitmap.w, glyphIndex.w, glyphX.w, glyphY.w}
+  SHARED hudMirrorStale, glyphOverBackground
+  If targetBitmap = #HUD_BAND_BM
+    ;; While the tall list is wanted or on show and the HUD's copy in the back bitmap is current, the glyph goes into the copy too, at
+    ;; the same place (an 8x8 clear and a blit, a line or two), so the whole copy (about 31 lines, possibly on a heavy frame) is made
+    ;; only when the list first comes up. Otherwise the copy is stale (UpdateHudMirror{}).
+    ;; A glyph past #HUD_STAMP_W is left out here as the whole copy leaves it out.
+    If #HUD_OVER_WORLD = 1 AND HudAwayActive{} <> False AND hudMirrorStale = False AND glyphX + 8 <= #HUD_STAMP_W
+      Use BitMap #BACK_BM
+      Boxf glyphX, glyphY, glyphX + 7, glyphY + 7, 0
+      Blit #HUD_SHAPE_BASE + glyphIndex, glyphX, glyphY
+    Else
+      hudMirrorStale = True
+    EndIf
+  EndIf
+  Use BitMap targetBitmap
+  ; Over what is there (the title's panel) while glyphOverBackground is set: no clear first, the glyph's clear pixels show it.
+  If glyphOverBackground = False Then Boxf glyphX, glyphY, glyphX + 7, glyphY + 7, 0
+  Blit #HUD_SHAPE_BASE + glyphIndex, glyphX, glyphY
+End Statement
+
+Statement DrawHudGlyph{glyphIndex.w, glyphX.w, glyphY.w}
+  DrawGlyphInto{#HUD_BAND_BM, glyphIndex, glyphX, glyphY}
+End Statement
+
+;; Whether the HUD's copy in the back bitmap must be made: it is stale and the tall list is wanted or on show. (The copy the tall list
+;; shows in its first lines costs nothing a frame; this is the one copy, when the HUD changed.)
+Function.w HudMirrorNeeded{stale.w, active.w}
+  If active = False Then Function Return False
+  If stale = False Then Function Return False
+  Function Return True
+End Function
+
+;; The HUD band's bitmap copied into the back bitmap's rows 0 to 15, #HUD_STAMP_W pixels of it, for the tall list's back playfield to
+;; show in its first lines (ShowWorldLists{}, the main project's AMIGA_RENDERER note "The HUD goes away"). Once a frame at most, after UpdateHud{}
+;; (the HUD changed) while the list is wanted or on show; also the first time after the back was stamped afresh. The band is the
+;; frame's own, not a frame behind. #HUD_OVER_WORLD 0 turns it off. Debug mode times it (the blitter finished).
+Statement UpdateHudMirror{}
+  SHARED hudMirrorStale
+  SHARED debugMode, hudStampTimed, hudStampLines, hudStampWorst
+  If #HUD_OVER_WORLD = 0 Then Statement Return
+  If HudMirrorNeeded{hudMirrorStale, HudAwayActive{}} = False Then Statement Return
+  ;; Leaves #BACK_BM the current bitmap, as UpdateHud{} leaves the HUD band: every drawing routine sets its own (DrawFrame{} starts with
+  ;; Use BitMap drawBitmap).
+  Use BitMap #BACK_BM
+  If debugMode <> False Then mirrorStart.l = RasterLine{}
+  Scroll 0, 0, #HUD_STAMP_W, #HUD_H, 0, 0, #HUD_BAND_BM
+  If debugMode <> False
+    ; The copy and the blitter finishing it (BBUSY, DMACONR bit 14): the debug build waits here to be able to say what it cost.
+    While (Peek.w($dff002) AND $4000) <> 0
+    Wend
+    mirrorLines.l = RasterLine{} - mirrorStart
+    If mirrorLines < 0 Then mirrorLines = mirrorLines + FrameLines{}
+    hudStampTimed = hudStampTimed + 1
+    hudStampLines = hudStampLines + mirrorLines
+    If mirrorLines > hudStampWorst Then hudStampWorst = mirrorLines
+  EndIf
+  hudMirrorStale = False
+End Statement
+
+;; The HUD character set: 0-9, A-Z, dash, lowercase x. -1 for anything else, which
+;; is skipped (a space). The one place a character becomes a glyph, for the HUD band
+;; and for the game-over text.
+Function.w HudGlyphFor{code.w}
+  If code >= 48
+    If code <= 57 Then Function Return code - 48
+  EndIf
+  If code >= 65
+    If code <= 90 Then Function Return code - 55
+  EndIf
+  If code = 45 Then Function Return #HUD_G_DASH
+  If code = 33 Then Function Return #HUD_G_EXCLAIM
+  If code = 120 Then Function Return #HUD_G_X
+  Function Return -1
+End Function
+
+; Text in the HUD glyphs into any bitmap.
+Statement DrawTextInto{targetBitmap.w, glyphText$, textX.w, textY.w}
+  For charIndex.w = 1 To Len(glyphText$)
+    glyphIndex.w = HudGlyphFor{Asc(Mid$(glyphText$, charIndex, 1))}
+    If glyphIndex >= 0 Then DrawGlyphInto{targetBitmap, glyphIndex, textX + (charIndex - 1)*8, textY}
+  Next
+End Statement
+
+;; Text set on #TEXT_BACKING_PEN, a bar with a one pixel margin all round, as the course clear's lines are (CutCourseClearText{}); with
+;; the pen 0 (the NES look's) it is plain DrawTextInto{}. The letters go over the bar (glyphOverBackground), not on a cleared cell.
+Statement DrawTextOnBar{targetBitmap.w, glyphText$, textX.w, textY.w}
+  SHARED glyphOverBackground
+  If #TEXT_BACKING_PEN = 0
+    DrawTextInto{targetBitmap, glyphText$, textX, textY}
+    Statement Return
+  EndIf
+  Use BitMap targetBitmap
+  Boxf textX - 1, textY - 1, textX + Len(glyphText$)*8, textY + 8, #TEXT_BACKING_PEN
+  glyphOverBackground = True
+  DrawTextInto{targetBitmap, glyphText$, textX, textY}
+  glyphOverBackground = False
+End Statement
+
+;; Text in the HUD glyphs centred across a view whose left edge is at originX (a space is a glyph's
+;; width, so the width is eight pixels a character): 0 for the cover, a page's x for the title overlay.
+Statement DrawTextCentredAt{targetBitmap.w, glyphText$, originX.w, textY.w}
+  DrawTextInto{targetBitmap, glyphText$, originX + (#VIEW_W - Len(glyphText$)*8)/2, textY}
+End Statement
+
+; Text centred across the view.
+Statement DrawTextCentred{targetBitmap.w, glyphText$, textY.w}
+  DrawTextCentredAt{targetBitmap, glyphText$, 0, textY}
+End Statement
+
+Statement DrawHudText{hudText$, textX.w, textY.w}
+  DrawTextInto{#HUD_BAND_BM, hudText$, textX, textY}
+End Statement
+
+; A zero-padded number into any bitmap, most significant digit first.
+Statement DrawNumberInto{targetBitmap.w, numberValue.l, digitCount.w, numberX.w, numberY.w}
+  remaining.l = numberValue
+  For digitIndex.w = digitCount - 1 To 0 Step -1
+    digit.w = remaining MOD 10
+    remaining = remaining/10
+    DrawGlyphInto{targetBitmap, digit, numberX + digitIndex*8, numberY}
+  Next
+End Statement
+
+;; A zero-padded number in the HUD band, drawing only the digits that differ from what its positions
+;; (from firstSlot, #HUD_SLOT_*) show. Each changed digit is a clear and a blit (the main project's OPTIMISATION note).
+Statement DrawHudNumber{numberValue.l, digitCount.w, numberX.w, numberY.w, firstSlot.w}
+  SHARED hudDigitShown()
+  remaining.l = numberValue
+  For digitIndex.w = digitCount - 1 To 0 Step -1
+    ; Not MOD 10: MOD is a library routine of about 2.3 lines, a division 0.08 (the main project's OPTIMISATION note, 8).
+    quotient.l = remaining/10
+    digit.w = remaining - quotient*10
+    remaining = quotient
+    If hudDigitShown(firstSlot + digitIndex) <> digit
+      DrawHudGlyph{digit, numberX + digitIndex*8, numberY}
+      hudDigitShown(firstSlot + digitIndex) = digit
+    EndIf
+  Next
+End Statement
+
+; The parts that never change, drawn once. The Cls clears the digits too, so none is shown.
+Statement DrawHudStatic{}
+  SHARED hudDigitShown(), hudMirrorStale
+  Use BitMap #HUD_BAND_BM
+  Cls 0
+  ; The Cls took the whole band: its copy in the back bitmap is stale (the glyphs drawn next mark it too).
+  hudMirrorStale = True
+  For hudSlot.w = 0 To #HUD_DIGIT_SLOTS - 1
+    hudDigitShown(hudSlot) = -1
+  Next
+  DrawHudText{"MARIO", #SAFE_MARGIN, 0}
+  DrawHudText{"WORLD", #SAFE_MARGIN + 104, 0}
+  DrawHudText{"TIME", #HUD_CLOCK_X, 0}
+  DrawHudGlyph{#HUD_G_COIN, #SAFE_MARGIN + 48, 8}
+  DrawHudGlyph{#HUD_G_X, #SAFE_MARGIN + 56, 8}
+  DrawHudGlyph{#HUD_G_DASH, #SAFE_MARGIN + 112, 8}
+End Statement
+
+;; The changing parts, redrawn only when the value changed. Cheap enough to call
+;; every frame.
+Statement UpdateHud{}
+  SHARED hudScore, hudCoins, hudWorld, hudLevel, hudTime
+  SHARED hudDrawnScore, hudDrawnCoins, hudDrawnWorld, hudDrawnLevel, hudDrawnTime
+  If hudScore <> hudDrawnScore
+    DrawHudNumber{hudScore, 6, #SAFE_MARGIN, 8, #HUD_SLOT_SCORE}
+    hudDrawnScore = hudScore
+  EndIf
+  If hudCoins <> hudDrawnCoins
+    DrawHudNumber{hudCoins, 2, #SAFE_MARGIN + 64, 8, #HUD_SLOT_COINS}
+    hudDrawnCoins = hudCoins
+  EndIf
+  If hudWorld <> hudDrawnWorld
+    DrawHudGlyph{hudWorld, #SAFE_MARGIN + 104, 8}
+    hudDrawnWorld = hudWorld
+  EndIf
+  If hudLevel <> hudDrawnLevel
+    DrawHudGlyph{hudLevel, #SAFE_MARGIN + 120, 8}
+    hudDrawnLevel = hudLevel
+  EndIf
+  If hudTime <> hudDrawnTime
+    DrawHudNumber{hudTime, 3, #HUD_CLOCK_X, 8, #HUD_SLOT_TIME}
+    hudDrawnTime = hudTime
+  EndIf
+End Statement
+
+;; One HUD time unit is #HUD_TIME_TICKS sim ticks. Called once per sim tick from
+;; RunSimTicks{}. The clock stops on the flagpole and while he is dying. At zero it
+;; waits one more unit and then kills him, like the cartridge, which checks the
+;; digits only when the timer control expires (smbdis 6452-6471); if he is not in
+;; the normal state at that moment it tries again next tick.
+Statement TickHudTimer{}
+  SHARED hudTime, hudTimeTicks, playerState, flagState, timeUpDeath, worldFreezeTicks, castleEndTask
+  If playerState = #PLAYER_ST_POLE Then Statement Return
+  If playerState = #PLAYER_ST_DYING Then Statement Return
+  ; At the axe the clock stops (victory mode runs no game timer).
+  If playerState = #PLAYER_ST_AXE OR castleEndTask <> 0 Then Statement Return
+  ; The game clock is one of the timers the master timer halts.
+  If worldFreezeTicks > 0 Then Statement Return
+  If flagState <> #FLAG_ST_IDLE Then Statement Return
+  hudTimeTicks = hudTimeTicks + 1
+  If hudTimeTicks < #HUD_TIME_TICKS Then Statement Return
+  If hudTime = 0
+    If playerState = #PLAYER_ST_FREE
+      hudTimeTicks = 0
+      timeUpDeath = True
+      StartPlayerDeath{#DEATH_HOP}
+    Else
+      hudTimeTicks = #HUD_TIME_TICKS
+    EndIf
+  Else
+    hudTimeTicks = 0
+    ;; At 100 the music speeds up (smbdis 6458: checked as the timer ticks, before it
+    ;; goes to 99).
+    If hudTime = 100 Then SoundEventMusic{#MUSIC_TIME_RUNNING_OUT}
+    hudTime = hudTime - 1
+  EndIf
+End Statement
+
+; Back to a new game's values. Called from the F1 level reset.
+Statement ResetHudValues{}
+  SHARED hudScore, hudCoins, hudTime, hudTimeTicks, hudTimeStart
+  hudScore = 0
+  hudCoins = 0
+  hudTime = hudTimeStart
+  hudTimeTicks = 0
+End Statement
+
+;; How to start: the title's start line (and the end screen's). Return, or either joystick button (ScreenStartDown{}), whatever
+;; the controls chosen, as both are always read.
+Function.s StartPromptText{}
+  Function Return "PRESS FIRE OR RETURN"
+End Function
+
+;; The course-clear screen's two lines, each composed once into one shape, so the screen costs two
+;; blits a frame (DrawCourseClear{}, sparkydave.draw.ab3). Each is the text and a one pixel margin all round (the bar). Composed in the cover bitmap's rows 0 to
+;; 9, which the world list never shows (it starts at row #VIEW_TOP), cut with their cookie (pen 0
+;; clear, or #TEXT_BACKING_PEN as a bar behind the letters under the All-Stars look), then cleared. After CutHudGlyphs{}, whose glyphs it
+;; uses; once, at start. The second line is the same for every controls choice: any of fire, jump, run or Return goes on
+;; (CourseClearContinueDown{}). courseClearLineX() is each line's x in the view, centred.
+Statement CutCourseClearText{}
+  SHARED courseClearLineX()
+  For lineIndex.w = 0 To 1
+    lineText$ = "COURSE CLEAR"
+    If lineIndex = 1 Then lineText$ = "PRESS FIRE TO CONTINUE"
+    courseClearLineX(lineIndex) = (#VIEW_W - Len(lineText$)*8)/2
+    Use BitMap #COVER_BM
+    Boxf 0, 0, Len(lineText$)*8 + 1, 9, #TEXT_BACKING_PEN
+    For charIndex.w = 1 To Len(lineText$)
+      glyphIndex.w = HudGlyphFor{Asc(Mid$(lineText$, charIndex, 1))}
+      If glyphIndex >= 0 Then Blit #HUD_SHAPE_BASE + glyphIndex, (charIndex - 1)*8 + 1, 1
+    Next
+    GetaShape #COURSE_TEXT_SHAPE + lineIndex, 0, 0, Len(lineText$)*8 + 2, 10
+    Boxf 0, 0, Len(lineText$)*8 + 1, 9, 0
+  Next
+End Statement
+
+; Called once from init.blitz, after the atlas palette and the sheet are loaded.
+Statement InitHud{}
+  BlitMode CookieMode
+  CutHudGlyphs{}
+  CutCourseClearText{}
+  DrawHudStatic{}
+  UpdateHud{}
+End Statement
+
+;; END OF HUD (BLITZ MODE)

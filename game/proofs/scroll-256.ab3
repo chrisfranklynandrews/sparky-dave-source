@@ -1,0 +1,377 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+
+;; =======================================================
+;; SCROLL-256: THE 256 WIDE DISPLAY ACROSS 64 PIXEL BLOCKS
+;; =======================================================
+;; The All-Stars look (a 256 wide display: fetchwid -8, ddfstrt +16, ddfstop -16, diwstrt +31, diwstop -33) played in the game showed
+;; two faults the earlier proofs could not: the HUD and the menus are cut off at the left (the first part of the bitmap is not on
+;; screen), and the scroll jumps about as the camera moves. proofs/sprite-attach-dual.ab3 scrolled 0 to 60 pixels only, never across a
+;; 64 pixel block (where the library moves the plane pointers on and the fine delay starts again), and the fetch mode 3 block is
+;; the unit of both the fetch and the delay.
+;;
+;; This shows it with no sprites and nothing else: the game's two lists (a 16 line HUD list of 4 planes over a dual playfield world list,
+;; fetch mode 3, a world 704 wide), a ruler on each, scrolling across 0 to 384 pixels. The back playfield is a light green sky all
+;; across, so the window shows as green (and the HUD band as brown) against the blue border: what is blue inside the window's own
+;; edges is a part with no data.
+;;
+;; What the first two runs showed (2026-10-29): the fetch's start (the DDF start s) takes effect in whole 64 pixel blocks, not 16 pixel
+;; steps. s 0 to 24 all put the data's start 32 pixels LEFT of the centred window (window 31), so the first 32 pixels of the bitmap are
+;; cut; s 32 and above put it 32 pixels right of it (32 blank). A centred 256 window with bitmap x 0 at its left is not reachable by the
+;; DDF start. Moving the window to follow the data works (displays 2 and 3 of run 2) but is not centred. s 40 and 48 jumped while
+;; scrolling (the library's smooth scroll takes 8 off the start, and 40 - 8 and 48 - 8 stay in the upper block).
+;;
+;; Run 4 (fetch one block earlier: width 0, stop -16, start -8 to -24, window 31 and -33): scrolls properly, centred, no blue and no
+;; jumps. The window's left then shows bitmap pixel X + 31 or 32 for a display x of X, so a centred 256 view needs a 32 pixel lead-in.
+;;
+;; This run asks whether the lead-in can be had WITHOUT a margin in the bitmaps: the bitmaps here start at world x 0 (margin 0), and
+;; the display x handed to DisplayBitMap is the scroll plus a BIAS of -32 (so -32 at the left, a negative x). The window never shows
+;; the bitmap's pixels left of x 0 (they are the 32 the window cuts), so if DisplayBitMap takes a negative x the bias belongs at the
+;; display only. Keys 1 to 4 (all fetch width 0, stop -16, window 31 and -33):
+;;   1  start -16, bias -32       2  start -16, bias -31       3  start -16, bias -33       4  start -8, bias -32
+;; At scroll 0 key 1 should have the first pole and red tick at the window's left edge; 2 and 3 are one pixel either side to
+;; show which is exact. If a negative x breaks (junk, a wrong picture, a wrap), the fallback is the margin of run 4.
+;;
+;; The rulers: the HUD band has a tick every 16 pixels of the world, its height going 1 to 8 and starting again every 128 pixels, with
+;; a long red tick, 12 high, every 64; the world has a pole every 64 pixels with one box on it for the first block, two for the second
+;; and so on, and a ruler of 16 pixel columns in two greens along the ground. All start at bitmap x 0.
+;;
+;; Keys: Right and Left scroll while held, and Space starts and stops a scroll back and forth across the whole width, at the speed
+;; keys 6 to 8 set (1, 2 or 3 pixels a frame; 1 at the start); 1 to 5 the displays; Esc quits and writes scroll-256-results.txt (the
+;; last display, scroll and speed).
+;;
+;; Run 7 (2026-10-30, from the video game/bugs/JumpyTrimmed.mp4): the jump is ONE frame, at the camera's x 32 (the display's front x crossing 0, the
+;; first 64 pixel block), when everything BELOW list line 80 (#BAND_LINE, where the game's copper strings start) is drawn one block (64 px)
+;; to the right and the part above is right. This adds the game's string alone: at line 79 BPLCON1 is written (CustomString, every frame)
+;; with the same value the header already has (the front's and the back's fine delay, worked out as the game's UpdateBand{} does). Key 9
+;; the string on (the start), key 0 off. Display 1, speed 2 or 3, Space: does the picture jump as the scroll crosses 32 (the display x 0),
+;; with the string on and not with it off? R puts the scroll back to 0.
+;; Result: no jump here (the proof's x is whole). The cause was in the game's band: Int(frontX*4) does not floor as the library does, so with a
+;; fractional front x the band's BPLCON1 and the header disagreed by 64 pixels for one frame at a block crossing; fixed with QuarterPixels{}
+;; in sparkydave.parallax.blitz.ab3 (the main project's journal notes).
+;;
+;; Run 6 (2026-10-30): the game shows a bigger-than-a-pixel jump of the foreground at the first scroll step of a level, only when the
+;; level is started running (a camera step of 2 or more pixels a frame, from the display x -32), in 1-1 as well as 1-2. Every earlier run
+;; here scrolled 1 pixel a frame. Display 1, speed 2 or 3, Space (or hold Right) from scroll 0: does the picture jump in the first
+;; 64 pixels (about the first 20 frames)? At speed 1? How far does it jump, and at what scroll (the poles are 64 apart)?
+;;
+;; What to look at and report, for each display
+;; 1. At scroll 0 (hold Left until it stops): is the one box pole (and the first red tick) at the window's left edge, in from it (how far:
+;;    about how many 16 pixel ticks), or cut off? Is the green and brown area full width (16 ground columns), or short (how many)?
+;; 2. Hold Right across 64, 128 and 192 (the poles): smooth, or a jump (how much, and back)? The HUD, the world and the green sky behind.
+;;    Any blue at the window's left while scrolled (as the last run's second picture)?
+;; 3. The right edge: junk or wrapping, or the picture short of the window's edge?
+;; 4. Where does the whole picture sit on the screen: centred (the same blue each side), or to one side?
+
+WBStartup
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_SPACE = $40
+#RAW_KEY_R     = $13
+#BPLCON1       = $102
+#BAND_LINE     = 80
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#WORLD_W    = 704
+#WORLD_H    = 256
+#HUD_W      = 704
+#SCROLL_MAX = 320
+#MARGIN     = 0
+
+#HUD_FLAGS            = $13014
+#WORLD_FLAGS          = $13038
+#PLAYFIELD2_OFFSET_16 = $1c00
+#DISPLAYS             = 4
+
+#ADJUST_FETCHWID = -8
+
+#BM_FRONT = 0
+#BM_BACK  = 1
+#BM_HUD   = 2
+
+quitFlag.w = False
+display.w = 0
+Dim displayStart.w(#DISPLAYS - 1)
+Dim displayDiwStart.w(#DISPLAYS - 1)
+Dim displayDiwStop.w(#DISPLAYS - 1)
+Dim displayFetchWid.w(#DISPLAYS - 1)
+Dim displayStop.w(#DISPLAYS - 1)
+Dim displayShift.w(#DISPLAYS - 1)
+displayStart(0) = -16
+displayStart(1) = -16
+displayStart(2) = -16
+displayStart(3) = -8
+For displayIndex.w = 0 To #DISPLAYS - 1
+  displayDiwStart(displayIndex) = 31
+  displayDiwStop(displayIndex) = -33
+  displayFetchWid(displayIndex) = 0
+  displayStop(displayIndex) = -16
+  displayShift(displayIndex) = 0
+Next
+displayShift(0) = -32
+displayShift(1) = -31
+displayShift(2) = -33
+displayShift(3) = -32
+scrollX.l = 0
+autoScroll.w = False
+autoDir.w = 1
+scrollSpeed.w = 1
+bandOn.w = True
+keySpace.w = False
+frameCount.l = 0
+
+BitMap #BM_FRONT, #WORLD_W, #WORLD_H, 4
+BitMap #BM_BACK, #WORLD_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+
+InitPalette 0, 32
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 40, 40, 40
+For penIndex.w = 16 To 31
+  AGAPalRGB 0, penIndex, 20 + (penIndex - 16)*6, 100 + (penIndex - 16)*6, 40 + (penIndex - 16)*3
+Next
+
+BLITZ
+
+Statement BuildLists{}
+  SHARED displayStart(), displayDiwStart(), displayDiwStop(), displayFetchWid(), displayStop()
+  For displayIndex.w = 0 To #DISPLAYS - 1
+    hudList.w = displayIndex*2
+    worldList.w = hudList + 1
+    InitCopList hudList, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, 32, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 8, 0, 4
+    DisplayControls worldList, 0, #PLAYFIELD2_OFFSET_16, 0
+    ddfStart.w = displayStart(displayIndex)
+    DisplayAdjust hudList, displayFetchWid(displayIndex), ddfStart, displayStop(displayIndex), displayDiwStart(displayIndex), displayDiwStop(displayIndex)
+    DisplayAdjust worldList, displayFetchWid(displayIndex), ddfStart, displayStop(displayIndex), displayDiwStart(displayIndex), displayDiwStop(displayIndex)
+  Next
+End Statement
+
+; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels (as sparkydave.parallax.blitz.ab3).
+Function.l ScrollPart{delay.l}
+  Function Return(delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+Statement ShowDisplay{displayIndex.w}
+  hudList.w = displayIndex*2
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, #BM_HUD, 0, 0
+  DisplayBitMap hudList + 1, #BM_FRONT, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+End Statement
+
+;; Poles with boxes every 64 pixels (one box for block 1, two for block 2...), 16 pixel ground columns in two greens.
+Statement DrawFront{}
+  Use BitMap #BM_FRONT
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    penIndex.w = 6
+    If columnIndex MOD 2 = 1 Then penIndex = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, penIndex
+  Next
+  For blockIndex.w = 0 To (#WORLD_W - #MARGIN)/64 - 1
+    poleX.w = #MARGIN + blockIndex*64
+    Boxf poleX, 40, poleX + 1, 207, 11
+    For boxIndex.w = 0 To blockIndex
+      Boxf poleX + 4, 48 + boxIndex*12, poleX + 11, 55 + boxIndex*12, 8
+    Next
+  Next
+End Statement
+
+;; Hills on the back playfield, every circle inside the bitmap (Blitz's Circlef is not safe to clip).
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 15
+  For hillIndex.w = 0 To 9
+    centreX.w = #MARGIN + 56 + hillIndex*54
+    Circlef centreX, 200, 50, 2
+    Circlef centreX, 200, 38, 3
+    Circlef centreX, 200, 22, 4
+  Next
+End Statement
+
+;; Ticks every 16 pixels of staircase height 1 to 8, repeating every 128; a long red one (12) every 64.
+Statement DrawHud{}
+  Use BitMap #BM_HUD
+  Cls 1
+  For tickIndex.w = 0 To (#HUD_W - #MARGIN)/16 - 1
+    tickHeight.w = 1 + (tickIndex MOD 8)
+    tickX.w = #MARGIN + tickIndex*16
+    Boxf tickX, 0, tickX, tickHeight - 1, 8
+    If tickIndex MOD 4 = 0 Then Boxf tickX + 1, 0, tickX + 2, 11, 11
+  Next
+End Statement
+
+DrawFront{}
+DrawBack{}
+DrawHud{}
+BuildLists{}
+ShowDisplay{display}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  For displayKey.w = 1 To #DISPLAYS
+    If RawStatus(displayKey)
+      If display <> displayKey - 1
+        display = displayKey - 1
+        ShowDisplay{display}
+      EndIf
+    EndIf
+  Next
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If keySpace = False Then autoScroll = NOT autoScroll
+    keySpace = True
+  Else
+    keySpace = False
+  EndIf
+
+  If RawStatus(9) Then bandOn = True
+  If RawStatus(10) Then bandOn = False
+  If RawStatus(#RAW_KEY_R) Then scrollX = 0
+  For speedKey.w = 6 To 8
+    If RawStatus(speedKey) Then scrollSpeed = speedKey - 5
+  Next
+
+  If autoScroll = True
+    scrollX = scrollX + autoDir*scrollSpeed
+    If scrollX >= #SCROLL_MAX Then autoDir = -1
+    If scrollX <= 0 Then autoDir = 1
+  Else
+    If RawStatus(#RAW_KEY_RIGHT) AND scrollX < #SCROLL_MAX Then scrollX = scrollX + scrollSpeed
+    If RawStatus(#RAW_KEY_LEFT) AND scrollX > 0 Then scrollX = scrollX - scrollSpeed
+  EndIf
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+
+  VWait
+  shiftX.w = displayShift(display)
+  frontX.q = scrollX + shiftX
+  backX.q = scrollX/2 + shiftX
+  DisplayBitMap display*2 + 1, #BM_FRONT, frontX, #VIEW_TOP, #BM_BACK, backX, #VIEW_TOP
+  DisplayBitMap display*2, #BM_HUD, frontX, 0
+  ;; The game's one string, at its line: BPLCON1 with the value the header holds (no change on screen if all is well).
+  If bandOn = True
+    frontQuarter.l = Int(frontX*4)
+    backQuarter.l = Int(backX*4)
+    control.l = ScrollPart{255 - (frontQuarter AND 255)} + ScrollPart{255 - (backQuarter AND 255)}*16
+    CustomString display*2 + 1, 0, #BAND_LINE - 1, Mki$(#BPLCON1) + Mki$(SignedWord{control})
+  Else
+    CustomString display*2 + 1, 0, #BAND_LINE - 1, Mki$($1fe) + Mki$(0)
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/scroll-256-results.txt")
+  FileOutput 0
+  NPrint "scroll-256: the 256 wide display across 64 pixel blocks"
+  NPrint "Last display ", display + 1, " (DDF start ", displayStart(display), ", window ", displayDiwStart(display), " and ", displayDiwStop(display), "), scroll ", scrollX, ", speed ", scrollSpeed, ", band string ", bandOn, ", frames ", frameCount
+  CloseFile 0
+EndIf
+End

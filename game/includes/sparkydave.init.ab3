@@ -1,0 +1,197 @@
+;; =======================================================
+;; INITIALISATION (AMIGA MODE)
+;; =======================================================
+
+;; Debug mode, only when started with the parameter debug (`SparkyDave debug`). The reports go
+;; next to the program, or into the repository's game folder when the program is one of the
+;; repository's builds (development: compiled/, with game/ beside it). Looked for from the
+;; program's own folder (PROGDIR:/ is its parent), never by a volume name: on a player's machine
+;; a name such as sparky-dave: is not there, and asking for it can bring up an "insert volume"
+;; requester.
+;; The parameter levels (`SparkyDave levels`) offers every level on the title without debug mode's
+;; measuring, so a level can be tried at the speed a player gets.
+For parameterIndex.w = 1 To NumPars
+  If UCase$(Par$(parameterIndex)) = "DEBUG" Then debugMode = True
+  If UCase$(Par$(parameterIndex)) = "LEVELS" Then allLevelsOpen = True
+Next
+If debugMode <> False
+  If Exists("PROGDIR:/game/SparkyDave.ab3") > 0 Then reportDir$ = "PROGDIR:/game/"
+EndIf
+
+; False on PAL, True on NTSC. InitTimingClock turns that into a sim ratio.
+videoIsNtsc = NTSC
+; The sound's share of the frame time report, in debug mode only (sparkydave.sound.ab3).
+If debugMode <> False Then soundTimingOn = True
+If videoIsNtsc = True Then soundFrameLines = #PERF_LINES_NTSC
+
+;; Every displayed bitmap is #FETCH_GUARD (64) pixels wider than what it shows: at fetch mode 3
+;; a smooth-scroll list fetches up to 64 pixels past the right edge, and the width must be a
+;; multiple of 64 (constants.ab3, #COPPER_FLAGS). The world pair: 240 tiles (the widest area, 2-3), 3,904 pixels.
+BitMap 0, #MAP_W*#TILE + #FETCH_GUARD, #SURFACE_H, #PLAYFIELD_PLANES
+BitMap 1, #MAP_W*#TILE + #FETCH_GUARD, #SURFACE_H, #PLAYFIELD_PLANES
+; The fixed HUD band. Its own bitmap on its own CopList, so it never scrolls.
+BitMap #HUD_BAND_BM, #VIEW_W + #FETCH_GUARD, #HUD_H, #PLAYFIELD_PLANES
+; The back playfield: the clouds and hills strip, 1,152 x 240 (constants.ab3, #BACK_BM).
+BitMap #BACK_BM, #BACK_STRIP_W*#TILE + #VIEW_W + #FETCH_GUARD, #WORLD_H, #PLAYFIELD_PLANES
+; The cover screen: one screen of world, shown while the world reloads.
+BitMap #COVER_BM, #VIEW_W + #FETCH_GUARD, #WORLD_H, #PLAYFIELD_PLANES
+; The scratch picture the Mario sprites are cut from (CutMarioSprites{}): 2 planes for the 3 colour sprite, 4 for the 15 colour (attached) one.
+If #MARIO_SPRITE = 1
+  If #MARIO_SPRITE_COLOURS = 3
+    BitMap #SPRITE_TMP_BM, #TILE, #MARIO_BIG_H, 2
+  Else
+    BitMap #SPRITE_TMP_BM, #TILE, #MARIO_BIG_H, 4
+  EndIf
+EndIf
+; The sprite bank's colours (33 to 35) too, when Mario is a sprite (#MARIO_SPRITE).
+If #MARIO_SPRITE = 1
+  InitPalette 0, #SPRITE_PALETTE_COLOURS
+Else
+  InitPalette 0, #COPPER_COLORS
+EndIf
+; The colours come from the atlas IFF (LoadAtlas{}); until then the palette model shows black.
+
+InitShape #TILE_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #MARIO_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+; Big Mario is 16x32, so its shape slot is not the same size as Small's.
+InitShape #MARIO_BIG_SHAPE, #TILE, #MARIO_BIG_H, #PLAYFIELD_PLANES
+InitShape #ITEMS_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+;; The flag is not a tile, so its shape is the flag bitmap's own size.
+;; GetaShape in DrawFlag{} needs this slot allocated or it has nothing to read.
+InitShape #FLAG_SHAPE, #FLAG_W, #FLAG_H, #PLAYFIELD_PLANES
+; The bump bob cuts a 16x16 map tile out of the atlas every bump frame.
+InitShape #BUMP_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+; The title logo, cut once from its sheet (CutLogoShape{}).
+InitShape #LOGO_SHAPE, #LOGO_W, #LOGO_H, #PLAYFIELD_PLANES
+; The occluder re-stamps the releasing cell's tile over a rising item.
+InitShape #OCCLUDE_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+
+; Enemies sheet (Goomba, etc.) - 480x32, 4 planes. Shape is 16x16 for Goomba frames.
+BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+InitShape #ENEMIES_SHAPE, #GOOMBA_W, #GOOMBA_H, #PLAYFIELD_PLANES
+
+;; The sound's waves in Chip RAM (sparkydave.sound.ab3). A failed allocation leaves the
+;; game silent.
+soundWavesOk = BuildSoundWaves{}
+
+; The keys' names and defaults, then the saved settings over them (sparkydave.settings.ab3).
+BuildKeyTables{}
+SetDefaultKeys{}
+LoadSettings{}
+
+; HUD glyphs: 44 shapes of 8x8, cut from the HUD sheet by CutHudGlyphs{}.
+For hudGlyph = 0 To #HUD_GLYPHS - 1
+  InitShape #HUD_SHAPE_BASE + hudGlyph, 8, 8, #PLAYFIELD_PLANES
+Next
+
+; Pre-cut actor shapes, filled by CutActorShapes{}. Allocated here, above BLITZ.
+For preSlot = #PRE_SMALL_R To #PRE_SMALL_L + #PRE_SMALL_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_GOOMBA To #PRE_MUSHROOM + #PRE_MUSHROOM_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+;; The Koopa's four walk shapes (two frames, left and right) are 16x24; the shell
+;; and the upside-down Goomba are 16x16.
+;; The castle's star flag rises from behind the castle top, so one shape per number
+;; of rows showing (1 to 14), each as tall as that.
+For preSlot = 1 To #TILE - 2
+  InitShape #PRE_STAR_FLAG + preSlot - 1, #TILE, preSlot, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_STAR To #PRE_STAR + #STAR_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_FIREBALL To #PRE_FIREBALL + 3
+  InitShape preSlot, #FIREBALL_SIZE, #FIREBALL_SIZE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_BLAST To #PRE_BLAST + 2
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_FLOWER To #PRE_FLOWER + #FLOWER_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_KOOPA To #PRE_KOOPA + 3
+  InitShape preSlot, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_SHELL To #PRE_GOOMBA_FLIP
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_RED_KOOPA To #PRE_RED_KOOPA + 3
+  InitShape preSlot, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_PARATROOPA To #PRE_PARATROOPA + 3
+  InitShape preSlot, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_SPRING To #PRE_SPRING + #SPRING_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_VINE To #PRE_VINE + 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+InitShape #PRE_RED_SHELL, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_RED_SHELL_FLIP, #TILE, #TILE, #PLAYFIELD_PLANES
+InitShape #PRE_LIFT, #LIFT_W, #LIFT_H, #PLAYFIELD_PLANES
+InitShape #PRE_CLOUD_LIFT, #LIFT_W, #LIFT_H, #PLAYFIELD_PLANES
+InitShape #PRE_SMALL_LIFT, #SMALL_LIFT_W, #LIFT_H, #PLAYFIELD_PLANES
+InitShape #PRE_CASTLE_LIFT, #CASTLE_LIFT_W, #LIFT_H, #PLAYFIELD_PLANES
+For preSlot = #PRE_BOWSER To #PRE_BOWSER + 11
+  InitShape preSlot, 16, 32, #PLAYFIELD_PLANES
+Next
+InitShape #PRE_BOWSER + 12, 24, 8, #PLAYFIELD_PLANES
+InitShape #PRE_BOWSER + 13, 24, 8, #PLAYFIELD_PLANES
+InitShape #PRE_RETAINER, 16, 32, #PLAYFIELD_PLANES
+InitShape #PRE_RETAINER_ZOOL, 16, 32, #PLAYFIELD_PLANES
+For preSlot = #PRE_RED_PARATROOPA To #PRE_RED_PARATROOPA + 3
+  InitShape preSlot, #KOOPA_W, #KOOPA_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_PANEL To #PRE_PANEL + #PANEL_TILES - 1
+  InitShape preSlot, #PANEL_TILE, #PANEL_TILE, #PLAYFIELD_PLANES
+Next
+InitShape #PRE_PANEL_WHOLE, #VIEW_W, #PANEL_MAX_H, #PLAYFIELD_PLANES
+For preSlot = #PRE_PLAYER_CLIP To #PRE_PLAYER_CLIP + #PLAYER_CLIP_SLOTS - 1
+  InitShape preSlot, #TILE, #MARIO_BIG_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_PIRANHA To #PRE_PIRANHA + 2
+  InitShape preSlot, #PLANT_W, #PLANT_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_BLOOBER To #PRE_BLOOBER + 2
+  InitShape preSlot, #BLOOBER_W, #BLOOBER_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_CHEEP To #PRE_CHEEP + 5
+  InitShape preSlot, #BLOOBER_W, #BLOOBER_H, #PLAYFIELD_PLANES
+Next
+InitShape #PRE_BUBBLE, #BUBBLE_SIZE, #BUBBLE_SIZE, #PLAYFIELD_PLANES
+For preSlot = #PRE_FLY_CHEEP To #PRE_FLY_CHEEP + 2
+  InitShape preSlot, #BLOOBER_W, #BLOOBER_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_PODOBOO To #PRE_PODOBOO + 1
+  InitShape preSlot, #BLOOBER_W, #BLOOBER_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_BIG_R To #PRE_BIG_L + #PRE_BIG_FRAMES - 1
+  InitShape preSlot, #TILE, #MARIO_BIG_H, #PLAYFIELD_PLANES
+Next
+For preSlot = #PRE_COIN To #PRE_COIN + #PRE_COIN_FRAMES - 1
+  InitShape preSlot, #TILE, #TILE, #PLAYFIELD_PLANES
+Next
+
+; Floating score numbers: six 4x8 digits and the 16x16 "1UP", cut by CutFloaterShapes{}.
+For preSlot = #FLOATER_DIGIT_SHAPE To #FLOATER_DIGIT_SHAPE + 5
+  InitShape preSlot, #FLOATER_DIGIT_W, #FLOATER_DIGIT_H, #PLAYFIELD_PLANES
+Next
+InitShape #FLOATER_ONEUP_SHAPE, #TILE, #TILE, #PLAYFIELD_PLANES
+;; Each whole number, one shape, so a number is one blit and not three or four: 12 px wide
+;; for the hundreds, 16 for the thousands, cut by CutFloaterNumbers{}.
+For numberIndex = 1 To 10
+  If scorePoints(numberIndex) >= 1000
+    InitShape #FLOATER_NUMBER_SHAPE + numberIndex, 4*#FLOATER_DIGIT_W, #FLOATER_DIGIT_H, #PLAYFIELD_PLANES
+  Else
+    InitShape #FLOATER_NUMBER_SHAPE + numberIndex, 3*#FLOATER_DIGIT_W, #FLOATER_DIGIT_H, #PLAYFIELD_PLANES
+  EndIf
+Next
+
+; Brick chunks: one 8x8 fragment in four flip variants, cut by CutDebrisShapes{}.
+For preSlot = #DEBRIS_SHAPE To #DEBRIS_SHAPE + #DEBRIS_VARIANTS - 1
+  InitShape preSlot, #DEBRIS_SIZE, #DEBRIS_SIZE, #PLAYFIELD_PLANES
+Next
+
+;; END OF INITIALISATION (AMIGA MODE)

@@ -1,0 +1,417 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; hud-band.ab3 -- the fixed HUD, drawn into its own display band. Compile in UAE.
+;; Not part of the game. Phase 6 proof for the renderer-engine-architecture-reset plan (git history)
+;; and the main project's HUD note.
+;;
+;; The earlier HUD blitted cookies into the scrolling world bitmap and needed a
+;; pre-cut 320x16 background shape, which never showed. Now the HUD has its own
+;; bitmap on its own CopList (see the main project's RENDERER_CONTRACT note), so none of that is needed:
+;;   - the 44 glyphs of hud-objects.iff are cut once into 8x8 shapes (GetaShape),
+;;   - the static labels are drawn once into the HUD bitmap,
+;;   - a changing number is redrawn, only when its value changes.
+;; Each glyph is a Boxf clear of its 8x8 cell to pen 0 then a Blit, so an old digit
+;; is fully covered: no UnBuffer and no background shape. NOT Block: Block only
+;; works for shapes 16, 32, 48... wide at x of 0, 16, 32... (BLITLIB guide). An 8
+;; wide glyph at x = 8 mod 16 snaps back to the cell before it and covers it. That
+;; is why the first run showed only every other letter, and very likely why the
+;; old HUD's labels never showed.
+;;
+;; Colours: hud-objects.iff has no palette of its own. The screen palette is the
+;; atlas's (tiles-all.iff, loaded into palette 0), which carries the HUD pens.
+;;
+;; Layout, two rows of 8x8 (x, y in the 336x16 band):
+;;   y 0  MARIO at 0    WORLD at 104    TIME at 192
+;;   y 8  score at 0 (6 digits), coin icon at 48, x at 56, coins at 64 (2 digits),
+;;        world at 104 ("1-1"), time at 192 (3 digits)
+;;
+;; Keys
+;;   Left / Right   scroll the world 2 px
+;;   Up / Down      scroll the world 16 px
+;;   S              score + 100
+;;   C              coins + 1 (wraps 99 to 0)
+;;   T              time back to 400
+;;   Esc            quit
+;; Time also counts down by itself once every 50 frames.
+;;
+;; What to look at (assertions)
+;; 1. MARIO, WORLD, TIME, the coin icon, the small x and "1-1" appear in the band,
+;;    in the HUD colours, on a sky background, every letter present (first run
+;;    with Block lost every other one).
+;; 2. The band stays put while the world scrolls, and its edge blends into the sky.
+;; 3. Press S, C and T: digits change in place, with no old digit left behind
+;;    and no trail (the 8x8 Block covers the whole cell).
+;; 4. Score pads to 6 digits with zeros, coins to 2, time to 3.
+;; 5. No tearing or flicker in the band while digits change.
+;; If the glyphs show but in wrong colours, the atlas palette does not carry the
+;; HUD pens the way manifest.py says; note which glyphs and which colours.
+;; If nothing shows, check Exists() on the two IFF paths (the proof writes
+;; hud-band-results.txt on exit with what it found).
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_C     = $33
+#RAW_KEY_S     = $21
+#RAW_KEY_T     = $14
+#RAW_KEY_UP    = $4c
+#RAW_KEY_DOWN  = $4d
+#RAW_KEY_ESC   = $45
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_LEFT  = $4f
+
+#COPPER_COLORS = 16
+#COPPER_FLAGS  = $10014
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#WORLD_YPOS = 63
+#WORLD_H    = 240
+
+#TILE     = 16
+#COLS     = 213
+#VIEW_W   = 320
+#BM_W     = 3408
+#CAM_MAX  = 3072
+#STEP     = 2
+#STEP_FAST = 16
+
+;; Bitmaps: 0 world, 1 atlas (palette source), 2 HUD band, 3 glyph sheet.
+#BM_WORLD = 0
+#BM_ATLAS = 1
+#BM_BAND  = 2
+#BM_SHEET = 3
+#ATLAS_W  = 464
+#ATLAS_H  = 96
+#SHEET_W  = 352
+#GLYPHS   = 44
+
+;; 44 shape slots, glyph g in slot #SHAPE_BASE + g.
+#SHAPE_BASE = 20
+
+;; Glyph cells in hud-objects.iff.
+#G_DASH  = 36
+#G_X     = 37
+#G_COIN  = 43
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+camX.q = 0
+sLock.w = False
+cLock.w = False
+tLock.w = False
+hudScore.l = 0
+hudCoins.w = 0
+hudTime.w = 400
+drawnScore.l = -1
+drawnCoins.w = -1
+drawnTime.w = -1
+frames.w = 0
+glyph.w = 0
+col.w = 0
+tileX.w = 0
+pen.w = 0
+foundAtlas.w = False
+foundSheet.w = False
+
+atlasIff$ = "sparky-dave:game/assets/tiles-all.iff"
+hudIff$ = "sparky-dave:game/assets/hud-objects.iff"
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_WORLD, #BM_W, #WORLD_H, 4
+BitMap #BM_ATLAS, #ATLAS_W, #ATLAS_H, 4
+;; One word wider than the view: a smooth-scroll list fetches 16 px past the edge.
+BitMap #BM_BAND, #VIEW_W + 16, #HUD_H, 4
+BitMap #BM_SHEET, #SHEET_W, 8, 4
+InitPalette 0, #COPPER_COLORS
+;; Placeholder if the atlas is missing. The atlas replaces all of it.
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 255, 255, 255
+AGAPalRGB 0, 2, 255, 160, 0
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 200, 60, 0
+AGAPalRGB 0, 8, 255, 220, 160
+For glyph = 0 To #GLYPHS - 1
+  InitShape #SHAPE_BASE + glyph, 8, 8, 4
+Next
+
+If Exists(atlasIff$) > 0
+  foundAtlas = True
+  LoadBitMap #BM_ATLAS, atlasIff$, 0
+EndIf
+If Exists(hudIff$) > 0
+  foundSheet = True
+  LoadBitMap #BM_SHEET, hudIff$
+EndIf
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+;; The HUD list loads the palette, the world list has none: loading it twice put
+;; a flicker line in the gap. The lists are 3 lines apart, as the Blitz guide requires.
+Statement ApplyDisplay{}
+  InitCopList 0, #HUD_YPOS, #HUD_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+  InitCopList 1, #WORLD_YPOS, #WORLD_H, #COPPER_FLAGS, 8, 0, 0
+  CreateDisplay 0, 1
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, #BM_BAND, 0, 0
+  DisplayBitMap 1, #BM_WORLD, 0, 0
+End Statement
+
+;; Same pillar backdrop as hud-split.ab3, in atlas pens 1 to 3.
+Statement StampWorld{}
+  SHARED col, tileX, pen
+  Use BitMap #BM_WORLD
+  Cls 0
+  For col = 0 To #COLS - 1
+    tileX = col*#TILE
+    If (col MOD 10) = 0
+      pen = 1
+    Else
+      pen = 2
+    EndIf
+    If (col MOD 10) = 0
+      Boxf tileX, 0, tileX + 15, 120, pen
+    Else
+      Boxf tileX + 4, 100, tileX + 11, 140, pen
+    EndIf
+    Boxf tileX, 220, tileX + 15, #WORLD_H - 1, 3
+  Next
+  Boxf 0, 0, 3, #WORLD_H - 1, 4
+End Statement
+
+;; Cut every glyph from the sheet into its shape slot. Once, at start.
+Statement CutGlyphs{}
+  SHARED glyph
+  Use BitMap #BM_SHEET
+  For glyph = 0 To #GLYPHS - 1
+    GetaShape #SHAPE_BASE + glyph, glyph*8, 0, 8, 8
+  Next
+End Statement
+
+Statement DrawGlyph{glyphIndex.w, glyphX.w, glyphY.w}
+  Use BitMap #BM_BAND
+  Boxf glyphX, glyphY, glyphX + 7, glyphY + 7, 0
+  Blit #SHAPE_BASE + glyphIndex, glyphX, glyphY
+End Statement
+
+;; Text in the HUD character set: 0-9, A-Z, dash, lowercase x. A space is skipped.
+Statement DrawHudText{hudText$, textX.w, textY.w}
+  SHARED glyph
+  For charIndex.w = 1 To Len(hudText$)
+    code.w = Asc(Mid$(hudText$, charIndex, 1))
+    glyph = -1
+    If code >= 48
+      If code <= 57 Then glyph = code - 48
+    EndIf
+    If code >= 65
+      If code <= 90 Then glyph = code - 55
+    EndIf
+    If code = 45 Then glyph = #G_DASH
+    If code = 120 Then glyph = #G_X
+    If glyph >= 0 Then DrawGlyph{glyph, textX + (charIndex - 1)*8, textY}
+  Next
+End Statement
+
+;; A zero-padded number, most significant digit first. DrawGlyph clears each 8x8
+;; cell first, so the previous digit is fully covered.
+Statement DrawHudNumber{numberValue.l, digitCount.w, numberX.w, numberY.w}
+  remaining.l = numberValue
+  For digitIndex.w = digitCount - 1 To 0 Step -1
+    digit.w = remaining MOD 10
+    remaining = remaining/10
+    DrawGlyph{digit, numberX + digitIndex*8, numberY}
+  Next
+End Statement
+
+;; Static parts, drawn once.
+Statement DrawHudStatic{}
+  Use BitMap #BM_BAND
+  Cls 0
+  DrawHudText{"MARIO", 0, 0}
+  DrawHudText{"WORLD", 104, 0}
+  DrawHudText{"TIME", 192, 0}
+  DrawGlyph{#G_COIN, 48, 8}
+  DrawGlyph{#G_X, 56, 8}
+  DrawHudText{"1-1", 104, 8}
+End Statement
+
+;; Dynamic parts, redrawn only when the value changed.
+Statement UpdateHud{}
+  SHARED hudScore, hudCoins, hudTime, drawnScore, drawnCoins, drawnTime
+  If hudScore <> drawnScore
+    DrawHudNumber{hudScore, 6, 0, 8}
+    drawnScore = hudScore
+  EndIf
+  If hudCoins <> drawnCoins
+    DrawHudNumber{hudCoins, 2, 64, 8}
+    drawnCoins = hudCoins
+  EndIf
+  If hudTime <> drawnTime
+    DrawHudNumber{hudTime, 3, 192, 8}
+    drawnTime = hudTime
+  EndIf
+End Statement
+
+BlitMode CookieMode
+StampWorld{}
+CutGlyphs{}
+DrawHudStatic{}
+UpdateHud{}
+ApplyDisplay{}
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_S)
+    If sLock = False
+      sLock = True
+      hudScore = hudScore + 100
+      If hudScore > 999999 Then hudScore = 0
+    EndIf
+  Else
+    sLock = False
+  EndIf
+  If RawStatus(#RAW_KEY_C)
+    If cLock = False
+      cLock = True
+      hudCoins = hudCoins + 1
+      If hudCoins > 99 Then hudCoins = 0
+    EndIf
+  Else
+    cLock = False
+  EndIf
+  If RawStatus(#RAW_KEY_T)
+    If tLock = False
+      tLock = True
+      hudTime = 400
+    EndIf
+  Else
+    tLock = False
+  EndIf
+
+  frames = frames + 1
+  If frames >= 50
+    frames = 0
+    If hudTime > 0 Then hudTime = hudTime - 1
+  EndIf
+
+  If RawStatus(#RAW_KEY_RIGHT) Then camX = camX + #STEP
+  If RawStatus(#RAW_KEY_LEFT) Then camX = camX - #STEP
+  If RawStatus(#RAW_KEY_UP) Then camX = camX + #STEP_FAST
+  If RawStatus(#RAW_KEY_DOWN) Then camX = camX - #STEP_FAST
+  If camX < 0 Then camX = 0
+  If camX > #CAM_MAX Then camX = #CAM_MAX
+
+  UpdateHud{}
+  VWait
+  DisplayBitMap 1, #BM_WORLD, camX, 0
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/hud-band-results.txt")
+  FileOutput 0
+  NPrint "hud-band"
+  If foundAtlas = True
+    NPrint "atlas iff found"
+  Else
+    NPrint "atlas iff NOT found"
+  EndIf
+  If foundSheet = True
+    NPrint "hud-objects iff found"
+  Else
+    NPrint "hud-objects iff NOT found"
+  EndIf
+  NPrint "score ", hudScore, " coins ", hudCoins, " time ", hudTime
+  CloseFile 0
+EndIf
+End

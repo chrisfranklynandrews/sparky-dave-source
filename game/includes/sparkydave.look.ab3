@@ -1,0 +1,54 @@
+;; =======================================================
+;; LOOK CONSTANTS -- NES
+;; =======================================================
+;; The numbers that differ between the two looks of the game: the NES art (this file) and the All-Stars art (sparkydave.look.allstars.ab3). The look is a second axis next to the
+;; physics variant (NTSC or PAL): any look builds with either. It is the art only: the width is the same in both (#VIEW_W, in
+;; sparkydave.constants.ab3). What each constant is, and why, is in the main project's LOOK_VARIANTS note.
+;; tools/build_variant.py look nes (or allstars) copies one of the two files over sparkydave.look.ab3, which is the one the game
+;; includes: edit the look files, never the copy.
+
+; 0 for the NES art, 1 for the All-Stars art.
+#LOOK_ALLSTARS = 0
+
+;; 1 to draw Mario as a hardware sprite (sparkydave.mario-sprite.blitz.ab3: the sprite, in front of the playfields, its colours the
+;; sprite bank's; the world lists carry the sprite channels, the HUD-away list shows him over the HUD), 0 to blit him into the
+;; playfield. Set it in the look files and run python tools/build_variant.py look ..., which copies one over the one the game includes.
+#MARIO_SPRITE = 1
+
+;; How many colours Mario's sprite has: 3 (one channel, his pens 13 to 15, the NES art) or 15 (an attached pair, the colours of
+;; his own sheets mario-small-all-stars.iff and mario-big-all-stars.iff, pens 1 to 13: the real All-Stars colours, in the sprite
+;; bank, none of the playfield's). With 15 the sprites are cut from those sheets, whose frames are not the NES sheets': the frame
+;; counts and the throw below are the sprite sheets', and MarioSpriteFrame{} turns the engine's picture number (the NES sheets'
+;; order, which the bobs on the covers and pages still use) into the sprite sheet's.
+#MARIO_SPRITE_COLOURS = 3
+#SPRITE_SMALL_FRAMES  = 14
+#SPRITE_F_THROW       = 16
+#SPRITE_BIG_FRAMES    = 19
+
+;; The tile atlas of the look (the file loaded is chosen in sparkydave.map.ab3): its size in pixels, its columns, how many tiles it holds
+;; (a GID above that has no picture: the draw routines leave it out), the GID a `?` block becomes when it is spent, and the GID of a
+;; floating coin. The NES numbers repeat the generated level meta's and the manifest's (python tools/build_assets.py checks them).
+;; The pen the course clear's two lines of text are set on (0 is no bar: the cartridge's look; the All-Stars look sets them on a dark bar).
+;; The pen of the title and menu panel's body (title-panel.iff), which a row is cleared to before it is drawn again.
+#TEXT_BACKING_PEN = 0
+#SKY_EARLY_BANDS  = 0
+#SPENT_BLOCK_GID  = 4
+#PANEL_CENTRE_PEN = 11
+; The options page's last rows (PALETTE, DEFAULTS, BACK), its row count, and the menu mushroom's column.
+#MENU_CURSOR_X    = 0
+#OPT_PALETTE      = 7
+#OPT_DEFAULTS     = 8
+#OPT_BACK         = 9
+#OPTIONS_ROWS     = 10
+#LOOK_ATLAS_COLS  = 29
+#COIN_TILE_GID    = 53
+#LOOK_ATLAS_H     = 96
+#LOOK_ATLAS_TILES = 174
+#LOOK_FRONT_TILES = 174
+#LOOK_ATLAS_W     = 464
+
+;; Where the castle's doorway starts, from the CastleDoor object's left edge (CheckCastleDoor{} hides him as his left edge reaches it): the
+;; NES castle's doorway is the object's cell.
+#LOOK_DOOR_DX = 0
+
+;; END OF LOOK CONSTANTS -- NES (BLITZ MODE)

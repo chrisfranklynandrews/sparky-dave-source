@@ -1,0 +1,18 @@
+;; =======================================================
+;; START-UP CHECKS: THE MACHINE AND ITS MEMORY (AMIGA MODE)
+;; =======================================================
+;; The game's own check of the machine (MachineProblem{}, sparkydave.machine.ab3): included before the first Dim
+;; (the palette data and globals.ab3 come after), so the memory is read before the game takes any. A start from
+;; the launcher has had the same check already, in DetectVideo, before the game was loaded: this one is for a
+;; start without it. On a 68000 the game's 68020 code would not get this far; that case is the launcher's.
+;; The message stays up for a while (about 8 seconds), so a Workbench start's window does not close before it
+;; can be read.
+
+machineProblemFound.w = MachineProblem{0}
+If machineProblemFound <> #MACHINE_OK
+  NPrint MachineProblemText{machineProblemFound, 0}
+  VWait 400
+  End
+EndIf
+
+;; END OF START-UP CHECKS: THE MACHINE AND ITS MEMORY (AMIGA MODE)

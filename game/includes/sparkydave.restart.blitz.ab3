@@ -1,0 +1,302 @@
+;; =======================================================
+;; RESTART (BLITZ MODE)
+;; =======================================================
+
+;; The reload after a death or a new game. The sim only
+;; sets lifeEvent (life.blitz); the main loop calls HandleLifeEvent{} each frame,
+;; outside the sim, because a reload re-stamps both playfields and refreshes the
+;; bob buffers.
+
+;; Reload the level. newGame False is a death with lives left: score and coins are kept, the timer goes back
+;; to its start, and Mario comes back small at the start or the halfway point (lifeStartCameraX). newGame True
+;; is a new game, and also F1: everything resets. A reload takes several frames, which the frame-time report
+;; cannot measure, so the frame is left out and counted. Used by every reload.
+Statement NoteReload{}
+  SHARED frameTimePrimed, frameTimeRestarts
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+End Statement
+
+;; Re-seed both bob buffers with the player where he now is, so UnBuffer in the next
+;; DrawFrame{} does not restore stale pre-reload art over the fresh map, and put the
+;; pair the main loop had selected back: keepBitmap and keepBuffer are drawBitmap and
+;; drawBuffer as they were BEFORE the reload, which re-stamps both playfields and
+;; reassigns them (the main loop relies on them pointing at the complement of
+;; displayBitmap when DrawFrame{} runs). Mirrors init.blitz.ab3.
+Statement RefreshBobBuffers{keepBitmap.w, keepBuffer.w}
+  SHARED drawBitmap, drawBuffer
+  drawBitmap = #PLAY_BM_A
+  drawBuffer = #BOB_BUF_A
+  DrawPlayer{}
+  drawBitmap = #PLAY_BM_B
+  drawBuffer = #BOB_BUF_B
+  DrawPlayer{}
+  drawBitmap = keepBitmap
+  drawBuffer = keepBuffer
+End Statement
+
+Statement RestartLevel{newGame.w}
+  SHARED areaMarioStartX, areaMarioStartY, currentLevelSlot, levelRestartSlot
+  SHARED cameraX, playerX, playerScreenX, playerY, playerState, hudTimeStart
+  SHARED lifeEvent, lifeStartCameraX, playerLives, hudTime, hudTimeTicks
+  SHARED playerInjuryIntervals, hiddenOneUpFlag, timeUpDeath, playerStarIntervals
+  SHARED levelCarrySize, levelCarryBig, levelCarryFire, playerIsBig, playerFire, continuesUsed
+  ;; Save the incoming buffer pair; ResetLevel and the refresh below reassign
+  ;; drawBitmap/drawBuffer (see RefreshBobBuffers{}).
+  SHARED drawBitmap, drawBuffer
+  NoteReload{}
+  keepBitmap.w = drawBitmap
+  keepBuffer.w = drawBuffer
+  MarkTransition{"RestartLevel: begin"}
+  ;; A new game starts at the level's first area (1-2's pipe intro). A death anywhere in the level restarts it at the area
+  ;; it started in, as the cartridge does (1-2's end is in 1-1's area; a death after the intro does not replay it).
+  If newGame = True Then levelRestartSlot = 0
+  If currentLevelSlot <> levelRestartSlot
+    EnterLevelAreaSlot{levelRestartSlot}
+  Else
+    ; Already that area, but a death in a room left the room's exit box set.
+    ApplyPipeExitBox{levelRestartSlot}
+  EndIf
+  ResetLevel{}
+  ; A restart is a new level start: the Starman goes (an area change keeps it).
+  playerStarIntervals = 0
+  EnsureTileSet{}
+  StampBothPlayfields{}
+  MarkTransition{"RestartLevel: level reset and stamped"}
+  If newGame = True
+    hiddenOneUpFlag = True
+    ResetHudValues{}
+    playerLives = #LIVES_START
+    lifeStartCameraX = 0
+    ; A new game has used no continues.
+    continuesUsed = 0
+  Else
+    hudTime = hudTimeStart
+    hudTimeTicks = 0
+  EndIf
+  InitPlayer{}
+  ; A course clear keeps his size and the flower into the next level (a death does not: InitPlayer{} has made him small).
+  If levelCarrySize <> False
+    levelCarrySize = False
+    playerIsBig = levelCarryBig
+    playerFire = levelCarryFire
+    UpdatePlayerBoundBox{}
+  EndIf
+  timeUpDeath = False
+  ; An area that starts him at the top (1-2's header entrance control 1) drops him in with no control, as a room does.
+  If areaMarioStartY = 0
+    StopPlayer{}
+    playerState = #PLAYER_ST_DROP
+  EndIf
+  If lifeStartCameraX > 0
+    cameraX = lifeStartCameraX
+    playerX = cameraX + areaMarioStartX
+    playerScreenX = areaMarioStartX
+    ; A restart at the halfway page stands him on the ground whatever the level's own start was (entrance control 2).
+    playerY = #HALFWAY_START_Y
+    playerState = #PLAYER_ST_FREE
+  EndIf
+  playerInjuryIntervals = 0
+  lifeEvent = #LIFE_NONE
+  ;; Goombas wake as the screen reaches them. After a death the cartridge's enemy list is read from the top and an entry left of its
+  ;; screen's right edge is skipped, never built (PositionEnemyObj, smbdis 7942), so nothing on the first 256 px of the restart's
+  ;; screen comes back, only what is at or past that edge (ArmGoombas{}). Otherwise 1-2's halfway restart would build its group of
+  ;; three Goombas on top of Mario; the pair at the start of 1-2, at x 256, are past the edge and come back. The lifts are entries of
+  ;; the enemy list too. A new game passes nothing. The frenzy markers, plants and springs pass
+  ;; only what is behind: area objects, which the cartridge's area parser builds for the first screen afresh (VerticalPipe grows a
+  ;; pipe's plant).
+  restartEdge.w = 0
+  walkerEdgeX.w = 0
+  markerEdgeX.w = 0
+  If newGame = False
+    restartEdge = cameraX + #VIEW_W
+    walkerEdgeX = cameraX + #NES_VIEW_W
+    markerEdgeX = cameraX
+  EndIf
+  ArmGoombas{walkerEdgeX}
+  ArmSwimmers{walkerEdgeX, markerEdgeX}
+  ArmKoopas{walkerEdgeX}
+  ArmPlants{restartEdge}
+  ArmLifts{walkerEdgeX}
+  ArmSprings{restartEdge}
+  ; ResetLevel re-stamped both playfields: refresh the bob buffers with the reset player.
+  RefreshBobBuffers{keepBitmap, keepBuffer}
+  MarkTransition{"RestartLevel: done"}
+End Statement
+
+;; The lives cover, then the reload behind it: the course clear, a new game without the title,
+;; the start from the title and F1 (a respawn may put TIME UP first, so it has its own). levelToBegin is a level to read
+;; from disk first (BeginLevel{}), or -1 for the one in play. The cover goes up before the read, named for the level read
+;; (NameLevel{}), so a press that ends a screen is answered at once, not after the disk.
+Statement ReloadBehindLivesCover{newGame.w, levelToBegin.w}
+  If levelToBegin >= 0 Then NameLevel{levelToBegin}
+  ShowCover{#COVER_LIVES}
+  If levelToBegin >= 0
+    levelResult.w = BeginLevel{levelToBegin}
+    ; A level that could not be begun has set quitFlag (NoteLevelLoadFailure{}): nothing is rebuilt over what is left.
+    If levelResult <> 0 Then Statement Return
+  EndIf
+  ; The All-Stars look: the level's tile sets into Fast RAM now, behind the cover, so its pipes read nothing from disk.
+  PreloadLevelTileSets{}
+  RestartLevel{newGame}
+End Statement
+
+;; A new game's level: the one the title chose (the first unless its LEVEL row says otherwise), read from disk only when it
+;; is not the one in play (-1, ReloadBehindLivesCover{}).
+Function.w NewGameLevelToBegin{}
+  SHARED currentLevel, startLevelChosen
+  If currentLevel <> startLevelChosen Then Function Return startLevelChosen
+  Function Return -1
+End Function
+
+;; Once per frame, from the main loop, before the sim. Every reload happens behind a
+;; cover (ShowCover{} first, then the reload), so the player never sees a level being
+;; built (sparkydave.cover.blitz.ab3, the main project's SCREENS note).
+Statement HandleLifeEvent{}
+  SHARED lifeEvent, lifeStartCameraX, hiddenOneUpFlag, timeUpDeath, coverKind, coverNext, playerLives
+  SHARED gamePaused, jukeboxOpenWanted, currentLevel, tableLevelNext(), warpLevelTarget, warpPipeTaken, paletteOpenWanted
+  SHARED overlayScreenWanted, overlayScreenShown, paletteChoice, paletteBaseline
+  SHARED levelCarrySize, levelCarryBig, levelCarryFire, playerIsBig, playerFire, continueOpenWanted
+  ; The options page asked for the jukebox during the last sim tick: it opens here, before the sim.
+  If jukeboxOpenWanted <> False
+    jukeboxOpenWanted = False
+    OpenJukeboxNow{}
+  EndIf
+  ; The options page asked for the palette page: it opens here too.
+  If paletteOpenWanted <> False
+    paletteOpenWanted = False
+    OpenPalettePageNow{}
+  EndIf
+  ;; The TIME UP cover ended with the continue screen next (UpdateCover{}): it opens here, while the game over is still on. The
+  ;; request is taken whatever happened, so an Esc or F1 in between (the title, a reset) leaves none for a later game over.
+  If continueOpenWanted <> False
+    continueOpenWanted = False
+    If lifeEvent = #LIFE_GAMEOVER Then OpenContinueMenu{}
+  EndIf
+  ;; The pause menu: UpdatePause{} paused the game last frame (a fresh Return, the pad's play, or
+  ;; Esc), and the menu comes up over black now (sparkydave.cover.blitz.ab3).
+  If gamePaused = True AND coverKind = #COVER_NONE AND lifeEvent = #LIFE_NONE Then OpenPauseMenu{}
+  ;; Game over: its cover (after TIME UP if the timer ran out), then, when it ends,
+  ;; UpdateCover{} sets #LIFE_NEWGAME. With continues left the continue screen instead of the GAME OVER
+  ;; cover, decided here once: at once, or as the TIME UP cover's next (#COVER_CONTINUE, opened above when that cover ends); its answer
+  ;; is a respawn or the title.
+  If lifeEvent = #LIFE_GAMEOVER
+    If coverKind = #COVER_NONE
+      MarkTransition{"> life: game over"}
+      UpdateTopScore{}
+      If timeUpDeath = True
+        ShowCover{#COVER_TIMEUP}
+        coverNext = #COVER_GAMEOVER
+        If ContinuesLeft{} <> 0 Then coverNext = #COVER_CONTINUE
+      Else
+        SoundEventMusic{#MUSIC_GAME_OVER}
+        If ContinuesLeft{} <> 0
+          OpenContinueMenu{}
+        Else
+          ShowCover{#COVER_GAMEOVER}
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  ;; After the course clear: the next level in the table, as a new life that keeps the score, coins, lives and size, with the
+  ;; hidden 1-UP block back (a new run of a level). After the last level (no next) the end screen, then the title.
+  If lifeEvent = #LIFE_REPLAY
+    MarkTransition{"> life: course clear, the next level"}
+    ;; The cartridge silences the music as it sets up the next area (InitializeArea's DoneInitArea, smbdis 2708), so nothing plays on
+    ;; over the black screen: a castle's end-of-castle tune can outlast its messages.
+    SoundEventMusic{#MUSIC_SILENCE}
+    UpdateTopScore{}
+    If tableLevelNext(currentLevel) < 0 AND warpLevelTarget < 0
+      MarkTransition{"> life: the last level, the end screen"}
+      lifeEvent = #LIFE_NONE
+      ShowCover{#COVER_END}
+      Statement Return
+    EndIf
+    lifeStartCameraX = 0
+    hiddenOneUpFlag = True
+    levelCarrySize = True
+    levelCarryBig = playerIsBig
+    levelCarryFire = playerFire
+    ; Down a warp pipe, the world it named instead (UpdatePipe{}).
+    nextLevel.w = tableLevelNext(currentLevel)
+    If warpLevelTarget >= 0 Then nextLevel = warpLevelTarget
+    warpLevelTarget = -1
+    warpPipeTaken = -1
+    ReloadBehindLivesCover{False, nextLevel}
+  EndIf
+  If lifeEvent = #LIFE_RESPAWN
+    MarkTransition{"> life: respawn after a death"}
+    If timeUpDeath = True
+      ShowCover{#COVER_TIMEUP}
+      coverNext = #COVER_LIVES
+    Else
+      ShowCover{#COVER_LIVES}
+    EndIf
+    RestartLevel{False}
+  EndIf
+  ;; QUIT TO TITLE on the pause menu, or Esc on a cover screen: the audio and the score are put away
+  ;; as a game over does, and the rest is a new game (the title next).
+  If lifeEvent = #LIFE_TITLE
+    SoundReset{}
+    UpdateTopScore{}
+    lifeEvent = #LIFE_NEWGAME
+  EndIf
+  ;; A new game: the title, then the lives screen; the lives are set before the cover is drawn,
+  ;; because RestartLevel{True} sets them after. The title is an overlay over the world: behind a
+  ;; blank cover, ShowTitle{} resets the level and stamps it with the attract mode's scenery; the
+  ;; game's own reload is when it starts (#LIFE_START_GAME).
+  If lifeEvent = #LIFE_NEWGAME
+    MarkTransition{"> life: new game, the title"}
+    ;; Every game's end comes through here (the game over and the end screen when they finish, QUIT TO TITLE, Esc on a cover), with
+    ;; the last cover still up: a new top score is written now, behind it (the write waits about a second for the disk).
+    SaveTopScoreIfNew{}
+    ; The title's attract mode is 1-1's scenery.
+    If currentLevel <> 0
+      levelResult = BeginLevel{0}
+      If levelResult <> 0 Then Statement Return
+    EndIf
+    playerLives = #LIVES_START
+    If #SHOW_TITLE = 1
+      ShowCover{#COVER_BLANK}
+      lifeEvent = #LIFE_NONE
+      ShowTitle{}
+    Else
+      ReloadBehindLivesCover{True, NewGameLevelToBegin{}}
+    EndIf
+  EndIf
+  ;; Return on the title: the game starts. The lives cover (which takes the title overlay down),
+  ;; then the level reloaded, since the attract mode moved the camera and stamped the scenery.
+  If lifeEvent = #LIFE_START_GAME
+    MarkTransition{"> life: the game starts from the title"}
+    ReloadBehindLivesCover{True, NewGameLevelToBegin{}}
+  EndIf
+  ; F1: a full reset straight to the lives screen, with no title.
+  If lifeEvent = #LIFE_RESET
+    MarkTransition{"> life: F1 reset"}
+    ;; F1 on the palette page leaves it without its BACK: the palette only being looked at goes, as Esc would put it back (the page's
+    ;; promise), not kept for the game and the next save.
+    If overlayScreenWanted = #SCREEN_PALETTE OR overlayScreenShown = #SCREEN_PALETTE
+      If paletteChoice <> paletteBaseline
+        paletteChoice = paletteBaseline
+        ApplyNesPalette{paletteChoice}
+      EndIf
+    EndIf
+    ;; F1 on the options page (or the jukebox or the palette page, both reached from it) leaves it without its BACK too: what it changed
+    ;; is put back as Esc would, so the top score's save below does not write options the player never kept.
+    optionsUp.w = False
+    If overlayScreenWanted = #SCREEN_OPTIONS OR overlayScreenShown = #SCREEN_OPTIONS Then optionsUp = True
+    If overlayScreenWanted = #SCREEN_JUKEBOX OR overlayScreenShown = #SCREEN_JUKEBOX Then optionsUp = True
+    If overlayScreenWanted = #SCREEN_PALETTE OR overlayScreenShown = #SCREEN_PALETTE Then optionsUp = True
+    If optionsUp <> False
+      If OptionsChanged{} <> False Then RestoreOptionsBaseline{}
+    EndIf
+    SoundReset{}
+    UpdateTopScore{}
+    playerLives = #LIVES_START
+    ReloadBehindLivesCover{True, NewGameLevelToBegin{}}
+    ; F1 ends the game too: a new top score is written, behind the lives cover.
+    SaveTopScoreIfNew{}
+  EndIf
+End Statement
+
+;; END OF RESTART (BLITZ MODE)

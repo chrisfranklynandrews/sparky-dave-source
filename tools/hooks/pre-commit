@@ -1,0 +1,18 @@
+#!/bin/sh
+# Pre-commit hook: the two quick source checks (about 20 s). Turn it on once per clone with
+#   git config core.hooksPath tools/hooks
+# and skip it for one commit with git commit --no-verify.
+# The first Python that runs (on Windows, python3 can be a Store placeholder that does not).
+PYTHON=
+for candidate in python3 python py; do
+    if "$candidate" -c "import sys" >/dev/null 2>&1; then PYTHON=$candidate; break; fi
+done
+if [ -z "$PYTHON" ]; then echo "pre-commit: no Python found"; exit 1; fi
+if ! "$PYTHON" tools/check_source_split.py >/dev/null; then
+    echo "pre-commit: check_source_split.py failed (run python tools/check_source_split.py to see why)"
+    exit 1
+fi
+if ! "$PYTHON" tools/format_ab3.py --check >/dev/null; then
+    echo "pre-commit: format_ab3.py --check failed (python tools/format_ab3.py --write fixes the style)"
+    exit 1
+fi

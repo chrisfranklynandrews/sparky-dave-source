@@ -1,0 +1,534 @@
+;; =======================================================
+;; PALETTE (BLITZ MODE)
+;; =======================================================
+;; The one place that knows what the 16 pens of the screen should be right now, and
+;; the one place that writes them. A pen's colour comes from, in this order:
+;;
+;;   cycle     pen #PEN_CYCLE, the `?` blocks, the floating coins and the HUD coin
+;;             icon: one of cycleColour()'s six steps, a new one every #CYCLE_TICKS
+;;             sim ticks, as the cartridge's ColorRotation does. Nothing is redrawn.
+;;   Mario     his three pens (#PEN_MARIO_*, his alone): marioColour()'s set for his
+;;             state (0 normal, 1 fire, 2 to 5 the star sets; the main project's PALETTE note).
+;;   cover     pen 0 black while a cover screen is up (sparkydave.cover.blitz.ab3):
+;;             everything else is as it is. The title is not a cover picture (an overlay over
+;;             the world) and has the world's colours, except while the redefine screen or
+;;             the attract mode's black cover is up (OverlayOverWorld{}). The options and the
+;;             pause menu are the overlay over the black cover: pen 0 black, and the back's
+;;             pens their colours (coverNow 1, OverlayOverCover{}; the jukebox is coverNow 2, with the sky in a spare front pen for its backdrop). The status bar's text keeps its colours;
+;;             its background is pen 0, so it goes black with the screen, as the
+;;             cartridge's does on its lives screen.
+;;   area      pens 0, 1 and 2, the sky and the brick and its highlight: areaPalette()
+;;             for the main level or the bonus room's underground.
+;;   atlas     every other pen, and the base of all of them: atlasPalette(), the
+;;             tile atlas's own colour map, generated into the level meta.
+;;
+;; UpdatePalette{} is called once per frame from the main loop, AFTER the draw. If anything that decides a pen
+;; has changed, it writes all 16 and calls DisplayPalette once. When only the cycle step changed, it writes
+;; #PEN_CYCLE alone. DisplayPalette rewrites the HUD list's Copper colours, so the update waits for beam line
+;; #PALETTE_SAFE_LINE if the frame's work ended early. The back's pens (16 to 31) change only with the area
+;; or a cover, so a full update writes them only then; Mario's colour changes write 16.
+;;
+;; The cycle step comes from simTickCounter, so the cycle stands still while the sim
+;; does (a cover, a pause) and a frame that ran several ticks moves at most one step.
+
+;; THE NES PALETTE CHOSEN. The four tables above are filled from it: choice 0 the art's own
+;; (nesDrawnRGB(), as the build left them), choice n the nth palette of sparkydave.palettes.data.ab3, each slot the palette's colour for
+;; the slot's colour number in the cartridge (nesSlotUse()). The slots in order: atlasPalette()'s 16 pens, areaPalette()'s four looks of
+;; three pens, marioColour()'s six sets of three, cycleColour()'s six steps. Once a choice, never a frame; the next UpdatePalette{}
+;; writes every pen.
+
+; One component (0 red, 1 green, 2 blue) of one slot's colour under a choice: 0 the art's own, n the nth palette's for the slot's number.
+Function.w NesSlotComponent{choice.w, slot.w, component.w}
+  SHARED nesDrawnRGB(), nesSlotUse(), nesPaletteRGB()
+  If choice = 0 Then Function Return nesDrawnRGB(slot*3 + component)
+  Function Return nesPaletteRGB(((choice - 1)*#NES_USED_COLOURS + nesSlotUse(slot))*3 + component)
+End Function
+
+Statement ApplyNesPalette{choice.w}
+  SHARED atlasPalette(), areaPalette(), marioColour(), cycleColour(), paletteKeyValid
+  ;; Each table over its own slots: a pen of the atlas; a look's pen (set*9 + pen*3); a Mario set's role (set*9 + role*3); a glint step.
+  ;; Each slot is three components, one after another in its table as in the slots.
+  For component.w = 0 To #NES_SLOTS_AREA*3 - 1
+    atlasPalette(component) = NesSlotComponent{choice, #NES_SLOTS_ATLAS + component/3, component MOD 3}
+  Next
+  lastComponent.w = (#NES_SLOTS_MARIO - #NES_SLOTS_AREA)*3 - 1
+  For component = 0 To lastComponent
+    areaPalette(component) = NesSlotComponent{choice, #NES_SLOTS_AREA + component/3, component MOD 3}
+  Next
+  lastComponent = (#NES_SLOTS_CYCLE - #NES_SLOTS_MARIO)*3 - 1
+  For component = 0 To lastComponent
+    marioColour(component) = NesSlotComponent{choice, #NES_SLOTS_MARIO + component/3, component MOD 3}
+  Next
+  lastComponent = (#NES_SLOT_COUNT - #NES_SLOTS_CYCLE)*3 - 1
+  For component = 0 To lastComponent
+    cycleColour(component) = NesSlotComponent{choice, #NES_SLOTS_CYCLE + component/3, component MOD 3}
+  Next
+  paletteKeyValid = False
+End Statement
+
+; Whether a choice is offered: every one in debug mode, else those kept for a release (nesInRelease()).
+Function.w PaletteChoiceAllowed{choice.w}
+  SHARED debugMode, nesInRelease()
+  If debugMode <> False Then Function Return True
+  If nesInRelease(choice) <> False Then Function Return True
+  Function Return False
+End Function
+
+; The next choice offered from fromChoice, a step (1 or -1) at a time round the list (choice 0 to #NES_PALETTE_COUNT).
+Function.w NextPaletteChoice{fromChoice.w, stepWay.w}
+  choiceNow.w = fromChoice
+  For tryIndex.w = 0 To #NES_PALETTE_COUNT
+    choiceNow = (choiceNow + stepWay + #NES_PALETTE_COUNT + 1) MOD(#NES_PALETTE_COUNT + 1)
+    If PaletteChoiceAllowed{choiceNow} <> False Then Function Return choiceNow
+  Next
+  Function Return fromChoice
+End Function
+
+; A choice's name, as the HUD glyphs draw it.
+Function.s PaletteChoiceName{choice.w}
+  SHARED nesPaletteName$()
+  If choice = 0 Then Function Return "AS DRAWN"
+  Function Return nesPaletteName$(choice - 1)
+End Function
+
+; The palette page's area look as AreaLookIndex{}'s set (paletteLookSet(), globals.ab3).
+Function.w PalettePageLookSet{}
+  SHARED paletteLook, paletteLookSet()
+  Function Return paletteLookSet(paletteLook)
+End Function
+
+; The palette page's Mario: normal (set 0), Fire (1), or the Starman's four sets (2 to 5) a set every 2 of the page's sim ticks.
+Function.w PalettePageMarioSet{}
+  SHARED paletteMarioMode, palettePageTicks
+  If paletteMarioMode = 0 Then Function Return 0
+  If paletteMarioMode = 1 Then Function Return 1
+  starSet.w = (palettePageTicks/2) MOD 4 + 2
+  Function Return starSet
+End Function
+
+;; The palette page's scene on the front (the cover bitmap), once as the page opens (OpenPalettePageNow{}): map rows
+;; #PALETTE_SCENE_FIRST_ROW to 14 of 1-1's end, each cell cut from the atlas, at its own map y, over pen 0 (the page's backdrop);
+;; then big and small Mario, a Goomba and a Koopa on the ground, in the game's own shapes. The overlay over the cover shows the front from its pixel 32
+;; (-#SCROLL_BIAS: ShowWorldLists{} in SparkyDave.ab3 keeps the display's front x at 0), so all of it is stamped 32 right.
+Statement StampPaletteScene{}
+  SHARED paletteSceneRow$()
+  Use BitMap #COVER_BM
+  Cls 0
+  For sceneRowIndex.w = 0 To #PALETTE_SCENE_ROWS - 1
+    For sceneColumn.w = 0 To #VIEW_W/#TILE - 1
+      gidNow.w = Val(Mid$(paletteSceneRow$(sceneRowIndex), sceneColumn*3 + 1, 3))
+      If gidNow > 0
+        CutAtlasTile{gidNow - 1}
+        Use BitMap #COVER_BM
+        Block #TILE_SHAPE, sceneColumn*#TILE - #SCROLL_BIAS, (#PALETTE_SCENE_FIRST_ROW + sceneRowIndex)*#TILE
+      EndIf
+    Next
+  Next
+  Use BitMap #COVER_BM
+  Blit #PRE_BIG_R + #MARIO_F_IDLE, #PAL_PAGE_BIG_X - #SCROLL_BIAS, #PAL_PAGE_BIG_Y
+  Blit #PRE_SMALL_R + #MARIO_F_IDLE, #PAL_PAGE_SMALL_X - #SCROLL_BIAS, #PAL_PAGE_SMALL_Y
+  Blit #PRE_GOOMBA, #PAL_PAGE_GOOMBA_X - #SCROLL_BIAS, #PAL_PAGE_SMALL_Y
+  Blit #PRE_KOOPA, #PAL_PAGE_KOOPA_X - #SCROLL_BIAS, #PAL_PAGE_KOOPA_Y
+End Statement
+
+;; The All-Stars look's hue step: the flower, star, coin spin and burst share pens 3 to 5, and while a flower or star is out they step through
+;; four colour sets (orange, green, red, teal), a set every #STAR_FAST_TICKS ticks as the cartridge's does; with none out they rest at set 0.
+Function.w HueStepWanted{}
+  SHARED objActive(), objType(), simTickCounter
+  For hueObject.w = 0 To #MAX_OBJECTS - 1
+    If objActive(hueObject) = True
+      If objType(hueObject) = #OBJ_FLOWER OR objType(hueObject) = #OBJ_STAR
+        hueCount.l = simTickCounter/#STAR_FAST_TICKS
+        Function Return hueCount - (hueCount/4)*4
+      EndIf
+    EndIf
+  Next
+  Function Return 0
+End Function
+
+;; The All-Stars look's palette zone the view is in: the kind of the last PaletteZone (an object in the map) whose x the view's right edge has
+;; reached, 0 before the first and in an area with none. Inside a zone pens 3 to 5, which no tile uses, hold the zone's colours instead of the
+;; hue sets (allstarsZoneHue), so the Piranha Plants and the red Koopa can have reds the 15 pens have no room for; a flower, star or coin that
+;; is out there is in them too.
+Function.w ZoneWanted{}
+  SHARED paletteZoneX(), paletteZoneKind(), paletteZoneCount, cameraX
+  zoneKind.w = 0
+  If paletteZoneCount > 0
+    For zoneIndex.w = 0 To paletteZoneCount - 1
+      If cameraX + #VIEW_W >= paletteZoneX(zoneIndex) Then zoneKind = paletteZoneKind(zoneIndex)
+    Next
+  EndIf
+  Function Return zoneKind
+End Function
+
+; The tile set of a front area (the palette set's bits 0 and 2 folded: 0 the ground's, 1 the underground's, 2 the water's, 3 the castle's).
+Function.w TileSetOfFront{frontAreaNow.w}
+  If frontAreaNow = 1 Then Function Return(#TILE_SET_UNDERGROUND)
+  If frontAreaNow = 2 Then Function Return(#TILE_SET_WATER)
+  If frontAreaNow = 3 Then Function Return(#TILE_SET_CASTLE)
+  Function Return(0)
+End Function
+
+; Whether an All-Stars front pen is a jukebox scene's own: not pen 0 and not the HUD band's (1, 6, 10, 12 and 15).
+Function.w JukeboxScenePen{penNow.w}
+  If penNow < 2 OR penNow > 14 Then Function Return False
+  If penNow = 6 OR penNow = 10 OR penNow = 12 Then Function Return False
+  Function Return True
+End Function
+
+;; The All-Stars look's pens (PaletteComponent{} hands over to this). There are two tile sets, each with its own 15 pens: the overground's and the
+;; underground's (frontArea 1: 1-2's main map and the coin rooms, with their own atlas, sheets and glint); the tables hold both. Front pen 0 is the
+;; backdrop's (the sky's top colour in the main level), pens 1 and 2 the glint (allstarsGlint, the step cycleStep), pens 3 to 5 the hues (allstarsHue, the set allstarsHueStep), every other
+;; front pen the sheet's resting colour (allstarsFront: this look's own table, as atlasPalette() is the NES atlas's); the back's pens 17 to 24 are the hills and clouds' (allstarsBack). Mario is a sprite in this look, with
+;; his own bank, so pens 13 to 15 are tile pens and there is no cycle pen. The covers are as the NES look's: pen 0 black, the back's pens
+;; black or, over the black cover, as in the main level.
+Function.w AllStarsPaletteComponent{palettePen.w, component.w, cycleStep.w, areaNow.w, coverNow.w}
+  SHARED areaPalette(), allstarsFront(), allstarsGlint(), allstarsHue(), allstarsBack(), allstarsSky(), allstarsHueStep, allstarsZone, allstarsZoneHue(), allstarsBackUnder(), allstarsBackWater(), allstarsSkyWater()
+  SHARED allstarsCastleWall(), allstarsBackCastle(), jukeboxSceneShown, jukeboxSceneRGB()
+  If palettePen >= 16
+    If coverNow = True Then Function Return 0
+    backArea.w = areaNow
+    If coverNow = #PALETTE_COVER_OVERLAY OR coverNow = #PALETTE_COVER_JUKEBOX OR coverNow = #PALETTE_COVER_PAGE Then backArea = #AREA_MAIN
+    backSet.w = (backArea AND 1) + (backArea AND 4)/2
+    ; An underground area with a back (bit 0 and not bit 1, and not a water or castle area): the cave wall's 15 pens; pen 0 is transparent over the front's.
+    backPen.w = palettePen - 16
+    ;; Under an overlay (the title over the world, bit 3 of areaNow; the pause and options pages, the jukebox, the palette page) the back bitmap is the page's canvas: its
+    ;; glyphs and the logo are drawn in the HUD sheet's pens, so back pen p is the overground's front pen p (white on 15), not a strip's colour.
+    If backPen >= 1 AND (coverNow = #PALETTE_COVER_OVERLAY OR coverNow = #PALETTE_COVER_JUKEBOX OR coverNow = #PALETTE_COVER_PAGE OR (areaNow AND 8) <> 0)
+      Function Return allstarsFront((backPen - 1)*3 + component)
+    EndIf
+    If (backArea AND 7) = 1
+      If backPen = 0 Then Function Return 0
+      Function Return allstarsBackUnder((backPen - 1)*3 + component)
+    EndIf
+    ; A water area with a back (4; 6 is one without): the seabed's pens, pen 0 transparent over the front's (the water).
+    If (backArea AND 7) = 4
+      If backPen = 0 Then Function Return 0
+      Function Return allstarsBackWater((backPen - 1)*3 + component)
+    EndIf
+    ; A castle area with a back (5; 7 is one without): the wall's pens, pen 0 transparent over the front's (the wall colour).
+    If (backArea AND 7) = 5
+      If backPen = 0 Then Function Return 0
+      Function Return allstarsBackCastle((backPen - 1)*3 + component)
+    EndIf
+    If (backArea AND 3) <> 0 Then Function Return areaPalette(backSet*9 + component)
+    If backPen >= 1 AND backPen <= #ALLSTARS_BACK_PENS Then Function Return allstarsBack((backPen - 1)*3 + component)
+    Function Return allstarsSky(component)
+  EndIf
+  If palettePen = 0 AND coverNow <> False AND coverNow <> #PALETTE_COVER_PAGE Then Function Return 0
+  ;; The jukebox page: its scene's own pens (jukeboxSceneRGB()): every front pen but the HUD band's (1, 6, 10, 12
+  ;; and 15, which keep the overground's colours below) and pen 0 (black, above).
+  If coverNow = #PALETTE_COVER_JUKEBOX AND JukeboxScenePen{palettePen} = True Then Function Return jukeboxSceneRGB((jukeboxSceneShown*16 + palettePen)*3 + component)
+  frontArea.w = (areaNow AND 1) + (areaNow AND 4)/2
+  If coverNow = #PALETTE_COVER_JUKEBOX Then frontArea = #AREA_MAIN
+  If palettePen = 0
+    If frontArea = #AREA_MAIN Then Function Return allstarsSky(component)
+    If frontArea = 2 Then Function Return allstarsSkyWater(component)
+    If frontArea = 3 Then Function Return allstarsCastleWall(component)
+    Function Return areaPalette(frontArea*9 + component)
+  EndIf
+  tileSet.w = TileSetOfFront{frontArea}
+  If palettePen = 1 Then Function Return allstarsGlint(tileSet*36 + cycleStep*6 + component)
+  If palettePen = 2 Then Function Return allstarsGlint(tileSet*36 + cycleStep*6 + 3 + component)
+  If palettePen <= 5 AND allstarsZone > 0 Then Function Return allstarsZoneHue((allstarsZone - 1)*9 + (palettePen - 3)*3 + component)
+  If palettePen <= 5 Then Function Return allstarsHue(allstarsHueStep*9 + (palettePen - 3)*3 + component)
+  Function Return allstarsFront(tileSet*45 + (palettePen - 1)*3 + component)
+End Function
+
+;; The All-Stars sky: COLOR00 written 24 bit by five Copper moves, BPLCON3 with LOCT clear and the high nibbles, LOCT set and the low nibbles,
+;; LOCT clear again. BPLCON3 is $1000 in the world lists from line 18 on (the back's colour offset 16: #BPLCON3_BACK), LOCT is bit 9.
+Function.s SkyColourString{skyRed.w, skyGreen.w, skyBlue.w}
+  highPart.w = (skyRed/16)*256 + (skyGreen/16)*16 + skyBlue/16
+  lowPart.w = (skyRed AND 15)*256 + (skyGreen AND 15)*16 + (skyBlue AND 15)
+  Function Return Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK) + Mki$(#COLOR00) + Mki$(highPart) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + $200) + Mki$(#COLOR00) + Mki$(lowPart) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK)
+End Function
+
+;; The world's last line: no bitplanes after it (the display goes on fetching rows until its window closes, and under the front bitmap,
+;; whose clear rows end at #SURFACE_H, there is only whatever memory holds), and the border blank on (#BORDER_BLANK), so the frame is black
+;; from here to the HUD list (which sets it again, after its palette load). Each list's header sets both back at the next frame.
+Function.s WorldEndString{}
+  Function Return Mki$(#BPLCON0) + Mki$($201) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + #BORDER_BLANK)
+End Function
+
+;; The HUD list's and list 2's start strings: the border blank off at their first line (a wait for the line before, which the Copper has
+;; passed, so the move is made at once, in the line's blank), each with its header's own BPLCON3 less #BORDER_BLANK: the HUD list's the
+;; library's $0c00, list 2's that XOR its DisplayControls (#PLAYFIELD2_OFFSET_HUD with #HUD_OVER_WORLD: 0). Written once (InitBand{}).
+Statement ShowHudStart{}
+  CustomString 0, 0, -1, Mki$(#BPLCON3) + Mki$(#PLAYFIELD2_OFFSET_HUD)
+  awayStart.w = #BPLCON3_BACK
+  If #HUD_OVER_WORLD = 1 Then awayStart = 0
+  CustomString 2, 0, -1, Mki$(#BPLCON3) + Mki$(awayStart)
+End Statement
+
+;; The end string in both world lists, at the slot after the given one. Written after every other string of the list (CustomString puts in
+;; the wait for line 255 by the last string written: SetAllStarsSky{}), so: the NES look once after the band's strings (InitBand{}), the
+;; All-Stars look last in SetAllStarsSky{}.
+Statement ShowWorldEnd{endSlot.w}
+  CustomString 1, endSlot, #VIEW_H, WorldEndString{}
+  CustomString 2, #AWAY_WORLD_SLOT + endSlot, #VIEW_H + #HUD_H + #LIST_GAP, WorldEndString{}
+End Statement
+
+;; The sky's bands 1 up at their first line, each in its own #SKY_STRING_SLOTS slots after the band's strings, in both world lists (list 2's
+;; lines are #HUD_H + #LIST_GAP on); the colour of band 0 is the backdrop's own (pen 0), and one more string on the last line puts it back so the
+;; next frame starts there. skySet 1 is the overground's bands, 2 the water's (the same number, with the same number above the band's line); 0 is off (a cover,
+;; an underground area): the same slots hold no-ops and the backdrop stays pen 0's colour.
+Statement SetAllStarsSky{skySet.w}
+  SHARED allstarsSkyLine(), allstarsSky(), allstarsSkyLineWater(), allstarsSkyWater()
+  noSky$ = Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0)
+  ;; Written in the Copper's order (skyOrder), not the bands': CustomString puts in the wait for line 255 (a list's lines past 255 need it) when its
+  ;; line is past 255 and the last string written to that list was not, so only the order of the calls places it. In band order band 0 (the last
+  ;; line) came first, after the band's strings, and took one, and the fetch-off string a second: on the first call, at start, the Copper stopped
+  ;; at the second (line 255 had gone) until the next frame, the list's end (bitplane and sprite DMA off) never ran, and the cover showed dots at
+  ;; the top and bottom while the game loaded (displaylib.ab3, _customstring).
+  For skyOrder.w = 0 To #ALLSTARS_SKY_BANDS - 1
+    skyBand.w = (skyOrder + 1) MOD #ALLSTARS_SKY_BANDS
+    skyLineNow.w = allstarsSkyLine(skyBand)
+    If skySet = 2 Then skyLineNow = allstarsSkyLineWater(skyBand)
+    skyColourBand.w = skyBand
+    If skyBand = 0
+      skyLineNow = #VIEW_H - 1
+    EndIf
+    ;; In the Copper's order, which is the lines' order: the bands above the band's line (the first #SKY_EARLY_BANDS, in bands 1 up) first, then
+    ;; the band's own two strings, then the rest and the last string. List 1: from slot 0; list 2: after the HUD's strings.
+    skySlot.w = skyOrder*#SKY_STRING_SLOTS
+    If skyOrder >= #SKY_EARLY_BANDS Then skySlot = skySlot + #BAND_CUSTOMS
+    skyString$ = noSky$
+    If skySet = 1 Then skyString$ = SkyColourString{allstarsSky(skyColourBand*3), allstarsSky(skyColourBand*3 + 1), allstarsSky(skyColourBand*3 + 2)}
+    If skySet = 2 Then skyString$ = SkyColourString{allstarsSkyWater(skyColourBand*3), allstarsSkyWater(skyColourBand*3 + 1), allstarsSkyWater(skyColourBand*3 + 2)}
+    CustomString 1, skySlot, skyLineNow, skyString$
+    CustomString 2, #AWAY_WORLD_SLOT + skySlot, skyLineNow + #HUD_H + #LIST_GAP, skyString$
+  Next
+  ; The world's end string, always, the sky on or off.
+  ShowWorldEnd{#BAND_CUSTOMS + #ALLSTARS_SKY_BANDS*#SKY_STRING_SLOTS}
+End Statement
+
+;; One component (0 red, 1 green, 2 blue) of one pen, for the given state. Pure, so
+;; the tests can read it. Pens 16 to 31 are the back playfield's: its pen p
+;; is the front's colour for p, without the cycle and Mario, since only the clouds and hills
+;; are on it. During a cover (coverNow True) and outside the main level (the bonus room has no
+;; back) every back pen is the backdrop's colour (pen 0's), so the back is not seen: the cover's
+;; pen 0 and the bonus room's sky are transparent on the front. coverNow 1 is the overlay over the
+;; black cover (the options, the pause menu): pen 0 black, the back's pens the main level's
+;; colours, in either area.
+Function.w PaletteComponent{palettePen.w, component.w, cycleStep.w, marioSet.w, areaNow.w, coverNow.w}
+  SHARED atlasPalette(), areaPalette(), cycleColour(), marioColour(), jukeboxSceneShown, jukeboxSceneSet()
+  If #LOOK_ALLSTARS = 1 Then Function Return AllStarsPaletteComponent{palettePen, component, cycleStep, areaNow, coverNow}
+  If palettePen >= 16
+    If coverNow = True Then Function Return 0
+    backArea.w = areaNow
+    If coverNow = #PALETTE_COVER_OVERLAY OR coverNow = #PALETTE_COVER_JUKEBOX OR coverNow = #PALETTE_COVER_PAGE Then backArea = #AREA_MAIN
+    ;; areaNow is the palette set (bits 0 and 2: 1 the underground's, 4 the water's, 5 the castle's) and, in bit 1, that this area shows no
+    ;; back (AreaLookIndex{}); the underground set never shows one.
+    backSet.w = (backArea AND 1) + (backArea AND 4)/2
+    If (backArea AND 3) <> 0 Then Function Return areaPalette(backSet*9 + component)
+    If palettePen - 16 <= 2 Then Function Return areaPalette(backSet*9 + (palettePen - 16)*3 + component)
+    Function Return atlasPalette((palettePen - 16)*3 + component)
+  EndIf
+  If palettePen = #PEN_CYCLE Then Function Return cycleColour(cycleStep*3 + component)
+  If palettePen = #PEN_MARIO_RED Then Function Return marioColour(marioSet*9 + component)
+  If palettePen = #PEN_MARIO_SKIN Then Function Return marioColour(marioSet*9 + 3 + component)
+  If palettePen = #PEN_MARIO_BROWN Then Function Return marioColour(marioSet*9 + 6 + component)
+  ; The palette page (coverNow 3) shows its look's backdrop in pen 0: its rows are over the sky, as the title's are.
+  If palettePen = 0 AND coverNow <> False AND coverNow <> #PALETTE_COVER_PAGE Then Function Return 0
+  frontArea.w = (areaNow AND 1) + (areaNow AND 4)/2
+  ;; The jukebox page (coverNow 2): its scene's area's pens 0 to 2 (jukeboxSceneSet()), and the scene's sky in
+  ;; the spare pen it uses for it (#JKB_SKY_PEN), that set's pen 0, so the rest of the page stays black.
+  If coverNow = #PALETTE_COVER_JUKEBOX
+    sceneSet.w = jukeboxSceneSet(jukeboxSceneShown)
+    frontArea = (sceneSet AND 1) + (sceneSet AND 4)/2
+    If palettePen = #JKB_SKY_PEN Then Function Return areaPalette(frontArea*9 + component)
+  EndIf
+  If palettePen <= 2 Then Function Return areaPalette(frontArea*9 + palettePen*3 + component)
+  Function Return atlasPalette(palettePen*3 + component)
+End Function
+
+;; True while the world slot shows the title overlay over the world (sparkydave.cover.blitz.ab3):
+;; the title's page is shown, and neither the redefine screen nor the attract mode's black cover
+;; is up. The palette has the world's colours then, and the main loop shows the world with the
+;; back in front.
+Function.w OverlayOverWorld{}
+  SHARED coverKind, redefineActive, attractPhase, overlayScreenShown
+  If coverKind <> #COVER_TITLE Then Function Return False
+  If overlayScreenShown <> #SCREEN_TITLE Then Function Return False
+  If redefineActive <> False Then Function Return False
+  If attractPhase = #ATTRACT_BLANK Then Function Return False
+  Function Return True
+End Function
+
+;; True while the world slot shows the overlay over the black cover: the options page or the pause
+;; menu is shown, and the redefine screen is not up. Pen 0 is black and the back's pens have their
+;; colours; the main loop shows the cover bitmap with the back in front.
+Function.w OverlayOverCover{}
+  SHARED coverKind, redefineActive, overlayScreenShown
+  If coverKind <> #COVER_TITLE AND coverKind <> #COVER_MENU Then Function Return False
+  If overlayScreenShown <> #SCREEN_OPTIONS AND overlayScreenShown <> #SCREEN_PAUSE AND overlayScreenShown <> #SCREEN_JUKEBOX AND overlayScreenShown <> #SCREEN_PALETTE AND overlayScreenShown <> #SCREEN_CONTINUE Then Function Return False
+  If redefineActive <> False Then Function Return False
+  Function Return True
+End Function
+
+;; The palette set of the area on screen, for PaletteComponent{}: bits 0 and 2 are the set, 1 for an underground area (its
+;; own colours), 4 for a water area (pen 0 the water), 5 for a castle, else 0 (the ground's), and bit 1 says the
+;; area shows no back playfield (its scenery is none: every other kind has a strip).
+Function.w AreaLookIndex{}
+  SHARED currentAreaType, currentAreaScenery
+  lookSet.w = 0
+  If currentAreaType = #AREA_TYPE_UNDERGROUND Then lookSet = 1
+  If currentAreaType = #AREA_TYPE_WATER Then lookSet = 4
+  ; A castle has its own set too (bits 0 and 2: the fourth).
+  If currentAreaType = #AREA_TYPE_CASTLE Then lookSet = 5
+  If currentAreaScenery = #SCENERY_NONE Then lookSet = lookSet + 2
+  Function Return(lookSet)
+End Function
+
+Statement UpdatePalette{}
+  SHARED simTickCounter, paletteCycleStep, marioColourShown, areaPaletteShown
+  SHARED coverKind, paletteCoverShown, paletteKeyValid, cycleColour(), overlayScreenShown
+  SHARED hudAwayShown, hudAwayWanted, marioColour(), palettePageTicks, marioSpriteRGB(), hueStepShown, allstarsHueStep, allstarsGlint(), allstarsHue()
+  SHARED zoneShown, allstarsZone, allstarsZoneHue()
+  SHARED allstarsSkyWanted, jukeboxSceneShown, paletteSceneShown
+  ; Every frame, so not MOD (about 2.3 lines; a division is 0.08: the main project's OPTIMISATION note, entry 8).
+  cycleCount.l = simTickCounter/#CYCLE_TICKS
+  stepNow.w = cycleCount - (cycleCount/#CYCLE_STEPS)*#CYCLE_STEPS
+  marioNow.w = MarioColourSetWanted{}
+  lookNow.w = AreaLookIndex{}
+  hueNow.w = 0
+  If #LOOK_ALLSTARS = 1 Then hueNow = HueStepWanted{}
+  coverNow.w = False
+  If coverKind <> #COVER_NONE Then coverNow = True
+  If OverlayOverWorld{} = True Then coverNow = False
+  If OverlayOverCover{} = True Then coverNow = #PALETTE_COVER_OVERLAY
+  If OverlayOverCover{} = True AND overlayScreenShown = #SCREEN_JUKEBOX Then coverNow = #PALETTE_COVER_JUKEBOX
+  ; The All-Stars look's title over the world: bit 3 of the palette set says the back is the title's canvas (AllStarsPaletteComponent{}).
+  If #LOOK_ALLSTARS = 1 AND OverlayOverWorld{} = True Then lookNow = lookNow + 8
+  ;; The palette page: its own look and Mario, and the glint and the Starman by its own count of sim ticks (UpdatePaletteMenu{}: the sim
+  ;; stands still under the cover, and a frame can be more than one tick, or none), so they move as fast as in the game.
+  If OverlayOverCover{} = True AND overlayScreenShown = #SCREEN_PALETTE
+    coverNow = #PALETTE_COVER_PAGE
+    pageCycles.l = palettePageTicks/#CYCLE_TICKS
+    stepNow = pageCycles - (pageCycles/#CYCLE_STEPS)*#CYCLE_STEPS
+    marioNow = PalettePageMarioSet{}
+    lookNow = PalettePageLookSet{}
+  EndIf
+  ; The palette zone (the All-Stars look's; none under a cover or on the palette page).
+  zoneNow.w = 0
+  If #LOOK_ALLSTARS = 1 AND coverNow = False Then zoneNow = ZoneWanted{}
+  ; The jukebox page's scene: its palette follows the SONG row (PaletteComponent{}).
+  sceneNow.w = -1
+  If coverNow = #PALETTE_COVER_JUKEBOX Then sceneNow = jukeboxSceneShown
+  If paletteKeyValid = True
+    If stepNow = paletteCycleStep AND marioNow = marioColourShown AND lookNow = areaPaletteShown AND coverNow = paletteCoverShown AND hueNow = hueStepShown AND zoneNow = zoneShown AND sceneNow = paletteSceneShown Then Statement Return
+  EndIf
+  ;; Only the cycle step and Mario's colour set moved (the usual case: the step every #CYCLE_TICKS ticks, the set every other tick
+  ;; while the Starman is on, or in the Fire flower's flash): only those pens are worked out, not all 16 pens' 48 components
+  ;; (the main project's OPTIMISATION note, entries 7 and 12).
+  penChangesOnly.w = False
+  backChanged.w = True
+  cycleMoved.w = stepNow <> paletteCycleStep
+  marioMoved.w = marioNow <> marioColourShown
+  hueMoved.w = hueNow <> hueStepShown
+  zoneMoved.w = zoneNow <> zoneShown
+  If paletteKeyValid = True
+    If lookNow = areaPaletteShown AND coverNow = paletteCoverShown AND sceneNow = paletteSceneShown
+      penChangesOnly = True
+      ; The back's pens (16 to 31) depend on the area and the cover alone (PaletteComponent{}).
+      backChanged = False
+    EndIf
+  EndIf
+  While RasterLine{} < #PALETTE_SAFE_LINE
+  Wend
+  paletteKeyValid = True
+  paletteCycleStep = stepNow
+  marioColourShown = marioNow
+  hueStepShown = hueNow
+  allstarsHueStep = hueNow
+  allstarsZone = zoneNow
+  zoneShown = zoneNow
+  areaPaletteShown = lookNow
+  paletteCoverShown = coverNow
+  paletteSceneShown = sceneNow
+  ;; The All-Stars sky: its strings run in the main level with no cover up (the covers and the other areas have their own backdrop colour).
+  ;; Only asked for here: ShowAllStarsSky{} writes them after the next VWait, with the picture.
+  If #LOOK_ALLSTARS = 1
+    allstarsSkyWanted = 0
+    If coverNow = False AND ((lookNow AND 7) = 0 OR (lookNow AND 7) = 2) Then allstarsSkyWanted = 1
+    ; A water area (the set's bits 0 and 2 are 4: lookNow 4, or 6 with no back): the water's bands.
+    If coverNow = False AND (lookNow AND 5) = 4 Then allstarsSkyWanted = 2
+  EndIf
+  If penChangesOnly = True
+    ; The All-Stars look's moving pens: the glint (pens 1 and 2) and the hues (pens 3 to 5); the NES look's one cycle pen.
+    If #LOOK_ALLSTARS = 1
+      If cycleMoved <> False
+        glintBase.w = stepNow*6
+        glintBase = glintBase + TileSetOfFront{(lookNow AND 1) + (lookNow AND 4)/2}*36
+        AGAPalRGB 0, 1, allstarsGlint(glintBase), allstarsGlint(glintBase + 1), allstarsGlint(glintBase + 2)
+        AGAPalRGB 0, 2, allstarsGlint(glintBase + 3), allstarsGlint(glintBase + 4), allstarsGlint(glintBase + 5)
+      EndIf
+      ; Inside a zone the three pens are the zone's and rest; otherwise they are the hue set's.
+      If zoneNow > 0
+        If zoneMoved <> False
+          zoneBase.w = (zoneNow - 1)*9
+          AGAPalRGB 0, 3, allstarsZoneHue(zoneBase), allstarsZoneHue(zoneBase + 1), allstarsZoneHue(zoneBase + 2)
+          AGAPalRGB 0, 4, allstarsZoneHue(zoneBase + 3), allstarsZoneHue(zoneBase + 4), allstarsZoneHue(zoneBase + 5)
+          AGAPalRGB 0, 5, allstarsZoneHue(zoneBase + 6), allstarsZoneHue(zoneBase + 7), allstarsZoneHue(zoneBase + 8)
+        EndIf
+      Else
+        If hueMoved <> False OR zoneMoved <> False
+          AGAPalRGB 0, 3, allstarsHue(hueNow*9), allstarsHue(hueNow*9 + 1), allstarsHue(hueNow*9 + 2)
+          AGAPalRGB 0, 4, allstarsHue(hueNow*9 + 3), allstarsHue(hueNow*9 + 4), allstarsHue(hueNow*9 + 5)
+          AGAPalRGB 0, 5, allstarsHue(hueNow*9 + 6), allstarsHue(hueNow*9 + 7), allstarsHue(hueNow*9 + 8)
+        EndIf
+      EndIf
+    Else
+      If cycleMoved <> False Then AGAPalRGB 0, #PEN_CYCLE, cycleColour(stepNow*3), cycleColour(stepNow*3 + 1), cycleColour(stepNow*3 + 2)
+    EndIf
+    ; Mario's three pens: the NES look's only (he is a sprite in the All-Stars look, and pens 13 to 15 are tile pens).
+    If marioMoved <> False AND #LOOK_ALLSTARS = 0
+      ; The three pens PaletteComponent{} gives from marioColour(): red, skin and brown, nine components a set.
+      AGAPalRGB 0, #PEN_MARIO_RED, marioColour(marioNow*9), marioColour(marioNow*9 + 1), marioColour(marioNow*9 + 2)
+      AGAPalRGB 0, #PEN_MARIO_SKIN, marioColour(marioNow*9 + 3), marioColour(marioNow*9 + 4), marioColour(marioNow*9 + 5)
+      AGAPalRGB 0, #PEN_MARIO_BROWN, marioColour(marioNow*9 + 6), marioColour(marioNow*9 + 7), marioColour(marioNow*9 + 8)
+    EndIf
+  Else
+    lastPen.w = 15
+    If backChanged = True Then lastPen = #COPPER_COLORS - 1
+    For penIndex = 0 To lastPen
+      AGAPalRGB 0, penIndex, PaletteComponent{penIndex, 0, stepNow, marioNow, lookNow, coverNow}, PaletteComponent{penIndex, 1, stepNow, marioNow, lookNow, coverNow}, PaletteComponent{penIndex, 2, stepNow, marioNow, lookNow, coverNow}
+    Next
+  EndIf
+  ;; Mario as a hardware sprite (#MARIO_SPRITE): his sprite's three colours, the sprite bank's entries 33 to 35, are his pens' (the pens'
+  ;; low two bits are the sprite's colours 1 to 3: skin, brown, red). Written when all the pens are, and when his set moved.
+  If #MARIO_SPRITE = 1
+    If penChangesOnly = False OR marioMoved <> False
+      If #MARIO_SPRITE_COLOURS = 15
+        ; The All-Stars sprite's own 13 colours in this set (marioSpriteRGB(), sparkydave.mario-allstars.data.ab3): entries 33 on.
+        For spritePen.w = 1 To #MARIO_SPRITE_PENS
+          spriteBase.w = (marioNow*#MARIO_SPRITE_PENS + spritePen - 1)*3
+          AGAPalRGB 0, 32 + spritePen, marioSpriteRGB(spriteBase), marioSpriteRGB(spriteBase + 1), marioSpriteRGB(spriteBase + 2)
+        Next
+      Else
+        AGAPalRGB 0, #PEN_SPRITE_SKIN, marioColour(marioNow*9 + 3), marioColour(marioNow*9 + 4), marioColour(marioNow*9 + 5)
+        AGAPalRGB 0, #PEN_SPRITE_BROWN, marioColour(marioNow*9 + 6), marioColour(marioNow*9 + 7), marioColour(marioNow*9 + 8)
+        AGAPalRGB 0, #PEN_SPRITE_RED, marioColour(marioNow*9), marioColour(marioNow*9 + 1), marioColour(marioNow*9 + 2)
+      EndIf
+    EndIf
+  EndIf
+  DisplayPalette 0, 0
+  ;; List 2 (the HUD away) loads the palette too: kept current while it is on show or asked for, and given the whole of it
+  ;; as it is switched to (ShowWorldLists{}).
+  If HudAwayActive{} <> False Then DisplayPalette 2, 0
+End Statement
+
+;; The All-Stars sky's strings as the last UpdatePalette{} wanted them, right after a VWait. UpdatePalette{} writes the colours past the
+;; HUD list's palette load, so they start with the frame after its VWait; the strings are in the world lists and act on the Copper's pass
+;; at once, so written before the VWait they would change the sky part way down the frame before (the old world's sky going flat as a cover
+;; comes up, the cover's black going to sky bands as it ends). Each place that writes the palette and then waits calls it: the main
+;; loop, PresentCoverFrame{} and the start.
+Statement ShowAllStarsSky{}
+  SHARED allstarsSkyWanted, allstarsSkyShown
+  If #LOOK_ALLSTARS = 0 Then Statement Return
+  If allstarsSkyWanted = allstarsSkyShown Then Statement Return
+  SetAllStarsSky{allstarsSkyWanted}
+  allstarsSkyShown = allstarsSkyWanted
+End Statement
+
+;; END OF PALETTE (BLITZ MODE)

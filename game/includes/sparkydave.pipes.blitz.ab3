@@ -1,0 +1,239 @@
+;; =======================================================
+;; PIPES (BLITZ MODE)
+;; =======================================================
+;; Going down the pipe to the bonus room and coming back up another, from the
+;; cartridge (smbdis 12270 HandlePipeEntry, 5683 VerticalPipeEntry, 5705
+;; SideExitPipeEntry, 5717 EnterSidePipe, 5500 PlayerEntrance). The area switch
+;; itself, which reloads the screen, is in sparkydave.areas.blitz.ab3.
+;;
+;;   down      Standing on the top of the one enterable pipe (the level's PipeEntry
+;;             object, x 912) with a foot on each of its two top tiles, Down pressed:
+;;             48 ticks of sinking 1 px a tick, behind the pipe, then the area event.
+;;   side      In the bonus room, or in a level area with an exit pipe (1-2's), walking right into the mouth of the exit pipe (the
+;;             PipeExit object) on the floor: 48 ticks moving into it at half a pixel
+;;             a tick until he is in the mouth (no further: his feet would show under the
+;;             narrower body), behind the pipe, then the area event back to the main level.
+;;   up        Back in the main level he rises out of the pipe at AreaReturn from
+;;             below the bottom of the screen, 1 px a tick, behind the pipe until his
+;;             feet clear it; then he is free.
+;; Mario cannot go behind a tile, so after he is drawn the pipe's own tiles are drawn
+;; over him again (DrawPipeOcclusion{}, the item occluder's technique).
+
+; A warp pipe's world as a level: the world's first level in the table, -1 for a world the game does not have (1-2's 3 and 4).
+Function.w FirstLevelOfWorld{world.w}
+  SHARED tableLevelWorld(), tableLevelNumber()
+  For levelIndex.w = 0 To #LEVEL_TABLE_COUNT - 1
+    If tableLevelWorld(levelIndex) = world AND tableLevelNumber(levelIndex) = 1 Then Function Return(levelIndex)
+  Next
+  Function Return(-1)
+End Function
+
+;; The rule for going down a pipe whose top is at pipeTop and left edge at pipeX (the bonus pipe's and a warp pipe's): the main
+;; level, free and standing, Down held, the left foot on the pipe's left top tile and the right foot on its right one (so he must be
+;; centred over it, as the cartridge's two metatile checks make him), his feet on the top.
+Function.w OnPipeTop{pipeX.w, pipeTop.w}
+  SHARED currentArea, playerState, playerOnGround, playerButtons, playerX, playerY
+  If currentArea <> #AREA_MAIN Then Function Return False
+  If playerState <> #PLAYER_ST_FREE Then Function Return False
+  If playerOnGround = False Then Function Return False
+  If (playerButtons AND #MARIO_BTN_DOWN) = 0 Then Function Return False
+  If playerY + #TILE <> pipeTop Then Function Return False
+  footLeft.w = playerX + #PROBE_FOOT_X1
+  footRight.w = playerX + #PROBE_FOOT_X2
+  If footLeft < pipeX Then Function Return False
+  If footLeft >= pipeX + #TILE Then Function Return False
+  If footRight < pipeX + #TILE Then Function Return False
+  If footRight >= pipeX + #TILE*2 Then Function Return False
+  Function Return True
+End Function
+
+;; The warp pipe Mario can go down now, -1 for none (HandlePipeEntry, smbdis 12270): the rule above on a warp pipe's top, once the
+;; zone has been reached (the cartridge's WarpZoneControl: here, its text drawn), and only one whose world the game has. Which pipe is
+;; where he stands (the cartridge counts by his place on the screen, the warp room being one screen: the same pipe).
+Function.w WarpPipeReady{}
+  SHARED warpPipeX(), warpPipeY(), warpPipeWorld(), warpPipeCount, warpZoneState
+  If warpZoneState = 0 OR warpPipeCount = 0 Then Function Return(-1)
+  For warpIndex.w = 0 To warpPipeCount - 1
+    If OnPipeTop{warpPipeX(warpIndex), warpPipeY(warpIndex)} = True
+      If FirstLevelOfWorld{warpPipeWorld(warpIndex)} >= 0 Then Function Return(warpIndex)
+    EndIf
+  Next
+  Function Return(-1)
+End Function
+
+; The way in to the area's bonus pipe (its PipeEntry), by the rule above.
+Function.w PipeEntryReady{}
+  SHARED areaPipeEntryY, areaPipeEntryX
+  Function Return OnPipeTop{areaPipeEntryX, areaPipeEntryY}
+End Function
+
+;; The rule for the way out: the bonus room, free and standing on the floor in line
+;; with the exit pipe, right held, his right side at its mouth.
+Function.w PipeExitReady{}
+  SHARED areaPipeExitY, areaPipeExitH, areaPipeExitX
+  SHARED playerState, playerOnGround, playerButtons, playerX, playerY
+  If playerState <> #PLAYER_ST_FREE Then Function Return False
+  If playerOnGround = False Then Function Return False
+  If (playerButtons AND #MARIO_BTN_RIGHT) = 0 Then Function Return False
+  If playerY + #TILE <> areaPipeExitY + areaPipeExitH Then Function Return False
+  If playerX + #PROBE_SIDE_X2 + 1 < areaPipeExitX Then Function Return False
+  ;; Not beyond the mouth: a level area with other pipes at the same height past the exit pipe (1-2's warp pipes, reached from
+  ;; above) must not take a Mario who lands on one holding Right.
+  If playerX + #PROBE_SIDE_X2 + 1 > areaPipeExitX + #TILE Then Function Return False
+  Function Return True
+End Function
+
+;; The pipe area's cells, as the move begins to be drawn: each one's GID (0, empty: nothing drawn), none cut yet. A cell is cut from
+;; the atlas into its own shape the first frame Mario's picture overlaps it (DrawPipeOcclusion{}), and kept for the rest of the move,
+;; so a frame only Blocks. Cutting the whole area at once on the first frame (up to 8 GetaShapes, about 140 lines, the main project's OPTIMISATION note
+;; entry 6) put that frame over budget on NTSC in 2-2, whose water pipe has six cells (entry 14). Called from DrawPipeOcclusion{} on
+;; the move's first drawn frame, not from StartPipe{}: the test program runs the moves but never draws, and has neither the atlas nor
+;; these shape slots.
+Statement CutPipeOccluders{}
+  SHARED pipeOccludeCol, pipeOccludeRow, pipeOccludeCols, pipeOccludeRows
+  SHARED pipeOccludeGid(), pipeOccludeCut(), mapBuffer()
+  cellIndex.w = 0
+  For occludeRow.w = pipeOccludeRow To pipeOccludeRow + pipeOccludeRows - 1
+    For occludeCol.w = pipeOccludeCol To pipeOccludeCol + pipeOccludeCols - 1
+      If cellIndex < #PIPE_OCCLUDE_MAX
+        pipeOccludeGid(cellIndex) = mapBuffer(occludeRow*#MAP_W + occludeCol)
+        pipeOccludeCut(cellIndex) = False
+      EndIf
+      cellIndex = cellIndex + 1
+    Next
+  Next
+End Statement
+
+;; Begin a pipe move: the state, the timer, no motion of his own, and the tiles that
+;; are to cover him.
+Statement StartPipe{pipeState.w}
+  SHARED areaPipeExitX, areaPipeExitY, areaPipeExitH
+  SHARED areaPipeEntryX, areaPipeEntryY, areaPipeEntryW, areaPipeEntryH, areaReturnX, areaReturnY
+  SHARED playerState, pipeTimer, warpPipeTaken, warpPipeX(), warpPipeY(), warpPipeH()
+  SHARED pipeOccludeCol, pipeOccludeRow, pipeOccludeCols, pipeOccludeRows, pipeOccludersCut
+  playerState = pipeState
+  pipeTimer = 0
+  ; Down a pipe or into the side pipe, not out of one (smbdis 12089, 12285).
+  If pipeState <> #PLAYER_ST_PIPE_UP Then SoundSquare1{#SFX_PIPE_DOWN_INJURY}
+  StopPlayer{}
+  If pipeState = #PLAYER_ST_PIPE_DOWN
+    If warpPipeTaken >= 0
+      ; A warp pipe: its own tiles cover him, and the music stops as he goes down (HandlePipeEntry's Silence).
+      pipeOccludeCol = warpPipeX(warpPipeTaken)/#TILE
+      pipeOccludeRow = warpPipeY(warpPipeTaken)/#TILE
+      pipeOccludeCols = 2
+      pipeOccludeRows = warpPipeH(warpPipeTaken)/#TILE
+      SoundEventMusic{#MUSIC_SILENCE}
+    Else
+      pipeOccludeCol = areaPipeEntryX/#TILE
+      pipeOccludeRow = areaPipeEntryY/#TILE
+      pipeOccludeCols = areaPipeEntryW/#TILE
+      pipeOccludeRows = areaPipeEntryH/#TILE
+    EndIf
+  EndIf
+  If pipeState = #PLAYER_ST_PIPE_SIDE
+    pipeOccludeCol = areaPipeExitX/#TILE
+    pipeOccludeRow = areaPipeExitY/#TILE
+    pipeOccludeCols = #PIPE_SIDE_COLS
+    pipeOccludeRows = areaPipeExitH/#TILE
+  EndIf
+  If pipeState = #PLAYER_ST_PIPE_UP
+    pipeOccludeCol = (areaReturnX - #TILE/2)/#TILE
+    pipeOccludeRow = areaReturnY/#TILE
+    pipeOccludeCols = 2
+    ;; Down to the bottom of the map, not just the pipe's two rows: he starts below
+    ;; the screen and rises through the ground under the pipe, which must cover him
+    ;; too.
+    pipeOccludeRows = #MAP_H - areaReturnY/#TILE
+  EndIf
+  ; The tiles are cut when the move is first drawn (DrawPipeOcclusion{}).
+  pipeOccludersCut = False
+End Statement
+
+; Once per sim tick while he is in a pipe.
+Statement UpdatePipe{}
+  SHARED playerState, playerX, playerY, pipeTimer, areaEvent, playerOnGround, pipeOccludeCols, areaPipeExitX
+  SHARED warpPipeTaken, warpPipeWorld(), warpLevelTarget, lifeEvent
+  If areaEvent <> 0 OR warpLevelTarget >= 0 Then Statement Return
+  If playerState = #PLAYER_ST_PIPE_DOWN
+    playerY = playerY + 1
+    pipeTimer = pipeTimer + 1
+    If pipeTimer >= #PIPE_TICKS
+      ;; Down a warp pipe: that world's first level, as a course clear goes on to the next (HandleLifeEvent{}: the score, coins,
+      ;; lives and size kept, the hidden 1-UP back, a new timer, the lives cover naming it).
+      If warpPipeTaken >= 0
+        ; Not over another life event already asked for (F1 that tick): that one is handled, and a reset clears the warp.
+        If lifeEvent = #LIFE_NONE
+          warpLevelTarget = FirstLevelOfWorld{warpPipeWorld(warpPipeTaken)}
+          lifeEvent = #LIFE_REPLAY
+        EndIf
+      Else
+        areaEvent = #AREA_EVENT_ENTER
+      EndIf
+    EndIf
+  EndIf
+  If playerState = #PLAYER_ST_PIPE_SIDE
+    ;; Only as far as the mouth (his left at its left): the body behind it is narrower than the mouth's lip, so further in his feet
+    ;; showed under it. The timer runs on, so the area event comes when the cartridge's does.
+    If (pipeTimer AND 1) = 0 AND playerX < areaPipeExitX Then playerX = playerX + 1
+    pipeTimer = pipeTimer + 1
+    If pipeTimer >= #PIPE_TICKS Then areaEvent = #AREA_EVENT_RETURN
+  EndIf
+  If playerState = #PLAYER_ST_PIPE_UP
+    playerY = playerY - 1
+    If playerY < #PIPE_UP_READY_Y
+      playerState = #PLAYER_ST_FREE
+      playerOnGround = True
+      pipeOccludeCols = 0
+    EndIf
+  EndIf
+End Statement
+
+;; The pipe's tiles over him: after Mario is drawn, the cells of the pipe he is in
+;; are drawn again, so he is behind them. Raw (no cookie), over cells that already
+;; hold those tiles, so nothing needs undoing. Only the cells his picture overlaps:
+;; the others hold their tiles already (UnBuffer put back what he covered). His
+;; picture is taken as 32 tall, big Mario's, whatever his size: at most a row more.
+;; Each cell's shape is cut the first frame it is wanted (CutPipeOccluders{} says why).
+Statement DrawPipeOcclusion{}
+  SHARED pipeOccludeCol, pipeOccludeRow, pipeOccludeCols, pipeOccludeRows
+  SHARED pipeOccludeGid(), pipeOccludeCut(), drawBitmap, playerX, playerY, pipeOccludersCut
+  If pipeOccludeCols = 0 Then Statement Return
+  ; As a sprite he is put behind the pipe by the lists' priority (SetMarioBehind{}): nothing to draw over him.
+  If #MARIO_SPRITE = 1 Then Statement Return
+  If pipeOccludersCut = False
+    CutPipeOccluders{}
+    pipeOccludersCut = True
+  EndIf
+  firstCol.w = playerX/#TILE
+  lastCol.w = (playerX + #TILE - 1)/#TILE
+  firstRow.w = (playerY - (#MARIO_BIG_H - #TILE))/#TILE
+  lastRow.w = (playerY + #TILE - 1)/#TILE
+  If firstCol < pipeOccludeCol Then firstCol = pipeOccludeCol
+  If lastCol > pipeOccludeCol + pipeOccludeCols - 1 Then lastCol = pipeOccludeCol + pipeOccludeCols - 1
+  If firstRow < pipeOccludeRow Then firstRow = pipeOccludeRow
+  If lastRow > pipeOccludeRow + pipeOccludeRows - 1 Then lastRow = pipeOccludeRow + pipeOccludeRows - 1
+  Use BitMap drawBitmap
+  For occludeRow.w = firstRow To lastRow
+    For occludeCol.w = firstCol To lastCol
+      cellIndex.w = (occludeRow - pipeOccludeRow)*pipeOccludeCols + occludeCol - pipeOccludeCol
+      If cellIndex < #PIPE_OCCLUDE_MAX
+        If pipeOccludeGid(cellIndex) <> 0
+          ; Its first frame under him: cut it (raw, no cookie: it is Blocked).
+          If pipeOccludeCut(cellIndex) = False
+            occludeTileId.w = pipeOccludeGid(cellIndex) - 1
+            AutoCookie Off
+            Use BitMap #ATLAS_BM
+            GetaShape #PIPE_OCCLUDE_SHAPE + cellIndex, (occludeTileId MOD #LOOK_ATLAS_COLS)*#TILE, (occludeTileId/#LOOK_ATLAS_COLS)*#TILE, #TILE, #TILE
+            AutoCookie On
+            Use BitMap drawBitmap
+            pipeOccludeCut(cellIndex) = True
+          EndIf
+          Block #PIPE_OCCLUDE_SHAPE + cellIndex, occludeCol*#TILE, occludeRow*#TILE
+        EndIf
+      EndIf
+    Next
+  Next
+End Statement
+
+;; END OF PIPES (BLITZ MODE)

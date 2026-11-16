@@ -1,0 +1,556 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "JumpIntoBlockProof"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: jumping into a block from below. ESC quits.
+;;
+;; WHERE THIS HAS GOT TO. Two earlier rounds, both negative, and both worth
+;; keeping because they removed suspects:
+;;
+;;   Round 1, block BESIDE him at the row his feet are on: 0 shoves over 180
+;;   ticks. The foot check's obstruction branch needs (playerY mod 16) >= 5, and
+;;   rising off a floor-aligned block he always arrives at residue 0, so the
+;;   landing branch wins and he stands on the block.
+;;
+;;   Round 2, block ABOVE him, six geometries (one, two and three tiles up, in
+;;   the column that covers his head probe and in the column one tile to its
+;;   left): 0 shoves and 0 camera moves over 540 ticks, with playerX unchanged on
+;;   every tick of every run. So neither ImpedePlayerMove nor either of
+;;   UpdatePlayerCamera{}'s clamps is what a recording shows at a standstill.
+;;
+;; WHAT ROUND 2 DID ESTABLISH, which round 3 builds on:
+;;
+;;   - The head check is right. It fires only when the block is in his head
+;;     column, and it stops him there; with the block one tile to the left it
+;;     never fires, because a single probe at x+8 cannot see it. That is the
+;;     ROM's geometry too, and it is why he can pass a block's row at all.
+;;   - The ROM's second side row -- playerY-8, standing-big Y+8 -- is solid for
+;;     3 or 4 ticks while he rises past such a block, and the engine cannot see
+;;     it because it models one side row. Measured, not assumed. Whether the ROM
+;;     would have acted on it is a separate question, since DoPlayerSideCheck is
+;;     only reached with horizontal movement; that is delta 7, not this.
+;;   - He lands standing on the block, 16 px above where he started, which is
+;;     what "up to about half past the block" looks like from outside.
+;;
+;; WHAT ROUND 3 ADDS, AND WHY. Both earlier rounds started him at a standstill,
+;; and a recording does not: he was moving when he jumped, because he ran to the
+;; spot. That changes two things, and both are candidates for a sideways yank
+;; with nothing held afterwards.
+;;
+;;   1. CheckPlayerSides{} was gated on the pixels moved that tick <> 0 (the global
+;;      that held it, playerScrollPixels, has since been deleted), so with speed it
+;;      is the only path that can call ImpedePlayerMove{} -- and its push is
+;;      keyed on playerMovingDirection, which is a sign, not a side. Running right
+;;      into a block on the right asks for a leftward push while his motion sign
+;;      is positive. That is a visible yank backwards, and it is precisely the
+;;      case the main project's PLAYER_HITBOX note section 4.8 says the ROM refuses at ExIPM ("bails
+;;      if the push would reverse the current motion sign"). Delta 9 calls that
+;;      closed and the engine does not implement it.
+;;   2. The camera scrolls while playerScreenX >= #MARIO_SCREEN_X and
+;;      playerSpeedX > 0, and it is recorded per tick here. A camera that scrolls
+;;      while he holds nothing moves the whole scene one way and him the other,
+;;      which from outside is indistinguishable from being pulled. Worth ruling
+;;      in or out before blaming collision code.
+;;
+;; So each run carries an initial playerSpeedX of 0, +16 or -16 -- 1 px per tick
+;; either way -- and nothing else is held from the first tick. The runs are
+;; listed explicitly below rather than generated, and each one's parameters are
+;; stored in runRow/runCol/runSpeed at the call site so the report cannot
+;; mislabel a run. It did, in round 2: the label was recomputed from the slot
+;; number with `slot/2`, and an untyped For variable is a float in AmiBlitz, so
+;; that division is a float division and the truncation lands on the whole
+;; expression at the .w store. MetatileAt{} is unaffected -- pixelX is a .w
+;; parameter, so its division is integer division and truncates -- but the
+;; lesson stands: never derive a label from an untyped For counter.
+;;
+;; Reading a trace line: run, tick, x, y, spdY, spdX, dir, camX, flags. Flags
+;; are raw bits: 2 head row solid, 4 the unmodelled upper side row solid, 8 the
+;; push went right, 16 the push went left, 32 the player and the camera moved
+;; together, which is a clamp rather than a push.
+
+WBStartup
+
+#PLAYFIELD_PLANES = 4
+#COPPER_FLAGS = $10004
+#COPPER_COLORS = 16
+
+#TRACE_TICKS = 90
+#RUN_COUNT = 10
+#TRACE_SLOTS = #RUN_COUNT*#TRACE_TICKS
+#FLOOR_ROW = 12
+#HEAD_COLUMN = 9
+#LEFT_COLUMN = 8
+#RIGHT_COLUMN = 10
+#START_X = 138
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.palettes.data.ab3"
+XINCLUDE "/includes/sparkydave.globals.ab3"
+Dim metatileBuffer.w(#MAP_CELLS - 1)
+Dim mapBuffer.w(#MAP_CELLS - 1)
+Dim mapBufferBackup.w(#MAP_CELLS - 1)
+Dim stampHead.w(#STAMP_GID_MAX)
+Dim stampNext.w(#MAP_CELLS - 1)
+Dim backStampHead.w(#STAMP_GID_MAX)
+Dim backStampNext.w(#BACK_CELLS - 1)
+Dim metatileBufferBackup.w(#MAP_CELLS - 1)
+XINCLUDE "/includes/sparkydave.metatile.classes.ab3"
+XINCLUDE "/includes/sparkydave.sound.data.ab3"
+XINCLUDE "/includes/sparkydave.sound.ab3"
+
+;; Standing height, and it needs #TILE from the include above, so it cannot sit
+;; with the rest of the literal block. Standing on row #FLOOR_ROW's floor puts
+;; his feet at that row's top and his origin 16 px above it.
+#START_Y = (#FLOOR_ROW - 1)*#TILE
+
+;; The ROM's second side row for the standing-big set, rebased: Y+8 in the 32-px
+;; envelope is playerY - 8 here. The engine probes only #PROBE_SIDE_Y (= Y+24).
+#UPPER_SIDE_DY = -8
+
+Dim traceX0.w(#TRACE_SLOTS - 1)
+Dim traceX1.w(#TRACE_SLOTS - 1)
+Dim traceY.w(#TRACE_SLOTS - 1)
+Dim traceSpdY.w(#TRACE_SLOTS - 1)
+Dim traceSpdX.w(#TRACE_SLOTS - 1)
+Dim traceDir.w(#TRACE_SLOTS - 1)
+Dim traceCamX0.w(#TRACE_SLOTS - 1)
+Dim traceCamX1.w(#TRACE_SLOTS - 1)
+Dim traceFlags.w(#TRACE_SLOTS - 1)
+Dim runRow.w(#RUN_COUNT - 1)
+Dim runCol.w(#RUN_COUNT - 1)
+Dim runSpeed.w(#RUN_COUNT - 1)
+Dim sumShoves.w(#RUN_COUNT - 1)
+Dim sumPushLeft.w(#RUN_COUNT - 1)
+Dim sumPushRight.w(#RUN_COUNT - 1)
+Dim sumPixels.w(#RUN_COUNT - 1)
+Dim sumFirstShove.w(#RUN_COUNT - 1)
+Dim sumClamps.w(#RUN_COUNT - 1)
+Dim sumCamMoves.w(#RUN_COUNT - 1)
+Dim sumHeadSolid.w(#RUN_COUNT - 1)
+Dim sumUpperSolid.w(#RUN_COUNT - 1)
+Dim sumLowestY.w(#RUN_COUNT - 1)
+Dim sumFinalY.w(#RUN_COUNT - 1)
+Dim sumFinalX.w(#RUN_COUNT - 1)
+
+mapWidth.w = #MAP_W
+quitFlag.w = False
+screenHeight = DispHeight
+
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 120, 120, 120
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 0, 200, 0
+AGAPalRGB 0, 4, 60, 60, 60
+AGAPalRGB 0, 5, 252, 252, 252
+AGAPalRGB 0, 6, 252, 152, 56
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+BLITZ
+;; Canonical DisplayLib startup. $10004 is agacolors + four bitplanes; the extra
+;; $10 of $10014 is #smoothscrolling, which the guide says to set only for a
+;; scrolling bitmap and which blacks out a non-scrolling one.
+InitCopList 0, #COPPER_FLAGS
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "/includes/sparkydave.sound.blitz.ab3"
+XINCLUDE "/includes/sparkydave.timing-marks.blitz.ab3"
+XINCLUDE "/includes/sparkydave.allstars-palette.data.ab3"
+XINCLUDE "/includes/sparkydave.map.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system.blitz.ab3"
+XINCLUDE "/includes/sparkydave.debris.blitz.ab3"
+XINCLUDE "/includes/sparkydave.floaters.blitz.ab3"
+XINCLUDE "/includes/sparkydave.collision.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player-state.blitz.ab3"
+XINCLUDE "/includes/sparkydave.life.blitz.ab3"
+XINCLUDE "/includes/sparkydave.enemies.blitz.ab3"
+XINCLUDE "/includes/sparkydave.fireballs.blitz.ab3"
+XINCLUDE "/includes/sparkydave.levelend.blitz.ab3"
+XINCLUDE "/includes/sparkydave.pipes.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system-runtime.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player.blitz.ab3"
+XINCLUDE "/includes/sparkydave.hud.blitz.ab3"
+
+;; ---------------------------------------------------------------
+;; Harness
+;; ---------------------------------------------------------------
+
+;; Copied from tests/test-harness.ab3 so the two drive the tick identically.
+;; If UpdatePlayer{} gains or reorders a call, this has to change with it.
+Statement Tick{buttons.w}
+  SHARED playerButtons, playerButtonsLast, playerRunningTimer
+  SHARED sideCollisionTimer, blockBounceTimer, playerOnGround, playerState
+  SHARED playerIsBig, playerCollisionBits
+  ;; Not reset here: ApplyCollisionButtonMask{} needs the previous frame's
+  ;; mask to survive until it is applied, so the reset is after that call.
+  ;; Pole/resize branches below reset explicitly before returning.
+  UpdateFlag{}
+  If playerState = #PLAYER_ST_POLE
+    UpdatePoleSlide{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerState = #PLAYER_ST_RESIZE
+    UpdateResize{}
+    playerButtonsLast = playerButtons
+    playerCollisionBits = $ff
+    Statement Return
+  EndIf
+  If playerRunningTimer > 0 Then playerRunningTimer = playerRunningTimer - 1
+  If sideCollisionTimer > 0 Then sideCollisionTimer = sideCollisionTimer - 1
+  If blockBounceTimer > 0 Then blockBounceTimer = blockBounceTimer - 1
+  playerButtons = buttons
+  ApplyCollisionButtonMask{}
+  playerCollisionBits = $ff
+  SetPlayerAbsoluteSpeed{}
+  TryStartJump{}
+  SetupHorizontalLimits{}
+  PrepareGroundMotion{}
+  SetPlayerAbsoluteSpeed{}
+  ApplyPlayerFacing{}
+  ApplyHorizontalFriction{}
+  MovePlayerHorizontal{}
+  SetPlayerMovingDirection{}
+  CheckPlayerSides{}
+  SetPlayerAbsoluteSpeed{}
+  SelectVerticalForce{}
+  If playerOnGround = False Then MovePlayerVertical{}
+  CheckPlayerFeet{}
+  CheckPlayerHead{}
+  UpdatePlayerCamera{}
+  UpdatePlayerBoundBox{}
+  SetPlayerAbsoluteSpeed{}
+  UpdatePlayerAnimation{}
+  CheckFlagpole{}
+  playerButtonsLast = playerButtons
+End Statement
+
+Statement ClearTestMap{}
+  SHARED metatileBuffer()
+  For testCell = 0 To #MAP_CELLS - 1
+    metatileBuffer(testCell) = 0
+  Next
+End Statement
+
+Statement SetTestCell{testRow.w, testColumn.w, testClass.w}
+  SHARED metatileBuffer()
+  metatileBuffer(testRow*#MAP_W + testColumn) = testClass
+End Statement
+
+Statement SetTestRun{testRow.w, firstColumn.w, lastColumn.w, testClass.w}
+  For runColumn = firstColumn To lastColumn
+    SetTestCell{testRow, runColumn, testClass}
+  Next
+End Statement
+
+;; Mirrors tests/test-harness.ab3's PlacePlayer{} -- it has to, because that
+;; one is the reason a player placed away from the start is not dragged back to
+;; the left edge -- and adds the two things this proof needs: big Mario, and an
+;; initial horizontal speed. Size is a single flag, playerIsBig, which is the
+;; whole of what the collision path reads.
+Statement PlaceBigPlayer{startX.w, startY.w, startSpeed.w}
+  SHARED playerX, playerY, playerFacing, playerFrame, playerAnimTimer
+  SHARED playerAnimPeriod, playerOnGround, playerButtons, playerButtonsLast
+  SHARED playerSpeedX, playerMoveForceX, playerFractionX, cameraFractionX
+  SHARED playerSpeedY, playerMoveForceY, playerFractionY, playerVerticalForce, playerFallForce
+  SHARED playerSpeedAbsolute, playerRunningTimer, playerRunningSpeed
+  SHARED playerMovingDirection, playerFacingDirection
+  SHARED playerScreenX, playerJumpOriginY, sideCollisionTimer, blockBounceTimer
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED cameraX, cameraMaxX
+  SHARED playerState, playerPoleTimer, flagState, flagX, flagY, playerIsBig
+  playerX = startX
+  playerY = startY
+  playerFacing = #MARIO_FACE_RIGHT
+  playerFrame = #MARIO_F_IDLE
+  playerAnimTimer = 0
+  playerAnimPeriod = #MARIO_ANIM_SLOW
+  playerOnGround = True
+  playerButtons = 0
+  playerButtonsLast = 0
+  playerSpeedX = startSpeed
+  playerMoveForceX = 0
+  playerFractionX = 0
+  cameraFractionX = 0
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  playerVerticalForce = 0
+  playerFallForce = 0
+  playerSpeedAbsolute = 0
+  playerRunningTimer = 0
+  playerRunningSpeed = 0
+  playerMovingDirection = #MARIO_BTN_RIGHT
+  playerFacingDirection = #MARIO_BTN_RIGHT
+  playerScreenX = startX
+  playerJumpOriginY = startY
+  sideCollisionTimer = 0
+  blockBounceTimer = 0
+  boundBoxLeft = playerX + #BOUND_LEFT
+  boundBoxTop = playerY + #BOUND_TOP
+  boundBoxRight = playerX + #BOUND_RIGHT
+  boundBoxBottom = playerY + #BOUND_BOTTOM
+  cameraX = 0
+  cameraMaxX = 0
+  playerState = #PLAYER_ST_FREE
+  playerPoleTimer = 0
+  flagState = #FLAG_ST_IDLE
+  flagX = (#FLAGPOLE_X/#TILE)*#TILE + #FLAGPOLE_SHAFT_X - #FLAG_W + 1
+  flagY = #FLAGPOLE_Y + #FLAG_TOP_DY
+  playerIsBig = True
+End Statement
+
+;; ---------------------------------------------------------------
+;; The runs
+;; ---------------------------------------------------------------
+
+Statement RunScenario{blockRow.w, blockColumn.w, startSpeed.w, slot.w}
+  SHARED traceX0(), traceX1(), traceY(), traceSpdY(), traceSpdX()
+  SHARED traceDir(), traceCamX0(), traceCamX1(), traceFlags()
+  SHARED runRow(), runCol(), runSpeed()
+  SHARED sumShoves(), sumPushLeft(), sumPushRight(), sumPixels()
+  SHARED sumFirstShove(), sumClamps(), sumCamMoves()
+  SHARED sumHeadSolid(), sumUpperSolid(), sumLowestY(), sumFinalY(), sumFinalX()
+  SHARED playerX, playerY, playerSpeedX, playerSpeedY, playerMovingDirection
+  SHARED cameraX
+  slotBase.w = slot*#TRACE_TICKS
+  runRow(slot) = blockRow
+  runCol(slot) = blockColumn
+  runSpeed(slot) = startSpeed
+  ClearTestMap{}
+  SetTestRun{#FLOOR_ROW, 0, #MAP_W - 1, #MT_GROUND}
+  SetTestCell{blockRow, blockColumn, #MT_BLOCK}
+  PlaceBigPlayer{#START_X, #START_Y, startSpeed}
+  sumShoves(slot) = 0
+  sumPushLeft(slot) = 0
+  sumPushRight(slot) = 0
+  sumPixels(slot) = 0
+  sumFirstShove(slot) = -1
+  sumClamps(slot) = 0
+  sumCamMoves(slot) = 0
+  sumHeadSolid(slot) = 0
+  sumUpperSolid(slot) = 0
+  sumLowestY(slot) = 32767
+  For traceTick = 0 To #TRACE_TICKS - 1
+    traceIndex.w = slotBase + traceTick
+    traceX0(traceIndex) = playerX
+    traceY(traceIndex) = playerY
+    traceSpdY(traceIndex) = playerSpeedY
+    traceSpdX(traceIndex) = playerSpeedX
+    traceDir(traceIndex) = playerMovingDirection
+    traceCamX0(traceIndex) = cameraX
+    traceFlags(traceIndex) = 0
+    ;; Sampled before the tick, so these are the rows the tick is about to read.
+    If MetatileAt{playerX + #PROBE_TOP_X, playerY + #PROBE_TOP_Y_BIG} <> #MT_EMPTY
+      traceFlags(traceIndex) = traceFlags(traceIndex) OR 2
+      sumHeadSolid(slot) = sumHeadSolid(slot) + 1
+    EndIf
+    upperSolid.w = False
+    If MetatileAt{playerX + #PROBE_SIDE_X1, playerY + #UPPER_SIDE_DY} <> #MT_EMPTY Then upperSolid = True
+    If MetatileAt{playerX + #PROBE_SIDE_X2, playerY + #UPPER_SIDE_DY} <> #MT_EMPTY Then upperSolid = True
+    If upperSolid = True
+      traceFlags(traceIndex) = traceFlags(traceIndex) OR 4
+      sumUpperSolid(slot) = sumUpperSolid(slot) + 1
+    EndIf
+    Tick{#MARIO_BTN_JUMP}
+    traceX1(traceIndex) = playerX
+    traceCamX1(traceIndex) = cameraX
+    If playerX < traceX0(traceIndex)
+      traceFlags(traceIndex) = traceFlags(traceIndex) OR 16
+      sumShoves(slot) = sumShoves(slot) + 1
+      sumPushLeft(slot) = sumPushLeft(slot) + 1
+      sumPixels(slot) = sumPixels(slot) + traceX0(traceIndex) - playerX
+      If sumFirstShove(slot) < 0 Then sumFirstShove(slot) = traceTick
+    EndIf
+    If playerX > traceX0(traceIndex)
+      traceFlags(traceIndex) = traceFlags(traceIndex) OR 8
+      sumShoves(slot) = sumShoves(slot) + 1
+      sumPushRight(slot) = sumPushRight(slot) + 1
+    EndIf
+    If cameraX <> traceCamX0(traceIndex)
+      traceFlags(traceIndex) = traceFlags(traceIndex) OR 32
+      sumCamMoves(slot) = sumCamMoves(slot) + 1
+      sumPixels(slot) = sumPixels(slot) + cameraX - traceCamX0(traceIndex)
+    EndIf
+    If playerX <> traceX0(traceIndex) AND cameraX = traceCamX0(traceIndex)
+      sumClamps(slot) = sumClamps(slot) + 1
+    EndIf
+    If playerY < sumLowestY(slot) Then sumLowestY(slot) = playerY
+  Next
+  sumFinalX(slot) = playerX
+  sumFinalY(slot) = playerY
+End Statement
+
+Statement DrawTrace{slot.w, baseY.w}
+  SHARED traceFlags()
+  Use BitMap 1
+  For drawTick = 0 To #TRACE_TICKS - 1
+    drawIndex.w = slot*#TRACE_TICKS + drawTick
+    drawPen.w = 4
+    If (traceFlags(drawIndex) AND 4) <> 0 Then drawPen = 3
+    If (traceFlags(drawIndex) AND 2) <> 0 Then drawPen = 5
+    If (traceFlags(drawIndex) AND 62) <> 0 Then drawPen = 2
+    Boxf 4 + drawTick*3, baseY, 6 + drawTick*3, baseY + 8, drawPen
+  Next
+End Statement
+
+Statement DrawGeometry{}
+  SHARED metatileBuffer()
+  Use BitMap 1
+  ;; Only the visible columns: the buffer is the whole 224-wide level, and
+  ;; stamping all of it every frame is 3360 Boxf calls for nothing.
+  For drawRow = 0 To #MAP_H - 1
+    For drawColumn = 0 To #VIEW_TILES_W - 1
+      If metatileBuffer(drawRow*#MAP_W + drawColumn) > 0
+        Boxf drawColumn*#TILE, drawRow*#TILE, drawColumn*#TILE + #TILE - 1, drawRow*#TILE + #TILE - 1, 1
+      EndIf
+    Next
+  Next
+  Boxf #LEFT_COLUMN*#TILE, #FLOOR_ROW*#TILE, #LEFT_COLUMN*#TILE + #TILE - 1, #FLOOR_ROW*#TILE + #TILE - 1, 6
+  Boxf #RIGHT_COLUMN*#TILE, #FLOOR_ROW*#TILE, #RIGHT_COLUMN*#TILE + #TILE - 1, #FLOOR_ROW*#TILE + #TILE - 1, 6
+  Boxf #START_X + #PROBE_SIDE_X1, #START_Y + #PROBE_SIDE_Y, #START_X + #PROBE_SIDE_X2, #START_Y + #PROBE_SIDE_Y, 3
+  Boxf #START_X + #PROBE_FOOT_X1, #START_Y + #PROBE_FOOT_Y, #START_X + #PROBE_FOOT_X2, #START_Y + #PROBE_FOOT_Y, 3
+  Boxf #START_X + #PROBE_TOP_X, #START_Y + #PROBE_TOP_Y_BIG, #START_X + #PROBE_TOP_X, #START_Y + #PROBE_TOP_Y_BIG, 5
+End Statement
+
+;; Two controls at rest, then the four "moving into a block" cases, then the
+;; four "moving away from it" cases, then the ordinary bump taken at speed.
+RunScenario{#FLOOR_ROW - 1, #LEFT_COLUMN, 0, 0}
+RunScenario{#FLOOR_ROW - 2, #LEFT_COLUMN, 0, 1}
+RunScenario{#FLOOR_ROW - 2, #LEFT_COLUMN, 16, 2}
+RunScenario{#FLOOR_ROW - 2, #LEFT_COLUMN, -16, 3}
+RunScenario{#FLOOR_ROW - 2, #RIGHT_COLUMN, 16, 4}
+RunScenario{#FLOOR_ROW - 2, #RIGHT_COLUMN, -16, 5}
+RunScenario{#FLOOR_ROW - 3, #RIGHT_COLUMN, 16, 6}
+RunScenario{#FLOOR_ROW - 3, #RIGHT_COLUMN, -16, 7}
+RunScenario{#FLOOR_ROW - 3, #HEAD_COLUMN, 16, 8}
+RunScenario{#FLOOR_ROW - 3, #LEFT_COLUMN, 0, 9}
+
+While quitFlag = False
+  Use BitMap 1
+  Cls 0
+  DrawGeometry{}
+  For showSlot = 0 To #RUN_COUNT - 1
+    DrawTrace{showSlot, 60 + showSlot*10}
+  Next
+  VWait
+  DisplayBitMap 0, 1
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/jump-into-block-results.txt")
+  FileOutput 0
+  NPrint "Jump into block from below: sideways movement with nothing held"
+  NPrint ""
+  NPrint "big Mario at x", #START_X, "y", #START_Y, "feet on the floor at row", #FLOOR_ROW
+  NPrint "jump held every tick,", #TRACE_TICKS, "ticks per run,", #RUN_COUNT, "runs"
+  NPrint "flags: 2 head solid  4 unmodelled upper side solid  8 pushed right"
+  NPrint "16 pushed left  32 player and camera moved together"
+  NPrint ""
+  For reportSlot = 0 To #RUN_COUNT - 1
+    NPrint "run", reportSlot, ": block row", runRow(reportSlot), "column", runCol(reportSlot), "speedX", runSpeed(reportSlot)
+    NPrint "  shoves", sumShoves(reportSlot), "left", sumPushLeft(reportSlot), "right", sumPushRight(reportSlot), "px", sumPixels(reportSlot), "first tick", sumFirstShove(reportSlot)
+    NPrint "  camera moved ticks", sumCamMoves(reportSlot), "clamps", sumClamps(reportSlot), "head solid", sumHeadSolid(reportSlot), "upper side solid", sumUpperSolid(reportSlot)
+    NPrint "  lowest y", sumLowestY(reportSlot), "final x", sumFinalX(reportSlot), "final y", sumFinalY(reportSlot)
+  Next
+  NPrint ""
+  NPrint "run tick x y spdY spdX dir camX head upper push"
+  For reportSlot = 0 To #RUN_COUNT - 1
+    reportBase.w = reportSlot*#TRACE_TICKS
+    For reportTick = 0 To #TRACE_TICKS - 1
+      reportFlags.w = traceFlags(reportBase + reportTick)
+      reportHead.w = (reportFlags AND 2)/2
+      reportUpper.w = (reportFlags AND 4)/4
+      reportPush.w = (reportFlags AND 24) + ((reportFlags AND 32)/32)*64
+      NPrint reportSlot, reportTick, traceX1(reportBase + reportTick), traceY(reportBase + reportTick)
+      NPrint "  spdY", traceSpdY(reportBase + reportTick), "spdX", traceSpdX(reportBase + reportTick), "dir", traceDir(reportBase + reportTick)
+      NPrint "  camX", traceCamX1(reportBase + reportTick), "head", reportHead, "upper", reportUpper, "push", reportPush
+    Next
+  Next
+  CloseFile 0
+EndIf
+End

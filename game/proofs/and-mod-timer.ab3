@@ -1,0 +1,80 @@
+;; and-mod-timer.ab3 -- what AND 3, MOD 4 and ASR 2 give for the resize flash's timer, positive and negative.
+;; Compile in UAE. Not part of the game. Written after tests/test-harness Scenario 32 (the fire flower)
+;; failed at Assertion 8 with the resize colour written as (playerResizeTimer/#FLASH_SET_TICKS) AND 3,
+;; and passed with MOD 4 there, and again with ASR 2 in place of the divide by four.
+;;
+;; For every timer value from #LOW to #HIGH (the game's timer is never negative; the negative
+;; rows show what each form does if it ever is) this stores:
+;;   the quotient       timer/4           (Blitz's divide, the one the game uses)
+;;   AND 3              (timer/4) AND 3   (the form that failed)
+;;   MOD 4              (timer/4) MOD 4   (the form that passed)
+;;   ASR 2              timer ASR 2       (the form that passed after the change)
+;; and the same two colour expressions run inside a Function.w, as in player-state's
+;; MarioColourSetWanted{}: 2 + ((timer/4) AND 3) and 2 + ((timer/4) MOD 4).
+;; It runs in Blitz mode for an instant, then writes and-mod-timer-results.txt.
+;; OPTIMIZE 1 is on, as in the game, so the 68020 optimizer compiles it.
+
+
+WBStartup
+
+#LOW  = -40
+#HIGH = 40
+
+Dim quotientValue.l(#HIGH - #LOW)
+Dim andValue.l(#HIGH - #LOW)
+Dim modValue.l(#HIGH - #LOW)
+Dim asrValue.l(#HIGH - #LOW)
+Dim fAndValue1.l(#HIGH - #LOW)
+Dim fAndValue2.l(#HIGH - #LOW)
+Dim fAndValue3.l(#HIGH - #LOW)
+Dim functionModValue.l(#HIGH - #LOW)
+
+BLITZ
+
+Function.w ColourWithAnd{probeTimer.w}
+  Function Return 2 + ((probeTimer/4) AND 3)
+End Function
+
+Function.w ColourWithAnd2{probeTimer.w}
+  Function Return (2 + ((probeTimer/4) AND 3))
+End Function
+
+Function.w ColourWithAnd3{probeTimer.w}
+  Function Return (((probeTimer/4) AND 3) + 2)
+End Function
+
+Function.w ColourWithMod{probeTimer.w}
+  Function Return 2 + ((probeTimer/4) MOD 4)
+End Function
+
+For timerValue.w = #LOW To #HIGH
+  tableIndex.l = timerValue - #LOW
+  quotientValue(tableIndex) = timerValue/4
+  andValue(tableIndex) = (timerValue/4) AND 3
+  modValue(tableIndex) = (timerValue/4) MOD 4
+  asrValue(tableIndex) = timerValue ASR 2
+  fAndValue1(tableIndex) = ColourWithAnd{timerValue}
+  fAndValue2(tableIndex) = ColourWithAnd2{timerValue}
+  fAndValue3(tableIndex) = ColourWithAnd3{timerValue}
+  functionModValue(tableIndex) = ColourWithMod{timerValue}
+Next
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/and-mod-timer-results.txt")
+  FileOutput 0
+  NPrint "and-mod-timer: the resize timer, from ", #LOW, " to ", #HIGH
+  NPrint "The game's timer counts up from 0, so the rows from 0 up are the ones it can reach."
+  NPrint ""
+  NPrint "timer  quotient  AND3  MOD4  ASR2(timer)  colour AND  colour AND2  colour AND3  colour MOD"
+  differenceCount.l = 0
+  For timerValue.w = #LOW To #HIGH
+    tableIndex.l = timerValue - #LOW
+    Print timerValue, "  ", quotientValue(tableIndex), "  ", andValue(tableIndex), "  ", modValue(tableIndex), "  ", asrValue(tableIndex), "  ", fAndValue1(tableIndex), "  "
+    NPrint fAndValue2(tableIndex), "  ", fAndValue3(tableIndex), "  ", functionModValue(tableIndex)
+    If andValue(tableIndex) <> modValue(tableIndex) Then differenceCount = differenceCount + 1
+  Next
+  NPrint ""
+  NPrint "Rows where AND 3 and MOD 4 differ: ", differenceCount
+  CloseFile 0
+EndIf
+End

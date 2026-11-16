@@ -1,0 +1,360 @@
+;; =======================================================
+;; LEVEL END (BLITZ MODE)
+;; =======================================================
+;; The end of the level, from the cartridge (smbdis 12167 FlagpoleCollision, 6579
+;; FlagpoleRoutine, 5831 PlayerEndLevel, 10452 RunStarFlagObj, 8634 InitFireworks,
+;; 10412 RunFireworks). The chain:
+;;
+;;   grab      The pole score comes from Mario's height at the grab (PoleBandFor{}):
+;;             5000, 2000, 800, 400 or 100 from the top down.
+;;   slide     UpdatePoleSlide{} in player.blitz: Mario and the flag both go down 2 px
+;;             a tick (the cartridge's climb speed is 1 plus a carry, the flag's 1
+;;             plus a carry). Mario hangs at poleStop; it ends when the flag reaches
+;;             #POLE_FLAG_END_Y or he is already at #POLE_END_Y, and then the points
+;;             are added and the number that rose with the flag stays.
+;;   walk      playerState #PLAYER_ST_ENDWALK: no input is read, he steps off the
+;;             pole to the right, falls, and walks right on the ordinary physics
+;;             until his left edge reaches the castle door (#CASTLE_DOOR_X), where
+;;             he is hidden (the cartridge puts him behind the castle) and the tasks
+;;             begin. Enemies cannot hurt him: the cartridge's contact test only
+;;             runs in its normal player routine.
+;;   tasks     endTask, as the cartridge's StarFlagTaskControl:
+;;             1 decide the fireworks from the timer's last digit (1, 3 or 6 gives
+;;               that many, anything else none);
+;;             2 the time bonus: a timer unit and 50 points a tick until it is 0;
+;;             3 the castle's star flag rises 1 px a tick, then one firework every
+;;               32 ticks, each a three-picture explosion of 8 ticks a picture that
+;;               adds 500 when it ends;
+;;             4 a delay of 6 intervals;
+;;             5 done: lifeEvent becomes #LIFE_COMPLETE (COURSE CLEAR).
+;; Not here: the scroll lock (the camera follows him as ever and stops at the end
+;; of the level), sound, and what the cartridge does next (it loads World 1-2).
+
+;; The pole's band for a grab at playerY: 0 top (5000) to 4 bottom (100). The
+;; cartridge's thresholds in its own Y ($22, $50, $68, $90) are this game's minus 16.
+Function.w PoleBandFor{grabY.w}
+  If grabY >= #POLE_Y_100 Then Function Return 4
+  If grabY >= #POLE_Y_400 Then Function Return 3
+  If grabY >= #POLE_Y_800 Then Function Return 2
+  If grabY >= #POLE_Y_2000 Then Function Return 1
+  Function Return 0
+End Function
+
+; How many fireworks a timer value earns: its last digit 1, 3 or 6 is that many.
+Function.w FireworkCountForTime{timeValue.w}
+  lastDigit.w = timeValue MOD 10
+  If lastDigit = 1 Then Function Return 1
+  If lastDigit = 3 Then Function Return 3
+  If lastDigit = 6 Then Function Return 6
+  Function Return 0
+End Function
+
+;; The slide is over: the points for the band, the flag stops where it is, and he
+;; steps off the pole to the right and falls (the cartridge's climb side-step, 14 px).
+Statement EndPoleSlide{}
+  SHARED poleBand, poleScoreIndex(), scorePoints(), flagState, playerState, playerX
+  SHARED playerFacing, playerOnGround, playerSpeedY, playerMoveForceY, playerFractionY
+  AddScore{scorePoints(poleScoreIndex(poleBand))}
+  flagState = #FLAG_ST_DONE
+  ; The level-clear music starts as he leaves the pole (smbdis 5840).
+  SoundEventMusic{#MUSIC_END_OF_LEVEL}
+  playerState = #PLAYER_ST_ENDWALK
+  playerX = playerX + #POLE_STEP_OFF_DX
+  playerFacing = #MARIO_FACE_RIGHT
+  playerOnGround = False
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+End Statement
+
+;; Once per tick at the end of the normal player path: his left edge reaching the
+;; castle door (the object covers the doorway) hides him and starts the tasks.
+Statement CheckCastleDoor{}
+  SHARED areaCastleDoorX
+  SHARED playerState, playerHidden, playerX, endTask
+  If playerState <> #PLAYER_ST_ENDWALK Then Statement Return
+  ;; An area with no door has its box nowhere (#AREA_BOX_NONE, far to the left), which any x is past: it would hide him the
+  ;; tick he walks off the pole. The build refuses a flagpole without a door (area_bin.check_levels), so this is a guard.
+  If areaCastleDoorX = #AREA_BOX_NONE Then Statement Return
+  If playerHidden = True Then Statement Return
+  ; The look's doorway (#LOOK_DOOR_DX): the All-Stars castle's starts 8 px right of the object.
+  If playerX + #CASTLE_STOP_DX >= areaCastleDoorX + #LOOK_DOOR_DX
+    playerHidden = True
+    endTask = 1
+  EndIf
+End Statement
+
+Statement SpawnFirework{}
+  SHARED areaStarFlagX
+  SHARED fireworkNextIndex, fireworkDX(), fireworkY(), fireworkActive(), fireworkX(), fireworkAtY(), fireworkAge()
+  For slotIndex = 0 To #FIREWORK_SLOTS - 1
+    If fireworkActive(slotIndex) = False
+      fireworkActive(slotIndex) = True
+      fireworkX(slotIndex) = areaStarFlagX - #FIREWORK_ORIGIN_DX + fireworkDX(fireworkNextIndex)
+      fireworkAtY(slotIndex) = fireworkY(fireworkNextIndex)
+      fireworkAge(slotIndex) = 0
+      Statement Return
+    EndIf
+  Next
+End Statement
+
+;; The top of the castle at the star flag's column: the first map row from the top with a tile in it, in pixels. The
+;; cartridge draws the flag behind the background (attribute $22, smbdis DrawStarFlag), so it shows only where the castle
+;; is sky: over the small castle's top (1-1: row 8, 128) it rises into view, and behind the tall castle's wall (2-3: the
+;; top is row 2, far above its resting height) it rises unseen. #CASTLE_TOP_Y if the column is empty.
+Function.w CastleTopAt{columnX.w}
+  SHARED mapBuffer()
+  mapColumn.w = columnX/#TILE
+  For mapRow.w = 0 To #MAP_H - 1
+    If mapBuffer(mapRow*#MAP_W + mapColumn) <> 0 Then Function Return(mapRow*#TILE)
+  Next
+  Function Return(#CASTLE_TOP_Y)
+End Function
+
+;; The view's own scroll on the walk to the retainer (PlayerVictoryWalk: ScrollFractional, 1 px and a carry a frame) until its left
+;; edge reaches the destination page, or the area's end stops it first.
+Statement CastleScroll{}
+  SHARED cameraX, cameraFractionX, cameraMaxX, castleWalkDestX, castleWalkReady
+  If castleWalkReady = False Then Statement Return
+  If cameraX >= castleWalkDestX OR cameraX >= cameraMaxX Then Statement Return
+  cameraFractionX = cameraFractionX + #CASTLE_SCROLL_FRACTION
+  scrollStep.w = 1
+  If cameraFractionX >= 256
+    cameraFractionX = cameraFractionX - 256
+    scrollStep = 2
+  EndIf
+  cameraX = cameraX + scrollStep
+  ; Never past the page: a step of 2 from one short ended on 2305, a pixel of the wall columns after the room on the right.
+  If cameraX > castleWalkDestX Then cameraX = castleWalkDestX
+End Statement
+
+;; After the bridge (VictoryMode's later tasks), once a sim tick from UpdateLevelEnd{}: the walk's set-up, the walk and scroll, the
+;; messages, the delay, then the next level.
+Statement UpdateCastleEnd{}
+  SHARED castleEndTask, castleWalkReady, castleWalkDestX, castleWalkStopX, castleMessageTicks, castleTextWanted, castleEndDelay
+  SHARED cameraX, cameraMaxX, playerX, playerState, scrollLockLifted, lifeEvent
+  If castleEndTask = #CASTLE_END_WALK
+    If castleWalkReady = False
+      castleWalkReady = True
+      ; Whole pixels as a word first: cameraX is a quick, whose division would not drop the remainder.
+      viewRightEdge.w = cameraX + #VIEW_W - 1
+      castleWalkDestX = (viewRightEdge/256 + 1)*256
+      castleWalkStopX = castleWalkDestX + #CASTLE_WALK_STOP_DX
+      scrollLockLifted = True
+      playerState = #PLAYER_ST_ENDWALK
+      SoundEventMusic{#MUSIC_END_OF_CASTLE}
+      Statement Return
+    EndIf
+    If playerX >= castleWalkStopX AND (cameraX >= castleWalkDestX OR cameraX >= cameraMaxX)
+      castleEndTask = #CASTLE_END_MESSAGES
+      castleMessageTicks = 0
+    EndIf
+    Statement Return
+  EndIf
+  If castleEndTask = #CASTLE_END_MESSAGES
+    If castleMessageTicks = 0 Then castleTextWanted = 1
+    If castleMessageTicks = #CASTLE_MSG_SECOND Then castleTextWanted = 2
+    If castleMessageTicks = #CASTLE_MSG_END
+      castleEndTask = #CASTLE_END_DELAY
+      castleEndDelay = 6*#INTERVAL_PERIOD
+    EndIf
+    castleMessageTicks = castleMessageTicks + 1
+    Statement Return
+  EndIf
+  If castleEndTask = #CASTLE_END_DELAY
+    castleEndDelay = castleEndDelay - 1
+    If castleEndDelay <= 0
+      castleEndTask = #CASTLE_END_DONE
+      lifeEvent = #LIFE_REPLAY
+    EndIf
+  EndIf
+End Statement
+
+; Once per sim tick, from timing.ab3.
+Statement UpdateLevelEnd{}
+  SHARED areaStarFlagY, areaStarFlagX, castleTopY
+  SHARED endTask, hudTime, fireworksLeft, fireworkNextIndex, fireworkTimer, starFlagY, endDelay
+  SHARED lifeEvent, fireworkActive(), fireworkAge(), simTickCounter
+  UpdateCastleEnd{}
+  ;; Fireworks in the air run on whatever the task: the explosion ends and the 500
+  ;; is added.
+  For slotIndex = 0 To #FIREWORK_SLOTS - 1
+    If fireworkActive(slotIndex) = True
+      fireworkAge(slotIndex) = fireworkAge(slotIndex) + 1
+      If fireworkAge(slotIndex) >= 3*#FIREWORK_PICTURE_TICKS
+        fireworkActive(slotIndex) = False
+        AddScore{#FIREWORK_POINTS}
+        SoundSquare2{#SFX_BLAST}
+      EndIf
+    EndIf
+  Next
+  If fireworkTimer > 0 Then fireworkTimer = fireworkTimer - 1
+  If endTask = 1
+    fireworksLeft = FireworkCountForTime{hudTime}
+    fireworkNextIndex = 5
+    fireworkTimer = 0
+    starFlagY = areaStarFlagY + #STAR_FLAG_RISE
+    castleTopY = CastleTopAt{areaStarFlagX}
+    endTask = 2
+    Statement Return
+  EndIf
+  If endTask = 2
+    If hudTime > 0
+      hudTime = hudTime - 1
+      AddScore{#TIME_BONUS_POINTS}
+      ; The tick sounds four ticks in every eight (smbdis 10496).
+      If (simTickCounter AND 4) <> 0 Then SoundSquare2{#SFX_TIMER_TICK}
+    Else
+      endTask = 3
+    EndIf
+    Statement Return
+  EndIf
+  If endTask = 3
+    If starFlagY > areaStarFlagY
+      starFlagY = starFlagY - 1
+      Statement Return
+    EndIf
+    If fireworksLeft > 0
+      If fireworkTimer = 0
+        SpawnFirework{}
+        fireworkNextIndex = fireworkNextIndex - 1
+        fireworksLeft = fireworksLeft - 1
+        fireworkTimer = #FIREWORK_INTERVAL
+      EndIf
+    Else
+      endDelay = #END_DELAY_TICKS
+      endTask = 4
+    EndIf
+    Statement Return
+  EndIf
+  If endTask = 4
+    endDelay = endDelay - 1
+    If endDelay <= 0
+      endTask = 5
+      lifeEvent = #LIFE_COMPLETE
+    EndIf
+  EndIf
+End Statement
+
+;; The star flag on the castle (rising from behind its top: only the rows above
+;; castleTopY show, from the shapes cut for each height), the fireworks, and the
+;; number that rode the pole's flag down. In the world bitmap, after the other
+;; objects and before the player.
+Statement DrawLevelEnd{}
+  SHARED areaStarFlagX
+  SHARED endTask, starFlagY, fireworkActive(), fireworkX(), fireworkAtY(), fireworkAge()
+  SHARED poleNumberShown, poleNumberY, poleBand, poleScoreIndex(), flagX
+  SHARED drawBitmap, drawBuffer, viewLeft, viewRight, castleTopY
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  If endTask >= 2
+    visibleRows.w = castleTopY - starFlagY
+    If visibleRows > #TILE Then visibleRows = #TILE
+    If visibleRows >= 1
+      If areaStarFlagX + #TILE > viewLeft - #VIEW_GUARD
+        If areaStarFlagX < viewRight + #VIEW_GUARD
+          BBlit drawBuffer, #PRE_STAR_FLAG + visibleRows - 1, areaStarFlagX, starFlagY
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  For slotIndex = 0 To #FIREWORK_SLOTS - 1
+    If fireworkActive(slotIndex) = True
+      If fireworkX(slotIndex) + #TILE > viewLeft - #VIEW_GUARD
+        If fireworkX(slotIndex) < viewRight + #VIEW_GUARD
+          BBlit drawBuffer, #PRE_BLAST + fireworkAge(slotIndex)/#FIREWORK_PICTURE_TICKS, fireworkX(slotIndex) - 4, fireworkAtY(slotIndex) - 4
+        EndIf
+      EndIf
+    EndIf
+  Next
+  If poleNumberShown = True
+    DrawScoreNumber{poleScoreIndex(poleBand), flagX + #POLE_NUMBER_DX, poleNumberY}
+  EndIf
+End Statement
+
+;; One piece of the bridge (BridgeCollapseData): 0 the axe's cell, 1 the chain's (a cell left and one down), then the bridge's, a row
+;; lower, from the axe end leftwards. Blank (no tile, no collision) and repainted.
+Statement RemoveBridgePiece{pieceIndex.w}
+  SHARED mapBuffer(), metatileBuffer(), mapWidth, areaAxeX, areaAxeY
+  pieceCell.w = (areaAxeY/#TILE)*mapWidth + areaAxeX/#TILE
+  If pieceIndex = 1 Then pieceCell = pieceCell + mapWidth - 1
+  If pieceIndex >= 2 Then pieceCell = pieceCell + 2*mapWidth - 1 - (pieceIndex - 2)
+  mapBuffer(pieceCell) = 0
+  metatileBuffer(pieceCell) = #MT_EMPTY
+  QueueMetatileRedraw{pieceCell}
+End Statement
+
+;; The axe (ChkFootMTile, HandleAxeMetatile): one of Mario's foot probes (CheckPlayerFeet{}'s two) in its cell while he is free and not
+;; rising, as the cartridge's: only his feet coming down onto it, so he is on or over the wall when the walk starts (from the side the
+;; cartridge's axe is a wall: big Mario on the bridge, his head level with it, does not take it). The world stops (#PLAYER_ST_AXE), the
+;; axe goes, his speed is the walk's (the cartridge's $18, kept for the walk), and the bridge's collapse begins.
+Statement CheckAxe{}
+  SHARED playerState, playerSpeedY, playerSpeedX, areaAxeX, areaAxeY, castleEndTask, bridgeCollapseStep, playerX, playerY
+  If areaAxeX = #AREA_BOX_NONE OR castleEndTask <> 0 Then Statement Return
+  If playerState <> #PLAYER_ST_FREE OR playerSpeedY < 0 Then Statement Return
+  footY.w = playerY + #PROBE_FOOT_Y
+  If footY < areaAxeY OR footY > areaAxeY + #TILE - 1 Then Statement Return
+  footOnAxe.w = False
+  If playerX + #PROBE_FOOT_X1 >= areaAxeX AND playerX + #PROBE_FOOT_X1 <= areaAxeX + #TILE - 1 Then footOnAxe = True
+  If playerX + #PROBE_FOOT_X2 >= areaAxeX AND playerX + #PROBE_FOOT_X2 <= areaAxeX + #TILE - 1 Then footOnAxe = True
+  If footOnAxe = False Then Statement Return
+  playerState = #PLAYER_ST_AXE
+  playerSpeedX = #MARIO_MAX_WALK
+  castleEndTask = #CASTLE_END_COLLAPSE
+  bridgeCollapseStep = 0
+  RemoveBridgePiece{0}
+End Statement
+
+; The bridge's end (BridgeCollapse's SetM2, KillAllEnemies): the music stops, every object goes, the frenzy is over, and the walk is next.
+Statement EndBridgeCollapse{}
+  SHARED castleEndTask
+  SoundEventMusic{#MUSIC_SILENCE}
+  KillAllEnemies{}
+  castleEndTask = #CASTLE_END_WALK
+End Statement
+
+;; One tick at the axe, from UpdatePlayer{} (BridgeCollapse, RemoveBridge, MoveD_Bowser): with no Bowser, or one the Starman has knocked
+;; off, the collapse is over at once; one standing marks time on his feet's counter and a piece goes each time it is out; once all have
+;; gone he drops and falls until #BOWSER_FALLEN_Y.
+Statement UpdateBridgeCollapse{}
+  SHARED castleEndTask, bridgeCollapseStep, bowserFeetCounter, bowserBodyControls
+  SHARED objActive(), objType(), objState(), objY(), objVelY(), objFractionY(), objRiseStep()
+  If castleEndTask <> #CASTLE_END_COLLAPSE Then Statement Return
+  bowserSlot.w = -1
+  For poolIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(poolIndex) = True AND objType(poolIndex) = #OBJ_BOWSER Then bowserSlot = poolIndex
+  Next
+  If bowserSlot = -1
+    EndBridgeCollapse{}
+    Statement Return
+  EndIf
+  If objState(bowserSlot) = #BOWSER_ST_DROPPED
+    If objY(bowserSlot) >= #BOWSER_FALLEN_Y
+      EndBridgeCollapse{}
+      Statement Return
+    EndIf
+    FlyCheepGravity{bowserSlot, #BOWSER_FORCE, #BOWSER_FALL_MAX}
+    Statement Return
+  EndIf
+  If objState(bowserSlot) <> 0
+    EndBridgeCollapse{}
+    Statement Return
+  EndIf
+  bowserFeetCounter = bowserFeetCounter - 1
+  If bowserFeetCounter > 0 Then Statement Return
+  bowserFeetCounter = #BRIDGE_STEP_TICKS
+  bowserBodyControls = Xor(bowserBodyControls, 1)
+  RemoveBridgePiece{bridgeCollapseStep}
+  SoundSquare2{#SFX_BLAST}
+  SoundNoise{#SFX_BRICK_SHATTER}
+  bridgeCollapseStep = bridgeCollapseStep + 1
+  If bridgeCollapseStep = #BRIDGE_SEQUENCE
+    objState(bowserSlot) = #BOWSER_ST_DROPPED
+    objVelY(bowserSlot) = 0
+    objFractionY(bowserSlot) = 0
+    objRiseStep(bowserSlot) = 0
+    SoundSquare2{#SFX_BOWSER_FALL}
+  EndIf
+End Statement
+
+;; END OF LEVEL END (BLITZ MODE)

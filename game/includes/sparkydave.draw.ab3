@@ -1,0 +1,175 @@
+;; =======================================================
+;; DRAW (BLITZ MODE)
+;; =======================================================
+
+;; The flag, tile #OBJ_FLAG of the Game Objects sheet.
+;;
+;; CookieMode matters more here than for the player: the flag moves, so without
+;; cookies UnBuffer{} would restore the playfield only where the player was, and
+;; the flag would smear a stripe down the pole as it descends. Same blit shape as
+;; DrawPlayer{} for that reason.
+Statement DrawFlag{}
+  SHARED flagX, flagY, drawBuffer
+  BBlitMode CookieMode
+  ; #FLAG_SHAPE is cut once by CutFlagShape{}, not every frame.
+  Use BitMap drawBuffer
+  BBlit drawBuffer, #FLAG_SHAPE, flagX, flagY
+End Statement
+
+; END OF DRAW (BLITZ MODE)
+
+;; The bob of a bumped block, while the cell is cleared to sky under it.
+;;
+;; StampMetatileCell{}'s GID-to-atlas math, but blitted as a cookie instead of
+;; a Block: the tile moves, so UnBuffer{} must remove it between frames. The
+;; offset is blockBumpOffset() indexed by #MARIO_BLOCKBOUNCE - the timer, so
+;; frame 0 (the bump tick, timer still full) and frame 15 both sit at rest --
+;; what makes the hand-off to the settled tile seamless. One bump at a time,
+;; so one shape slot is enough.
+Statement DrawBlockBump{}
+  SHARED blockBumpActive, blockBounceTimer, blockBumpCell, blockBumpGid
+  SHARED blockBumpOffset()
+  SHARED drawBitmap, drawBuffer, mapWidth
+  If blockBumpActive = False Then Statement Return
+  If blockBounceTimer = 0 Then Statement Return
+  bumpFrame.w = #MARIO_BLOCKBOUNCE - blockBounceTimer
+  offsetY.w = blockBumpOffset(bumpFrame)
+  bumpTileId.w = blockBumpGid - 1
+  bumpSrcX.w = (bumpTileId MOD #LOOK_ATLAS_COLS)*#TILE
+  bumpSrcY.w = (bumpTileId/#LOOK_ATLAS_COLS)*#TILE
+  bumpPixX.w = (blockBumpCell MOD mapWidth)*#TILE
+  bumpPixY.w = (blockBumpCell/mapWidth)*#TILE
+  BBlitMode CookieMode
+  Use BitMap #ATLAS_BM
+  WaitBlitter
+  GetaShape #BUMP_SHAPE, bumpSrcX, bumpSrcY, #TILE, #TILE
+  Use BitMap drawBitmap
+  BBlit drawBuffer, #BUMP_SHAPE, bumpPixX, bumpPixY - offsetY
+End Statement
+
+;; Once per frame, after the sim and before DrawFrame{}. scrollX is the display
+;; origin handed to DisplayBitMap: the camera's whole pixels (with its 1/256 pixel fraction
+;; only when wholePixelScroll is off, a debug comparison: a fractional front moves the back
+;; playfield by a pixel, the main project's AMIGA_RENDERER note, "The overlay"). viewLeft and viewRight are
+;; the visible world x range, for the draw routines' visibility tests. Gameplay
+;; never reads any of them.
+Statement BuildRenderView{}
+  SHARED scrollX, cameraX, cameraFractionX, viewLeft, viewRight, backScrollX, hillScrollX
+  SHARED parallaxPreset, parallaxCloudRate(), parallaxHillRate(), wholePixelScroll, sceneryBand(), currentAreaScenery
+  ;; Whole pixels, or with the fraction: the debug comparison (wholePixelScroll, Del). cameraX
+  ;; holds whole pixels; the fraction is cameraFractionX.
+  If wholePixelScroll = True
+    scrollX = cameraX
+  Else
+    scrollX = cameraX + cameraFractionX*0.00390625
+  EndIf
+  ;; The back playfield's two bands: the clouds (the header's x) and the hills (the band split's),
+  ;; each the camera times its rate, wrapped into the 768 px strip: a loop, not QWrap, which wraps
+  ;; only once (the main project's BLITZ_CONVENTIONS note).
+  backScrollX = scrollX*parallaxCloudRate(parallaxPreset)
+  While backScrollX >= #BACK_STRIP_W*#TILE
+    backScrollX = backScrollX - #BACK_STRIP_W*#TILE
+  Wend
+  hillScrollX = scrollX*parallaxHillRate(parallaxPreset)
+  While hillScrollX >= #BACK_STRIP_W*#TILE
+    hillScrollX = hillScrollX - #BACK_STRIP_W*#TILE
+  Wend
+  ; A kind with no band (clouds at every height) has its lower part at the clouds' speed too: the band split changes nothing.
+  If sceneryBand(currentAreaScenery) = 0 Then hillScrollX = backScrollX
+  ; The All-Stars strip is one picture on one band: the hills' rate for all of it.
+  If #LOOK_ALLSTARS = 1 Then backScrollX = hillScrollX
+  viewLeft = cameraX
+  viewRight = cameraX + #VIEW_W
+End Statement
+
+;; The course clear's two lines of text, centred in the view on the world, after the castle.
+;; Each line is one shape, composed at start (CutCourseClearText{}), so the screen costs two blits a frame
+;; (the main project's OPTIMISATION note, entry 9). In the world bitmap, so UnBuffer removes it.
+Statement DrawCourseClear{}
+  SHARED viewLeft, drawBitmap, drawBuffer, courseClearLineX()
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  BBlit drawBuffer, #COURSE_TEXT_SHAPE, viewLeft + courseClearLineX(0) - 1, 103
+  BBlit drawBuffer, #COURSE_TEXT_SHAPE + 1, viewLeft + courseClearLineX(1) - 1, 123
+End Statement
+
+;; The warp zone's text and numbers (the cartridge writes them into the nametable ahead of the screen when the area parser meets the
+;; zone's object): once the right edge of the view reaches the WarpZone object, both world bitmaps get them, in the HUD glyphs.
+;; Done after the frame's UnBuffer{} and with nothing in view near the text, so no bob's saved background can paint over it; a
+;; stamp of the playfields (a restart, a room) clears warpZoneState and the next arrival draws them again.
+Statement DrawWarpZone{}
+  SHARED warpZoneState, areaWarpZoneX, cameraX, currentArea, warpPipeX(), warpPipeY(), warpPipeWorld(), warpPipeCount, warpLeftX
+  If warpZoneState <> 0 Then Statement Return
+  If currentArea <> #AREA_MAIN Then Statement Return
+  If areaWarpZoneX = #AREA_BOX_NONE Then Statement Return
+  If areaWarpZoneX > cameraX + #VIEW_W Then Statement Return
+  warpZoneState = 1
+  If warpPipeCount = 0 Then Statement Return
+  For warpBitmap.w = #PLAY_BM_A To #PLAY_BM_B
+    DrawTextInto{warpBitmap, "WELCOME TO WARP ZONE!", warpLeftX, #WARP_TEXT_Y}
+    For warpIndex.w = 0 To warpPipeCount - 1
+      DrawTextInto{warpBitmap, Chr$(48 + warpPipeWorld(warpIndex)), warpPipeX(warpIndex) + 8, warpPipeY(warpIndex) - #WARP_NUMBER_DY}
+    Next
+  Next
+End Statement
+
+;; The retainer's messages (PrintVictoryMessages), in the HUD glyphs into the world bitmaps as the warp zone's text is, at the
+;; cartridge's nametable places in the destination page: once each is wanted and not yet drawn since the last stamp. Only into the
+;; bitmap drawn this frame, the next one shown, so a message appears at once and the other bitmap gets it a frame later, before it is
+;; shown. That halves the cost a frame: drawing both at once takes about 165 lines, the heaviest frame of a castle's end on NTSC.
+;; Each line on #TEXT_BACKING_PEN's bar, as the course clear's are (DrawTextOnBar{}).
+Statement DrawCastleText{}
+  SHARED castleTextWanted, castleTextDrawnA, castleTextDrawnB, castleWalkDestX, drawBitmap
+  textDrawn.w = castleTextDrawnA
+  If drawBitmap = #PLAY_BM_B Then textDrawn = castleTextDrawnB
+  If textDrawn >= castleTextWanted Then Statement Return
+  If textDrawn < 1 Then DrawTextOnBar{drawBitmap, "THANK YOU MARIO!", castleWalkDestX + #CASTLE_TEXT_UPPER_X, #CASTLE_TEXT_UPPER_Y}
+  If castleTextWanted >= 2
+    DrawTextOnBar{drawBitmap, "BUT OUR PRINCESS IS IN", castleWalkDestX + #CASTLE_TEXT_LOWER_X, #CASTLE_TEXT_LOWER_Y}
+    DrawTextOnBar{drawBitmap, "ANOTHER CASTLE!", castleWalkDestX + #CASTLE_TEXT_LOWER_X, #CASTLE_TEXT_LOWER_Y + 16}
+  EndIf
+  If drawBitmap = #PLAY_BM_B
+    castleTextDrawnB = castleTextWanted
+  Else
+    castleTextDrawnA = castleTextWanted
+  EndIf
+End Statement
+
+Statement DrawFrame{}
+  SHARED drawBitmap, drawBuffer, lifeEvent
+  Use BitMap drawBitmap
+  UnBuffer drawBuffer
+  DrawWarpZone{}
+  DrawCastleText{}
+  ;; Between UnBuffer and DrawPlayer{}: the bob buffer has already been
+  ;; restored, so it cannot paint over the repaint, and the player is still
+  ;; drawn afterwards so he lands on top. See RedrawMetatileCells{}.
+  RedrawMetatileCells{}
+  ;; After the repaint, so the cleared or settled cell is under the bob,
+  ;; and before the flag: a moving world tile, behind everything the player
+  ;; meets.
+  DrawBlockBump{}
+  ;; After the repaint, so a cell repaint cannot paint over the flag, and
+  ;; before the player, because he slides in front of it.
+  DrawFlag{}
+  DrawObjects{}
+  DrawVine{}
+  ;; After the objects, so the releasing cell's tile covers each rising item's
+  ;; in-cell part: the tile layer composites above the object layer.
+  DrawItemOcclusion{}
+  DrawPlantOcclusion{}
+  ; World layer, so before the player: Mario passes in front of the chunks.
+  DrawBrickDebris{}
+  DrawFireballs{}
+  DrawBubbles{}
+  DrawLevelEnd{}
+  DrawFloaters{}
+  DrawPlayer{}
+  ; After him: the tiles of the pipe he is going into or coming out of.
+  DrawPipeOcclusion{}
+  ; And the floor of the sky bonus he climbs up through.
+  DrawVineEntryOcclusion{}
+  If lifeEvent = #LIFE_COMPLETE Then DrawCourseClear{}
+End Statement
+
+;; END OF DRAW (BLITZ MODE)

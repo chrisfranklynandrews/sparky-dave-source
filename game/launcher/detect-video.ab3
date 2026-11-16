@@ -1,0 +1,43 @@
+;; detect-video.ab3 -- tells the launcher script which video standard this machine has, and whether
+;; the machine can run the game at all.
+;; A standalone program, not part of the game: compiled by compile-sparky-bin to
+;; compiled/DetectVideo and run by the launcher script (S/SparkyDave) before the game, every start.
+;; It has no OPTIMIZE line, so it is plain 68000 code and runs on any Amiga: the game is 68020 code
+;; (OPTIMIZE 1) and on an A500 or A600 would crash before its own check.
+;;
+;; The machine check is the game's (MachineProblem{}, includes/sparkydave.machine.ab3), with the room
+;; the game's code will need (#MACHINE_CODE_BYTES), as the game is not loaded yet. When the machine
+;; lacks something, the message goes into the flag file RAM:sparky-machine-problem, which the script
+;; types, waits and stops on; on a machine that can run it the file is deleted.
+;;
+;; It creates the flag file RAM:sparky-video-pal on a PAL machine and deletes it on an NTSC one,
+;; and the script reads it with IF EXISTS. A return code does not work: proofs/video-standard.ab3
+;; (run 2026-10-13) showed "End d0" never reaches the script's IF WARN, while the flag file
+;; read right under both the PAL and the NTSC profile.
+
+WBStartup
+
+XINCLUDE "/includes/sparkydave.machine.ab3"
+
+machineProblemFound.w = MachineProblem{#MACHINE_CODE_BYTES}
+If machineProblemFound = #MACHINE_OK
+  If Exists("RAM:sparky-machine-problem") > 0 Then KillFile "RAM:sparky-machine-problem"
+Else
+  If WriteFile(1, "RAM:sparky-machine-problem")
+    FileOutput 1
+    NPrint MachineProblemText{machineProblemFound, #MACHINE_CODE_BYTES}
+    CloseFile 1
+  EndIf
+EndIf
+
+If NTSC = True
+  If Exists("RAM:sparky-video-pal") > 0 Then KillFile "RAM:sparky-video-pal"
+Else
+  If WriteFile(0, "RAM:sparky-video-pal")
+    FileOutput 0
+    NPrint "pal"
+    CloseFile 0
+  EndIf
+EndIf
+
+End

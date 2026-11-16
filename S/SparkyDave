@@ -1,0 +1,203 @@
+;; Start Sparky Dave with the build that fits this machine.
+;;
+;;   execute SparkyDave              the NES look, the build for this machine's video standard
+;;   execute SparkyDave allstars     the All-Stars look (the SparkyDave-AllStars icon passes this)
+;;   execute SparkyDave nes          the NES look (the default)
+;;   execute SparkyDave pal          the PAL build (50 ticks a second), whatever the machine
+;;   execute SparkyDave ntsc         the NTSC build (60 ticks a second), whatever the machine
+;;   execute SparkyDave debug        with the debug keys and the report files
+;;   execute SparkyDave levels       every level on the title's LEVEL row, without debug mode
+;;                                   (to try a level at a player's speed)
+;; Up to three of them together, in any order: one of pal or ntsc, one of nes or allstars, one of
+;; debug or levels (execute SparkyDave allstars pal debug).
+;;
+;; Run it from the drawer it is in (a double-click from Workbench does; from a shell, cd there
+;; first: while developing, cd sparky-dave:compiled). The paths are relative to that drawer because
+;; PROGDIR: means nothing inside a script (the proof game/proofs/progdir-test, 2026-10-14:
+;; AmigaDOS asks for a volume called PROGDIR); the game itself, a program, does use it.
+;; The standard is read by DetectVideo, which leaves the flag file RAM:sparky-video-pal on a PAL
+;; machine (game/launcher/detect-video.ab3). The debug parameter is passed on to the game,
+;; which is the same program with or without it (the release plan). The look is a build of its own
+;; (the art is compiled in), so each look has a program for each standard:
+;; SparkyDaveNTSC, SparkyDavePal, SparkyDaveNTSCAllStars and SparkyDavePalAllStars.
+.KEY first,second,third
+.BRA {
+.KET }
+.DEF first ""
+.DEF second ""
+.DEF third ""
+
+FAILAT 21
+
+;; The right drawer first: a Workbench start shows this message (the game prints its own on a shell).
+IF NOT EXISTS DetectVideo
+  ECHO "Sparky Dave: run this from its own drawer (cd there first), DetectVideo is not here."
+  WAIT 8 SECS
+  QUIT 20
+ENDIF
+
+SET build auto
+SET look nes
+SET lookname NES
+SET lookgiven no
+SET debugarg ""
+SET levelsarg ""
+SET launchfailed no
+
+;; Each word in turn, through one loop (LAB nextword and SKIP BACK): a word it does not know, or one of
+;; a group already given (pal then ntsc, nes then allstars, debug then levels), stops it with the
+;; usage, so SparkyDave-AllStars nes does not quietly start the NES look.
+SET wordtrouble no
+SET wordnumber 1
+SET word "{first}"
+LAB nextword
+IF NOT "$word" EQ ""
+  SET wordknown no
+  IF "$word" EQ "pal"
+    SET wordknown yes
+    IF NOT "$build" EQ "auto"
+      SET wordtrouble clash
+    ENDIF
+    SET build Pal
+  ENDIF
+  IF "$word" EQ "ntsc"
+    SET wordknown yes
+    IF NOT "$build" EQ "auto"
+      SET wordtrouble clash
+    ENDIF
+    SET build NTSC
+  ENDIF
+  IF "$word" EQ "allstars"
+    SET wordknown yes
+    IF "$lookgiven" EQ "yes"
+      SET wordtrouble clash
+    ENDIF
+    SET lookgiven yes
+    SET look allstars
+    SET lookname All-Stars
+  ENDIF
+  IF "$word" EQ "nes"
+    SET wordknown yes
+    IF "$lookgiven" EQ "yes"
+      SET wordtrouble clash
+    ENDIF
+    SET lookgiven yes
+    SET look nes
+    SET lookname NES
+  ENDIF
+  IF "$word" EQ "debug"
+    SET wordknown yes
+    IF NOT "$debugarg$levelsarg" EQ ""
+      SET wordtrouble clash
+    ENDIF
+    SET debugarg debug
+  ENDIF
+  IF "$word" EQ "levels"
+    SET wordknown yes
+    IF NOT "$debugarg$levelsarg" EQ ""
+      SET wordtrouble clash
+    ENDIF
+    SET levelsarg levels
+  ENDIF
+  IF "$wordknown" EQ "no"
+    SET wordtrouble unknown
+  ENDIF
+ENDIF
+IF "$wordtrouble" EQ "no"
+  IF "$wordnumber" EQ "1"
+    SET wordnumber 2
+    SET word "{second}"
+    SKIP nextword BACK
+  ENDIF
+  IF "$wordnumber" EQ "2"
+    SET wordnumber 3
+    SET word "{third}"
+    SKIP nextword BACK
+  ENDIF
+ENDIF
+
+IF NOT "$wordtrouble" EQ "no"
+  IF "$wordtrouble" EQ "unknown"
+    ECHO "Sparky Dave does not know $word."
+  ELSE
+    ECHO "Sparky Dave: $word clashes with a word before it."
+  ENDIF
+  ECHO "Usage: SparkyDave [pal|ntsc] [nes|allstars] [debug|levels]"
+  WAIT 8 SECS
+  SET launchfailed yes
+  SKIP done
+ENDIF
+
+;; A whole data drawer, for the look chosen: its first tile set is checked here, so a Workbench start
+;; shows this message too.
+SET datafile tiles-all.iff
+IF "$look" EQ "allstars"
+  SET datafile tiles-allstars-over.iff
+ENDIF
+IF NOT EXISTS data/$datafile
+  ECHO "Sparky Dave: the data drawer is missing or incomplete. Unpack the whole archive."
+  WAIT 8 SECS
+  SET launchfailed yes
+  SKIP done
+ENDIF
+
+;; DetectVideo runs on every start: it checks the machine too (a 68020, Kickstart 3.0, AGA, Fast and
+;; Chip RAM; includes/sparkydave.machine.ab3), as plain 68000 code, before the 68020 game is loaded.
+;; A machine that lacks something gets the message in RAM:sparky-machine-problem, shown here.
+DELETE RAM:sparky-video-pal QUIET
+DELETE RAM:sparky-machine-problem QUIET
+DetectVideo
+IF EXISTS RAM:sparky-machine-problem
+  TYPE RAM:sparky-machine-problem
+  WAIT 8 SECS
+  SET launchfailed yes
+  SKIP done
+ENDIF
+
+IF "$build" EQ "auto"
+  IF EXISTS RAM:sparky-video-pal
+    SET build Pal
+  ELSE
+    SET build NTSC
+  ENDIF
+ENDIF
+
+;; The program: the standard's name, and AllStars after it for that look.
+SET program SparkyDave$build
+IF "$look" EQ "allstars"
+  IF "$build" EQ "Pal"
+    SET program SparkyDavePalAllStars
+  ELSE
+    SET program SparkyDaveNTSCAllStars
+  ENDIF
+ENDIF
+
+IF NOT EXISTS $program
+  ECHO "No $build $lookname build here (while developing: execute sparky-dave:S/compile-sparky-bin first)"
+  WAIT 8 SECS
+  SET launchfailed yes
+  SKIP done
+ENDIF
+
+ECHO "Starting Sparky Dave, $build build, $lookname look $debugarg $levelsarg"
+$program $debugarg $levelsarg
+
+;; Every way out comes here: the script runs in the caller's shell, so its variables are taken away.
+LAB done
+UNSET build
+UNSET look
+UNSET lookname
+UNSET lookgiven
+UNSET debugarg
+UNSET levelsarg
+UNSET wordtrouble
+UNSET wordnumber
+UNSET word
+UNSET wordknown
+UNSET datafile
+UNSET program
+IF "$launchfailed" EQ "yes"
+  UNSET launchfailed
+  QUIT 20
+ENDIF
+UNSET launchfailed

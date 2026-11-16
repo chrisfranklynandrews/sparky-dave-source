@@ -1,0 +1,122 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "LoadFirstScreen"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; Proof: LoadBitMap the baked World 1-1 first screen. ESC quits.
+;; Folded into sparkydave.init.ab3 / sparkydave.draw.ab3.
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#PLAYFIELD_PLANES = 4
+#COPPER_COLORS = 16
+#COPPER_YPOS = 44
+#COPPER_FLAGS = $10004
+#VIEW_W = 320
+
+quitFlag.w = False
+scrh.w = 256
+
+scrh = DispHeight
+BitMap 0, #VIEW_W, scrh, #PLAYFIELD_PLANES
+BitMap 1, #VIEW_W, scrh, #PLAYFIELD_PLANES
+InitPalette 0, #COPPER_COLORS
+screenIff$ = "sparky-dave:game/assets/world1-1-320x256.iff"
+If Exists(screenIff$) > 0
+  LoadBitMap 0, screenIff$, 0
+  LoadBitMap 1, screenIff$, 0
+Else
+  AGAPalRGB 0, 0, 92, 148, 252
+EndIf
+InitCopList 0, #COPPER_YPOS, scrh, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+
+BLITZ
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+drawBm.w = 0
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  VWait
+  DisplayBitMap 0, drawBm
+  drawBm = 1 - drawBm
+Wend
+
+AMIGA
+End

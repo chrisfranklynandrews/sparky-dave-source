@@ -1,0 +1,413 @@
+;; =======================================================
+;; SETTINGS (AMIGA MODE)
+;; =======================================================
+;; The keys and the controls choice that survive a run (the main project's INPUT note, "Redefinable keys").
+;; File input and output are Amiga mode, so everything
+;; here is above BLITZ; the Blitz part (SaveSettingsNow{} in the cover file) steps out to QAMIGA
+;; around WriteSettings{}.
+;;
+;; The file is text, one value to a line: SPARKYKEYS11, the eight raw key codes in the order of the #KEY_* actions, the KEYBOARD
+;; choice (keyboardMode), then the sound: the pan layout (0 to #SOUND_PAN_LAYOUTS - 1), the filter (1 on, 0 off) and the volume
+;; steps of the pulses, the triangle and the noise (0 to 9), then the two jump forgiveness levels (jump buffer, coyote time: 0 to
+;; #FORGIVENESS_LEVELS - 1), then the highest level reached (0 to #LEVEL_TABLE_COUNT - 1: what the title's LEVEL offers outside
+;; debug mode), then the NES palette chosen (0 "as drawn", 1 to #NES_PALETTE_COUNT), then the top score as last saved when a game
+;; ended (topScoreSaved, 0 to #HUD_SCORE_MAX), then the continues chosen (continuesChoice, 0 to #CONTINUES_CHOICES - 1), then the
+;; JOYSTICK choice (joystickMode). A SPARKYKEYS10 file has one controls number where the KEYBOARD choice is and no JOYSTICK line
+;; (OldControlsKeyboard{}, OldControlsJoystick{}). A SPARKYKEYS9 file (with seven keys: PAUSE gets a default, DefaultPauseKey{}) loads as it was.
+;; A SPARKYKEYS8 file (without the continues: NONE, or a bad number there), a SPARKYKEYS7 file (also without the top score) or a
+;; SPARKYKEYS6 file (also without the palette) loads as it was. A SPARKYKEYS5 file (with six keys: UP gets a default, DefaultUpKey{}),
+;; a SPARKYKEYS4 file (without the level), a SPARKYKEYS3 file (also without the forgiveness)
+;; or a SPARKYKEYS2 file (also without the sound) still loads, and what it lacks keeps its defaults. A
+;; file that is missing, has another first line, or has a bad key code or controls choice (not a
+;; number, out of range, refused or used twice) is ignored whole and the defaults stand. The sound
+;; and the forgiveness are each a section of their own: a bad value in one leaves that section at
+;; its defaults (or as it was) and the rest of the file is used.
+
+;; One raw code's name. The HUD font has 0-9, A-Z, the dash and a space only, so punctuation
+;; keys are spelled out. Names are for a US keyboard: a raw code is a place on the keyboard.
+Statement SetKeyName{code.w, text$}
+  SHARED keyNames$()
+  keyNames$(code) = text$
+End Statement
+
+; The names of the keys and the actions. A code with no name gets "KEY" and its hex number.
+Statement BuildKeyTables{}
+  SHARED keyNames$(), keyActionNames$()
+  keyActionNames$(#KEY_LEFT) = "LEFT"
+  keyActionNames$(#KEY_RIGHT) = "RIGHT"
+  keyActionNames$(#KEY_DOWN) = "DOWN"
+  keyActionNames$(#KEY_JUMP) = "JUMP"
+  keyActionNames$(#KEY_RUN) = "RUN"
+  keyActionNames$(#KEY_FIRE) = "FIRE"
+  keyActionNames$(#KEY_UP) = "UP"
+  keyActionNames$(#KEY_PAUSE) = "PAUSE"
+  rowText$ = "1234567890"
+  For index.w = 0 To 9
+    SetKeyName{1 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "QWERTYUIOP"
+  For index.w = 0 To 9
+    SetKeyName{$10 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "ASDFGHJKL"
+  For index.w = 0 To 8
+    SetKeyName{$20 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  rowText$ = "ZXCVBNM"
+  For index.w = 0 To 6
+    SetKeyName{$31 + index, Mid$(rowText$, index + 1, 1)}
+  Next
+  For index.w = 1 To 9
+    SetKeyName{$4f + index, "F" + Chr$(48 + index)}
+  Next
+  SetKeyName{$59, "F10"}
+  SetKeyName{$00, "BACKQUOTE"}
+  SetKeyName{$0b, "MINUS"}
+  SetKeyName{$0c, "EQUALS"}
+  SetKeyName{$0d, "BACKSLASH"}
+  SetKeyName{$1a, "LBRACKET"}
+  SetKeyName{$1b, "RBRACKET"}
+  SetKeyName{$28, "SEMICOLON"}
+  SetKeyName{$29, "QUOTE"}
+  SetKeyName{$38, "COMMA"}
+  SetKeyName{$39, "PERIOD"}
+  SetKeyName{$3a, "SLASH"}
+  SetKeyName{$0f, "PAD 0"}
+  SetKeyName{$1d, "PAD 1"}
+  SetKeyName{$1e, "PAD 2"}
+  SetKeyName{$1f, "PAD 3"}
+  SetKeyName{$2d, "PAD 4"}
+  SetKeyName{$2e, "PAD 5"}
+  SetKeyName{$2f, "PAD 6"}
+  SetKeyName{$3d, "PAD 7"}
+  SetKeyName{$3e, "PAD 8"}
+  SetKeyName{$3f, "PAD 9"}
+  SetKeyName{$3c, "PAD DOT"}
+  SetKeyName{$43, "ENTER"}
+  SetKeyName{$4a, "PAD MINUS"}
+  SetKeyName{$5a, "PAD LPAREN"}
+  SetKeyName{$5b, "PAD RPAREN"}
+  SetKeyName{$5c, "PAD DIVIDE"}
+  SetKeyName{$5d, "PAD TIMES"}
+  SetKeyName{$5e, "PAD PLUS"}
+  SetKeyName{$40, "SPACE"}
+  SetKeyName{$41, "BACKSPACE"}
+  SetKeyName{$42, "TAB"}
+  SetKeyName{$44, "RETURN"}
+  SetKeyName{$45, "ESC"}
+  SetKeyName{$46, "DEL"}
+  SetKeyName{$4c, "UP"}
+  SetKeyName{$4d, "DOWN"}
+  SetKeyName{$4e, "RIGHT"}
+  SetKeyName{$4f, "LEFT"}
+  SetKeyName{$5f, "HELP"}
+  SetKeyName{$60, "LSHIFT"}
+  SetKeyName{$61, "RSHIFT"}
+  SetKeyName{$62, "CAPS"}
+  SetKeyName{$63, "CTRL"}
+  SetKeyName{$64, "LALT"}
+  SetKeyName{$65, "RALT"}
+  SetKeyName{$66, "LAMIGA"}
+  SetKeyName{$67, "RAMIGA"}
+  For index.w = 0 To #KEY_LAST
+    If Len(keyNames$(index)) = 0 Then keyNames$(index) = "KEY " + Right$(Hex$(index), 2)
+  Next
+End Statement
+
+;; The keys the game keeps for itself, which no action may take: Esc (quit and back on the title, and
+;; cancel here), Return (start and choose), every function key F1 to F10 (F1 reset, F3 to F5 and the
+;; others the debug keys; any with no use now stays refused), Help and Del (the debug parallax
+;; and whole-pixel keys) and Caps Lock (a toggle, not a held key); and nothing outside 0 to #KEY_LAST.
+;; Pure, so the tests can call it.
+Function.w KeyAllowed{code.w}
+  If code < 0 OR code > #KEY_LAST Then Function Return False
+  If code = #RAW_KEY_ESC OR code = #RAW_KEY_START Then Function Return False
+  If code >= #RAW_KEY_F1 AND code <= #RAW_KEY_F10 Then Function Return False
+  If code = $62 Then Function Return False
+  ; Help and Del: the debug parallax preset and whole-pixel scroll keys (sparkydave.input.ab3).
+  If code = #RAW_KEY_HELP OR code = #RAW_KEY_DEL Then Function Return False
+  Function Return True
+End Function
+
+;; The UP key for a settings file that has none (before SPARKYKEYS6): the cursor Up, unless one of the first keyTotal in redefineMap() has it, then
+;; the first of the keypad's 8, 7 and 9 that none has (the keypad is never an action by default). Pure on redefineMap().
+Function.w DefaultUpKey{keyTotal.w}
+  SHARED redefineMap()
+  For candidate.w = 0 To 3
+    upCode.w = #RAW_KEY_UP
+    If candidate = 1 Then upCode = $3e
+    If candidate = 2 Then upCode = $3d
+    If candidate = 3 Then upCode = $3f
+    taken.w = False
+    For index.w = 0 To keyTotal - 1
+      If redefineMap(index) = upCode Then taken = True
+    Next
+    If taken = False Then Function Return upCode
+  Next
+  Function Return #RAW_KEY_UP
+End Function
+
+;; The PAUSE key for a settings file that has none (before SPARKYKEYS10): P, unless one of the first keyTotal in redefineMap() has it, then the
+;; first of Backspace, Tab and the keypad's 0 that none has. Pure on redefineMap().
+Function.w DefaultPauseKey{keyTotal.w}
+  SHARED redefineMap()
+  For candidate.w = 0 To 3
+    pauseCode.w = #RAW_KEY_PAUSE
+    If candidate = 1 Then pauseCode = $41
+    If candidate = 2 Then pauseCode = $42
+    If candidate = 3 Then pauseCode = $0f
+    taken.w = False
+    For index.w = 0 To keyTotal - 1
+      If redefineMap(index) = pauseCode Then taken = True
+    Next
+    If taken = False Then Function Return pauseCode
+  Next
+  Function Return #RAW_KEY_PAUSE
+End Function
+
+; The keys as they come: the arrows, Space for jump, Ctrl run, Left Alt fire, the cursor Up to climb, P to pause.
+Statement SetDefaultKeys{}
+  SHARED keyMap()
+  keyMap(#KEY_LEFT) = #RAW_KEY_LEFT
+  keyMap(#KEY_RIGHT) = #RAW_KEY_RIGHT
+  keyMap(#KEY_DOWN) = #RAW_KEY_DOWN
+  keyMap(#KEY_JUMP) = #RAW_KEY_JUMP
+  keyMap(#KEY_RUN) = #RAW_KEY_RUN
+  keyMap(#KEY_FIRE) = #RAW_KEY_ALT
+  keyMap(#KEY_UP) = #RAW_KEY_UP
+  keyMap(#KEY_PAUSE) = #RAW_KEY_PAUSE
+End Statement
+
+;; True if the codes in redefineMap() (the first keyTotal of them) are all allowed and all different, except that UP may be the JUMP key: climbing
+;; does not read jump, and a joystick's stick up is both already (the one button choice).
+Function.w KeysUsable{keyTotal.w}
+  SHARED redefineMap()
+  usable.w = True
+  For first.w = 0 To keyTotal - 1
+    If KeyAllowed{redefineMap(first)} = False Then usable = False
+    For second.w = first + 1 To keyTotal - 1
+      If redefineMap(first) = redefineMap(second)
+        If first <> #KEY_JUMP OR second <> #KEY_UP Then usable = False
+      EndIf
+    Next
+  Next
+  Function Return usable
+End Function
+
+;; The two windows from the two levels, through the table in globals.ab3 (the options page, the
+;; settings file).
+Statement ApplyForgiveness{}
+  SHARED forgivenessLevel(), forgivenessWindowTicks(), jumpBufferWindow, coyoteWindow
+  jumpBufferWindow = forgivenessWindowTicks(#FORGIVENESS_BUFFER, forgivenessLevel(#FORGIVENESS_BUFFER))
+  coyoteWindow = forgivenessWindowTicks(#FORGIVENESS_COYOTE, forgivenessLevel(#FORGIVENESS_COYOTE))
+End Statement
+
+;; True if the text is one or more digits and nothing else. Val() reads anything else as 0, which
+;; would turn a damaged line into the backquote key (code 0) or the first controls choice.
+Function.w IsNumberText{numberText$}
+  numberOk.w = False
+  If Len(numberText$) > 0 Then numberOk = True
+  For charIndex.w = 1 To Len(numberText$)
+    charCode.w = Asc(Mid$(numberText$, charIndex, 1))
+    If charCode < 48 OR charCode > 57 Then numberOk = False
+  Next
+  Function Return numberOk
+End Function
+
+;; One line of the file as a number from 0 to highest, or -1 if it is not one (not digits, too long for a long, or out of
+;; range), so one test covers both. A long, for the top score's six digits.
+Function.l ReadSettingNumber{highest.l}
+  numberText$ = Edit$(10)
+  If IsNumberText{numberText$} = False OR Len(numberText$) > 9 Then Function Return -1
+  numberRead.l = Val(numberText$)
+  If numberRead > highest Then Function Return -1
+  Function Return numberRead
+End Function
+
+;; A settings file's controls number from before SPARKYKEYS11 (#OLD_CONTROLS_COUNT choices) as the KEYBOARD choice: 3 KEY only from
+;; KEYBOARD 3 KEY. Pure, so the tests can call it.
+Function.w OldControlsKeyboard{oldMode.w}
+  If oldMode = #OLD_CONTROLS_KEYS_SPLIT Then Function Return #KEYBOARD_THREE_KEY
+  Function Return #KEYBOARD_TWO_KEY
+End Function
+
+;; The same as the JOYSTICK choice: 1 BUTTON only from JOY 1 BUTTON; the keyboard choices, JOY 2 BUTTON and the CD32 pad are 2 BUTTON
+;; (a pad is read as a 2 button stick now). Pure, so the tests can call it.
+Function.w OldControlsJoystick{oldMode.w}
+  If oldMode = #OLD_CONTROLS_JOY_ONE Then Function Return #JOYSTICK_ONE_BUTTON
+  Function Return #JOYSTICK_TWO_BUTTON
+End Function
+
+;; The settings file over the defaults, if there is a good one. It is read through
+;; redefineMap() and locals (redefineMap() is not in use at start-up) so a bad file changes nothing.
+;; Called in Amiga mode before the sound starts, which then puts the sound's values on the hardware
+;; (SoundApplySettings{}).
+Statement LoadSettings{}
+  SHARED settingsPath$, keyMap(), redefineMap(), keyboardMode, joystickMode
+  SHARED soundPanNow, soundPaulaChannel(), soundPanLayout(), soundFilterChosen, soundVolumeScale()
+  SHARED forgivenessLevel(), levelReached, paletteChoice, hudTopScore, topScoreSaved, continuesChoice
+  If Exists(settingsPath$) = 0 Then Statement Return
+  If ReadFile(0, settingsPath$) = 0 Then Statement Return
+  FileInput 0
+  goodFile.w = False
+  hasSound.w = False
+  hasForgiveness.w = False
+  bufferRead.w = #FORGIVENESS_DEFAULT
+  coyoteRead.w = #FORGIVENESS_DEFAULT
+  headerText$ = Edit$(20)
+  fileVersion.w = 0
+  If headerText$ = "SPARKYKEYS2" Then fileVersion = 2
+  If headerText$ = "SPARKYKEYS3" Then fileVersion = 3
+  If headerText$ = "SPARKYKEYS4" Then fileVersion = 4
+  If headerText$ = "SPARKYKEYS5" Then fileVersion = 5
+  If headerText$ = "SPARKYKEYS6" Then fileVersion = 6
+  If headerText$ = "SPARKYKEYS7" Then fileVersion = 7
+  If headerText$ = "SPARKYKEYS8" Then fileVersion = 8
+  If headerText$ = "SPARKYKEYS9" Then fileVersion = 9
+  If headerText$ = "SPARKYKEYS10" Then fileVersion = 10
+  If headerText$ = "SPARKYKEYS11" Then fileVersion = 11
+  hasLevel.w = False
+  levelRead.w = 0
+  hasPalette.w = False
+  paletteRead.w = #PALETTE_DEFAULT
+  topScoreRead.l = -1
+  continuesRead.w = -1
+  joystickRead.w = -1
+  If fileVersion > 0
+    goodFile = True
+    ;; The keys the file has: all of them from SPARKYKEYS10, the first #KEY_COUNT_BEFORE_PAUSE before it (no PAUSE key), the first
+    ;; #KEY_COUNT_OLD before SPARKYKEYS6 (no UP key either); what it lacks gets a default below.
+    keysInFile.w = #KEY_COUNT
+    If fileVersion < 10 Then keysInFile = #KEY_COUNT_BEFORE_PAUSE
+    If fileVersion < 6 Then keysInFile = #KEY_COUNT_OLD
+    For index.w = 0 To keysInFile - 1
+      numberText$ = Edit$(8)
+      If IsNumberText{numberText$} = False Then goodFile = False
+      redefineMap(index) = Val(numberText$)
+    Next
+    ;; The controls: from SPARKYKEYS11 the KEYBOARD choice here and the JOYSTICK choice at the end; before it one number for the
+    ;; five choices there were, which gives both (OldControlsKeyboard{}, OldControlsJoystick{}).
+    modeRead.w = -1
+    If fileVersion >= 11
+      modeRead = ReadSettingNumber{#KEYBOARD_MODES - 1}
+    Else
+      modeRead = ReadSettingNumber{#OLD_CONTROLS_COUNT - 1}
+      If modeRead >= 0
+        joystickRead = OldControlsJoystick{modeRead}
+        modeRead = OldControlsKeyboard{modeRead}
+      EndIf
+    EndIf
+    If modeRead < 0 Then goodFile = False
+    If goodFile <> False
+      If KeysUsable{keysInFile} = False Then goodFile = False
+    EndIf
+    If goodFile <> False AND fileVersion < 6 Then redefineMap(#KEY_UP) = DefaultUpKey{keysInFile}
+    If goodFile <> False AND fileVersion < 10 Then redefineMap(#KEY_PAUSE) = DefaultPauseKey{#KEY_COUNT_BEFORE_PAUSE}
+    If fileVersion >= 3
+      panRead.w = ReadSettingNumber{#SOUND_PAN_LAYOUTS - 1}
+      filterRead.w = ReadSettingNumber{1}
+      pulseRead.w = ReadSettingNumber{9}
+      triangleRead.w = ReadSettingNumber{9}
+      noiseRead.w = ReadSettingNumber{9}
+      If panRead >= 0 AND filterRead >= 0 AND pulseRead >= 0 AND triangleRead >= 0 AND noiseRead >= 0 Then hasSound = True
+    EndIf
+    If fileVersion >= 4
+      bufferRead = ReadSettingNumber{#FORGIVENESS_LEVELS - 1}
+      coyoteRead = ReadSettingNumber{#FORGIVENESS_LEVELS - 1}
+      If bufferRead >= 0 AND coyoteRead >= 0 Then hasForgiveness = True
+    EndIf
+    If fileVersion >= 5
+      levelRead = ReadSettingNumber{#LEVEL_TABLE_COUNT - 1}
+      If levelRead >= 0 Then hasLevel = True
+    EndIf
+    If fileVersion >= 7
+      paletteRead = ReadSettingNumber{#NES_PALETTE_COUNT}
+      If paletteRead >= 0 Then hasPalette = True
+    EndIf
+    If fileVersion >= 8 Then topScoreRead = ReadSettingNumber{#HUD_SCORE_MAX}
+    If fileVersion >= 9 Then continuesRead = ReadSettingNumber{#CONTINUES_CHOICES - 1}
+    If fileVersion >= 11 Then joystickRead = ReadSettingNumber{#JOYSTICK_MODES - 1}
+  EndIf
+  CloseFile 0
+  If goodFile = False Then Statement Return
+  For index.w = 0 To #KEY_COUNT - 1
+    keyMap(index) = redefineMap(index)
+  Next
+  keyboardMode = modeRead
+  If joystickRead >= 0 Then joystickMode = joystickRead
+  If hasLevel <> False Then levelReached = levelRead
+  ; The palette is applied by the Blitz start-up (ApplyNesPalette{}, init.blitz), after this.
+  If hasPalette <> False Then paletteChoice = paletteRead
+  If continuesRead >= 0 Then continuesChoice = continuesRead
+  If topScoreRead >= 0
+    hudTopScore = topScoreRead
+    topScoreSaved = topScoreRead
+  EndIf
+  If hasForgiveness <> False
+    forgivenessLevel(#FORGIVENESS_BUFFER) = bufferRead
+    forgivenessLevel(#FORGIVENESS_COYOTE) = coyoteRead
+    ApplyForgiveness{}
+  EndIf
+  If hasSound = False Then Statement Return
+  ; The layout's channels as the start does (sound.ab3); the hardware gets them in SoundApplySettings{}.
+  soundPanNow = panRead
+  For panIndex.w = 0 To 3
+    soundPaulaChannel(panIndex) = soundPanLayout(soundPanNow*4 + panIndex)
+  Next
+  soundFilterChosen = False
+  If filterRead = 1 Then soundFilterChosen = True
+  soundVolumeScale(0) = pulseRead
+  soundVolumeScale(1) = triangleRead
+  soundVolumeScale(2) = noiseRead
+End Statement
+
+;; Write the settings file (SPARKYKEYS11). True if it opened. The top score written is topScoreSaved, the one kept when a game last
+;; ended (SaveTopScoreIfNew{}), so a save from the options page or at quitting does not keep a score from a game not yet over.
+Function.w WriteSettings{}
+  SHARED settingsPath$, keyMap(), keyboardMode, joystickMode, soundPanNow, soundFilterChosen, soundVolumeScale()
+  SHARED forgivenessLevel(), levelReached, paletteChoice, topScoreSaved, continuesChoice
+  If WriteFile(0, settingsPath$) = 0 Then Function Return False
+  FileOutput 0
+  NPrint "SPARKYKEYS11"
+  For index.w = 0 To #KEY_COUNT - 1
+    NPrint keyMap(index)
+  Next
+  NPrint keyboardMode
+  NPrint soundPanNow
+  filterWritten.w = 0
+  If soundFilterChosen <> False Then filterWritten = 1
+  NPrint filterWritten
+  For index.w = 0 To 2
+    NPrint soundVolumeScale(index)
+  Next
+  NPrint forgivenessLevel(#FORGIVENESS_BUFFER)
+  NPrint forgivenessLevel(#FORGIVENESS_COYOTE)
+  NPrint levelReached
+  NPrint paletteChoice
+  NPrint topScoreSaved
+  NPrint continuesChoice
+  NPrint joystickMode
+  CloseFile 0
+  Function Return True
+End Function
+
+;; No system requesters while the game is up. A write to a write-protected volume (the
+;; settings, the top score at a game's end) would otherwise ask "Volume ... is write protected" on the Workbench screen, behind the
+;; game's display, and wait for an answer nobody can see. With the process's pr_WindowPtr (offset #PR_WINDOWPTR) at -1, AmigaDOS
+;; fails the call with the error instead (214), and WriteSettings{} returns False. The old value is kept to put back at the end:
+;; started from a Shell, the game runs in the Shell's own process.
+Statement SystemRequestersOff{}
+  SHARED requesterProcess, requesterWindowBefore
+  requesterProcess = FindTask_(0)
+  requesterWindowBefore = Peek.l(requesterProcess + #PR_WINDOWPTR)
+  Poke.l requesterProcess + #PR_WINDOWPTR, -1
+End Statement
+
+; The requesters as they were before SystemRequestersOff{}; nothing if it was never called.
+Statement SystemRequestersBack{}
+  SHARED requesterProcess, requesterWindowBefore
+  If requesterProcess = 0 Then Statement Return
+  Poke.l requesterProcess + #PR_WINDOWPTR, requesterWindowBefore
+End Statement
+
+;; END OF SETTINGS (AMIGA MODE)

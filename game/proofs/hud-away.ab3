@@ -1,0 +1,449 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; hud-away.ab3 -- can the HUD go away while Mario is above the world's top, with no gap?
+;; Compile in UAE. Not part of the game. Second route for the open item in the main project's candidates notes
+;; ("Mario above the top of the screen is behind the HUD"), after sprite-over-hud.ab3: a sprite is
+;; cut by the 3 line gap between the HUD list and the world list, which is not acceptable, so here
+;; the picture has no gap at all while he is up there.
+;;
+;; The idea. The game's picture is two copper lists: list 0 the 16 line HUD band, list 1 the
+;; 208 line world, 3 lines apart (the library needs the gap to set a list up). This proof adds
+;; list 2: one world list, dual playfield, #HUD_H + #LIST_GAP + #VIEW_H = 227 lines from the HUD's
+;; first line, showing the world from row 13 (32 - 19), so every world row is on the same screen
+;; line as in list 1 and nothing moves when the lists are swapped: the band and the gap are
+;; simply more world. CreateDisplay only links lists and points COP1LC at the first one, which the
+;; hardware takes at the next frame, so CreateDisplay 2 shows the tall list and CreateDisplay 0, 1
+;; shows the HUD and the world again. The list not shown is not touched.
+;;
+;; What it costs (to read in the results): the time CreateDisplay takes (it also calls the
+;; library's setcoplist, which I have not read), and, for the game, a copy of the parallax band's
+;; custom copper in list 2, the palette written to both lists, and one more list of copper memory.
+;;
+;; The HUD bitmap is redrawn every frame (a white bar of changing width) so a HUD that stays alive
+;; and comes back right is visible. The back playfield has a cloud at rows 14 to 30, behind where the
+;; HUD is, so the revealed band shows both playfields.
+;;
+;; Keys: arrows move the test figure (until you touch one it moves itself: up and down once in
+;; about 7 seconds, and sideways); Space steps the mode: auto (the HUD goes while the figure's top is
+;; above world row 32 and returns the frame it is not), HUD always, HUD never; Esc quits
+;; and writes hud-away-results.txt.
+;;
+;; First run (2026-10-17): the HUD went away well; the switch cost 2 to 3 raster lines; the return
+;; flashed the figure corrupt for a frame or two (both lists now get the bitmaps every frame) and
+;; was late (a 25 frame hold, now 0). The first row or so of the white lines looked a pixel off while
+;; scrolling: it is also in the earlier sprite proof's screenshot, at the top of the world list below
+;; the HUD, so it is not from the swap.
+;;
+;; What to look at and report
+;; 1. The switch: when the HUD goes and comes back, is there any flash, black line, tear, jump of
+;;    the picture or colour change in the world, the clouds and hills, or the figure? (The world
+;;    should not move at all.)
+;; 2. With the HUD gone, the figure rises through where the band and the gap were: is it whole and
+;;    continuous (no gap)? Does the revealed band look like the rest of the world (the white lines,
+;;    the cloud)?
+;; 3. When the HUD comes back: right colours, the bar still counting, no garbage, no leftover world
+;;    in the band.
+;; 4. Does it behave with the mode forced (Space: HUD always, HUD never)?
+;; The results file has the number of switches, the raster lines CreateDisplay took (average and
+;; worst), and the bob load.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE  = $40
+#RAW_KEY_ESC    = $45
+#RAW_KEY_UP     = $4C
+#RAW_KEY_DOWN   = $4D
+#RAW_KEY_RIGHT  = $4E
+#RAW_KEY_LEFT   = $4F
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 32
+
+;; The game's type words: 4 planes, smooth scroll, AGA colours, fetch mode 3; the world adds dual playfield.
+#HUD_FLAGS   = $13014
+#WORLD_FLAGS = $13038
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+;; List 2 starts at the HUD's first line, so its first world row is the world list's, less the band
+;; and the gap.
+#AWAY_TOP    = #VIEW_TOP - (#HUD_H + #LIST_GAP)
+#AWAY_H      = #HUD_H + #LIST_GAP + #VIEW_H
+#AWAY_HOLD   = 0
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the figure.
+#BM_A      = 0
+#BM_B      = 1
+#BM_BACK   = 2
+#BM_HUD    = 3
+#BM_ACTOR  = 4
+#FRONT_W   = 1024
+#BACK_W    = 1152
+#WORLD_H   = 256
+#HUD_W     = 384
+
+#ACTOR_SHAPE   = 0
+#ACTOR_W       = 16
+#ACTOR_H       = 32
+#TILE          = 16
+#BOB_BYTES     = 16384
+
+#WORK_LINE     = 80
+#LINES_PAL     = 312
+#SCROLL_MAX    = 640
+#ACTOR_TOP_MAX = 176
+#WORLD_X_MIN   = 24
+#WORLD_X_MAX   = 980
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+forceMode.w = 0
+spaceWasDown.w = False
+autoPlay.w = True
+worldX.w = #WORLD_X_MIN
+actorTop.w = #ACTOR_TOP_MAX
+autoDirX.w = 1
+autoDirY.w = -1
+awayHold.w = 0
+wantAway.w = False
+awayMode.w = False
+scrollX.q = 0
+backX.q = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+bobFrames.l = 0
+bobSum.l = 0
+bobMax.l = 0
+switchStart.l = 0
+switchLines.l = 0
+switchCount.l = 0
+switchSum.l = 0
+switchMax.l = 0
+awayFrames.l = 0
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_ACTOR, #ACTOR_W, #ACTOR_H, 4
+
+;; 0 the sky; 1 black (the HUD); 2 and 3 the ground; 4 the pillars; 7 white; 13 skin, 14 brown, 15 red
+;; (Mario's pens and colours); 16 + the back's pens (5 clouds, 6 hills).
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 0, 0, 0
+AGAPalRGB 0, 2, 200, 76, 12
+AGAPalRGB 0, 3, 252, 152, 56
+AGAPalRGB 0, 4, 0, 168, 0
+AGAPalRGB 0, 7, 255, 255, 255
+AGAPalRGB 0, 13, 254, 205, 198
+AGAPalRGB 0, 14, 108, 110, 0
+AGAPalRGB 0, 15, 181, 50, 32
+AGAPalRGB 0, 16, 92, 148, 252
+AGAPalRGB 0, 21, 255, 255, 255
+AGAPalRGB 0, 22, 80, 170, 40
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; The front: ground in pens 2 and 3, a pillar in pen 4 every 128 px, a white line in pen 7 every
+;; 64 px from row 13 (the first row list 2 shows), so the rows behind the HUD have something on them.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 2
+    If columnIndex MOD 2 = 1 Then pen = 3
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 120, pillarX + 23, 207, 4
+  Next
+  For lineX.w = 0 To #FRONT_W - 1 Step 64
+    Boxf lineX, #AWAY_TOP, lineX, 119, 7
+  Next
+End Statement
+
+;; Clouds and hills in the back's pens 5 and 6, one of each per 192 px, and a cloud at rows 14 to 30.
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+    Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+    Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+    Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+    Boxf pieceX + 120, 14, pieceX + 167, 30, 5
+  Next
+End Statement
+
+;; The figure, in Mario's pens: a red outline (pen 15), skin (13) and brown (14) stripes of 2 rows.
+Statement MakeActor{}
+  Use BitMap #BM_ACTOR
+  Cls 0
+  Boxf 0, 0, 15, 31, 15
+  Boxf 1, 1, 14, 30, 14
+  For stripeY.w = 1 To 29 Step 4
+    Boxf 1, stripeY, 14, stripeY + 1, 13
+  Next
+  GetaShape #ACTOR_SHAPE, 0, 0, #ACTOR_W, #ACTOR_H
+End Statement
+
+BBlitMode CookieMode
+MakeActor{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+
+;; List 0 the HUD, list 1 the world below it, list 2 the tall world list. Lists 1 and 2 get the same
+;; DisplayControls and DisplayAdjust, and list 2 loads the palette as list 0 does.
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, 0
+InitCopList 2, #HUD_YPOS, #AWAY_H, #WORLD_FLAGS, 0, #COPPER_COLORS, 0
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+DisplayControls 2, 0, #PLAYFIELD2_OFFSET_16, 0
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 2, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayPalette 2, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+DisplayBitMap 2, drawBm, 0, #AWAY_TOP, #BM_BACK, 0, #AWAY_TOP
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If spaceWasDown = False
+      forceMode = forceMode + 1
+      If forceMode > 2 Then forceMode = 0
+    EndIf
+    spaceWasDown = True
+  Else
+    spaceWasDown = False
+  EndIf
+
+  ;; The figure: moving itself, or by the arrows from the first touch.
+  If RawStatus(#RAW_KEY_UP) OR RawStatus(#RAW_KEY_DOWN) OR RawStatus(#RAW_KEY_LEFT) OR RawStatus(#RAW_KEY_RIGHT)
+    autoPlay = False
+  EndIf
+  If autoPlay = True
+    worldX = worldX + autoDirX
+    If worldX >= #WORLD_X_MAX Then autoDirX = -1
+    If worldX <= #WORLD_X_MIN Then autoDirX = 1
+    actorTop = actorTop + autoDirY
+    If actorTop <= 0 Then autoDirY = 1
+    If actorTop >= #ACTOR_TOP_MAX Then autoDirY = -1
+  Else
+    If RawStatus(#RAW_KEY_UP) Then actorTop = actorTop - 1
+    If RawStatus(#RAW_KEY_DOWN) Then actorTop = actorTop + 1
+    If RawStatus(#RAW_KEY_LEFT) Then worldX = worldX - 1
+    If RawStatus(#RAW_KEY_RIGHT) Then worldX = worldX + 1
+    If actorTop < 0 Then actorTop = 0
+    If actorTop > #ACTOR_TOP_MAX Then actorTop = #ACTOR_TOP_MAX
+    If worldX < #WORLD_X_MIN Then worldX = #WORLD_X_MIN
+    If worldX > #WORLD_X_MAX Then worldX = #WORLD_X_MAX
+  EndIf
+
+  ;; Auto: away while his top is above world row 32, and #AWAY_HOLD frames after (0: straight back).
+  If actorTop < #VIEW_TOP Then awayHold = #AWAY_HOLD + 1
+  If awayHold > 0 Then awayHold = awayHold - 1
+  wantAway = False
+  If actorTop < #VIEW_TOP OR awayHold > 0 Then wantAway = True
+  If forceMode = 1 Then wantAway = False
+  If forceMode = 2 Then wantAway = True
+
+  ;; The camera follows him to a fraction of a pixel; the back at half the front.
+  scrollX = worldX - 160 + 0.5*Sin(frameCount/20.0)
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+  backX = scrollX/2
+
+  ;; The HUD stays alive: a bar whose width changes every frame.
+  Use BitMap #BM_HUD
+  Cls 1
+  Boxf 8, 4, 8 + (frameCount MOD 200), 11, 7
+  Boxf 220, 4, 227, 11, 7
+
+  ;; The bob, timed as in dual-playfield.ab3.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  BBlit drawBuf, #ACTOR_SHAPE, worldX, actorTop
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+  If frameCount >= 10
+    bobFrames = bobFrames + 1
+    bobSum = bobSum + bobLines
+    If bobLines > bobMax Then bobMax = bobLines
+  EndIf
+
+  VWait
+  ;; Both lists are given the bitmaps every frame. CreateDisplay takes effect at the next frame, so in the
+  ;; frame it is called the old list is still the one on screen: the first run gave only the new list the
+  ;; bitmap, the old one kept pointing at the buffer the next iteration redraws, and the figure flashed
+  ;; corrupt for a frame on the way back.
+  DisplayBitMap 1, drawBm, scrollX, #VIEW_TOP, #BM_BACK, backX, #VIEW_TOP
+  DisplayBitMap 2, drawBm, scrollX, #AWAY_TOP, #BM_BACK, backX, #AWAY_TOP
+  If wantAway = True Then awayFrames = awayFrames + 1
+  If wantAway <> awayMode
+    switchStart = RasterLine{}
+    If wantAway = True
+      CreateDisplay 2
+    Else
+      CreateDisplay 0, 1
+    EndIf
+    switchLines = RasterLine{} - switchStart
+    If switchLines < 0 Then switchLines = switchLines + #LINES_PAL
+    switchCount = switchCount + 1
+    switchSum = switchSum + switchLines
+    If switchLines > switchMax Then switchMax = switchLines
+    awayMode = wantAway
+  EndIf
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/hud-away-results.txt")
+  FileOutput 0
+  NPrint "hud-away: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", ", frameCount, " frames"
+  NPrint "mode at exit (0 auto, 1 HUD always, 2 HUD never): ", forceMode
+  NPrint "frames shown with the HUD away: ", awayFrames
+  NPrint "display switches: ", switchCount
+  If switchCount > 0
+    NPrint "  CreateDisplay raster lines: average ", switchSum/switchCount, ", worst ", switchMax
+  EndIf
+  NPrint "bob load (1 bob from line ", #WORK_LINE, "): ", bobFrames, " frames"
+  If bobFrames > 0
+    NPrint "  average lines ", bobSum/bobFrames, ", worst ", bobMax
+  EndIf
+  NPrint ""
+  NPrint "The picture is the main result: report the four points at the top of the proof."
+  CloseFile 0
+EndIf
+End

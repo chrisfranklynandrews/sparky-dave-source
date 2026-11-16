@@ -1,0 +1,184 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; op-cost.ab3 -- what does each kind of operation cost in compiled AmiBlitz?
+;; Compile in UAE. Not part of the game. Proof for the main project's OPTIMISATION note.
+;;
+;; call-cost.ab3 (2026-10-14) showed that a call is cheap (about 0.2 lines with two parameters)
+;; but that the frame timer's mark body costs 2.2 lines even inline: one beam read, an AND, a
+;; /256, a subtraction, an array add. One of those is expensive, and the sound engine's hot
+;; paths divide too. This times each operation alone, #OPS times a frame against the empty
+;; loop, so the expensive one shows:
+;;   0  the empty loop (baseline)
+;;   1  Peek.l of the beam position ($dff004, a custom chip register)
+;;   2  Peek.l of an ordinary long in memory
+;;   3  a long AND a constant
+;;   4  a long divided by 256
+;;   5  a long LSR 8 (the same result for a positive value)
+;;   6  a word divided by 4
+;;   7  a long MOD 10
+;;   8  a long times 317081
+;;   9  (a long times 317081)/10000, PlanSoundCycle{}'s sum
+;;  10  an array element read
+;;  11  an array element written
+;;  12  a quick plus a quick
+;;  13  Int() of a quick
+;; It runs on its own in Blitz mode (no display; the screen may be blank) for about 26
+;; seconds, then writes op-cost-results.txt.
+
+WBStartup
+
+#OPS      = 100
+#FRAMES   = 100
+#SETTLE   = 5
+#VARIANTS = 14
+#LINES_PAL = 312
+
+Dim testState.l(63)
+Dim variantSum.l(#VARIANTS - 1)
+Dim variantMax.l(#VARIANTS - 1)
+Dim variantFrames.l(#VARIANTS - 1)
+resultLong.l = 0
+resultWord.w = 0
+memoryLong.l = 12345
+memoryAddress.l = &memoryLong
+quickValue.q = 0
+quickStep.q = 0.375
+
+BLITZ
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+For variant.w = 0 To #VARIANTS - 1
+  For frameIndex.w = 0 To #FRAMES - 1
+    VWait
+    startLine.l = RasterLine{}
+    For opIndex.l = 1 To #OPS
+      If variant = 1 Then resultLong = Peek.l($dff004)
+      If variant = 2 Then resultLong = Peek.l(memoryAddress)
+      If variant = 3 Then resultLong = opIndex AND $1ff00
+      If variant = 4 Then resultLong = opIndex/256
+      If variant = 5 Then resultLong = opIndex LSR 8
+      If variant = 6 Then resultWord = opIndex/4
+      If variant = 7 Then resultLong = opIndex MOD 10
+      If variant = 8 Then resultLong = opIndex*317081
+      If variant = 9 Then resultLong = (opIndex*317081)/10000
+      If variant = 10 Then resultLong = testState(opIndex AND 63)
+      If variant = 11 Then testState(opIndex AND 63) = opIndex
+      If variant = 12 Then quickValue = quickValue + quickStep
+      If variant = 13 Then resultLong = Int(quickValue)
+    Next
+    endLine.l = RasterLine{}
+    frameLines.l = endLine - startLine
+    If frameLines < 0 Then frameLines = frameLines + #LINES_PAL
+    If frameIndex >= #SETTLE
+      variantFrames(variant) = variantFrames(variant) + 1
+      variantSum(variant) = variantSum(variant) + frameLines
+      If frameLines > variantMax(variant) Then variantMax(variant) = frameLines
+    EndIf
+    ; Keeps the quick in range.
+    If quickValue > 1000 Then quickValue = 0
+  Next
+Next
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/op-cost-results.txt")
+  FileOutput 0
+  NPrint "op-cost: ", #OPS, " operations a frame, ", #FRAMES - #SETTLE, " frames a variant"
+  NPrint "A raster line is about 63.5 microseconds. Every variant also runs the loop and its"
+  NPrint "13 If tests, so only the difference from variant 0 is the operation's own cost."
+  NPrint ""
+  NPrint "variant  average lines  worst lines  less the empty loop (lines per 100 operations)"
+  baseAverage.l = 0
+  If variantFrames(0) > 0 Then baseAverage = variantSum(0)/variantFrames(0)
+  For variant.w = 0 To #VARIANTS - 1
+    If variantFrames(variant) > 0
+      averageLines.l = variantSum(variant)/variantFrames(variant)
+      NPrint variant, "  ", averageLines, "  ", variantMax(variant), "  ", averageLines - baseAverage
+    EndIf
+  Next
+  NPrint ""
+  NPrint "1 Peek.l beam, 2 Peek.l memory, 3 AND, 4 long /256, 5 LSR 8, 6 word /4, 7 MOD 10,"
+  NPrint "8 long * 317081, 9 (* 317081)/10000, 10 array read, 11 array write, 12 quick add, 13 Int(quick)"
+  CloseFile 0
+EndIf
+End

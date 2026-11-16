@@ -1,0 +1,356 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; jukebox-scenes.ab3 -- the jukebox page's scenes from the precut bitmaps, on the game's display, with each look's palette for each.
+;; Compile in UAE (S/run-proof jukebox-scenes). Not part of the game. the jukebox-scenes plan, step 2: tools/build_jukebox_scenes.py made
+;; two bitmaps of eight 256 x 56 scenes stacked (jukebox-scenes-nes.iff, as atlas pens; jukebox-scenes-allstars.iff, in each scene's own
+;; pens) and sparkydave.jukebox-scenes.data.ab3 (the NES set of each scene, the All-Stars colours). This shows them as the page will: the
+;; scene copied into the front bitmap with BlockScroll (a blitter copy), then the palette written and shown.
+;;
+;; The display is the game's two lists (proofs/swim-pair.ab3's): the HUD list over the dual playfield world list, fetch mode 1. The HUD
+;; band holds 16 boxes, pens 0 to 15 left to right, so a pen the scene changes shows there: in the All-Stars look pens 1, 6, 10, 12 and 15
+;; (the HUD's) must stay as they are from scene to scene; in the NES look pens 1 and 2 change with the area's set, as in the levels.
+;; The NES colours are the default NES palette's (atlas pens 3 to 15; the set's pens 0 to 2; the sky, pen 9, the set's pen 0), written
+;; below as data by the tool's own tables; the game will have them from its palette tables.
+;;
+;; Keys: Left and Right the scene before and after (0 ground, 1 underground, 2 water, 3 castle, 4 cloud, 5 pipe intro, 6 end of level,
+;; 7 end of castle); L the look (NES or All-Stars: the other bitmap and its palette); Esc quits and writes
+;; results/jukebox-scenes-results.txt with what a change cost.
+;;
+;; What to look at and report
+;; 1. Each scene, in each look: as the preview (game-data/derived/jukebox-scenes-preview.png), in the right colours? The NES ones in the
+;;    area's colours (the underground's blue bricks and black sky, the castle's grey, the water's blue)?
+;; 2. The HUD boxes: in the All-Stars look, do boxes 1, 6, 10, 12 and 15 stay the same through every scene?
+;; 3. A change: clean, or a flash or a torn frame as it happens?
+
+WBStartup
+
+XINCLUDE "/includes/sparkydave.jukebox-scenes.data.ab3"
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_L     = $28
+
+#HUD_YPOS    = 44
+#HUD_H       = 16
+#LIST_GAP    = 3
+#VIEW_H      = 208
+#VIEW_TOP    = 32
+#FRONT_W     = 384
+#WORLD_H     = 256
+#HUD_W       = 320
+#SCENE_W     = 256
+#SCENE_H     = 72
+#SCENE_Y     = 120
+#SKY_PEN     = 9
+#LINES_PAL   = 312
+#SCROLL_BIAS = -32
+
+#HUD_FLAGS            = $11414
+#WORLD_FLAGS          = $11438
+#BANK_XOR             = $33
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+#BM_FRONT    = 0
+#BM_BACK     = 1
+#BM_HUD      = 2
+#BM_NES      = 3
+#BM_ALLSTARS = 4
+
+quitFlag.w = False
+sceneNow.w = 0
+allStarsOn.w = False
+keyLeft.w = False
+keyRight.w = False
+keyL.w = False
+changes.l = 0
+changeSum.l = 0
+changeMax.l = 0
+changeLines.l = 0
+
+;; The NES look's 16 front colours for each front set (0 ground, 1 underground, 2 water, 3 castle), the default palette's.
+Dim nesColour.w(3, 15, 2)
+readRed.w = 0
+readGreen.w = 0
+readBlue.w = 0
+For setIndex.w = 0 To 3
+  For penIndex.w = 0 To 15
+    Read readRed
+    Read readGreen
+    Read readBlue
+    nesColour(setIndex, penIndex, 0) = readRed
+    nesColour(setIndex, penIndex, 1) = readGreen
+    nesColour(setIndex, penIndex, 2) = readBlue
+  Next
+Next
+
+BitMap #BM_FRONT, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #FRONT_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_NES, #SCENE_W, #SCENE_H*#JKB_SCENES, 4
+BitMap #BM_ALLSTARS, #SCENE_W, #SCENE_H*#JKB_SCENES, 4
+LoadBitMap #BM_NES, "sparky-dave:game/assets/jukebox-scenes-nes.iff"
+LoadBitMap #BM_ALLSTARS, "sparky-dave:game/assets/jukebox-scenes-allstars.iff"
+InitPalette 0, 48
+
+BLITZ
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; The palette for the scene and the look: pen 0 black (the page's), the NES set's 16 front colours with the sky pen the set's pen 0, or
+;; the All-Stars scene's own (jukeboxSceneRGB(); pen 1, which no scene uses, left as the HUD has it: here a fixed grey).
+Statement SetScenePalette{}
+  SHARED sceneNow, allStarsOn, nesColour(), jukeboxSceneSet(), jukeboxSceneRGB()
+  If allStarsOn = True
+    For penIndex.w = 0 To 15
+      base.w = (sceneNow*16 + penIndex)*3
+      AGAPalRGB 0, penIndex, jukeboxSceneRGB(base), jukeboxSceneRGB(base + 1), jukeboxSceneRGB(base + 2)
+    Next
+    AGAPalRGB 0, 1, 160, 160, 160
+  Else
+    lookSet.w = jukeboxSceneSet(sceneNow)
+    frontSet.w = (lookSet AND 1) + (lookSet AND 4)/2
+    For penIndex.w = 0 To 15
+      AGAPalRGB 0, penIndex, nesColour(frontSet, penIndex, 0), nesColour(frontSet, penIndex, 1), nesColour(frontSet, penIndex, 2)
+    Next
+  EndIf
+  AGAPalRGB 0, 0, 0, 0, 0
+  DisplayPalette 0, 0
+End Statement
+
+;; The scene into the front bitmap at the view's left (column 0: the display's x is the lead-in, #SCROLL_BIAS), with BlockScroll (Scroll
+;; for 16 pixel aligned areas, faster: the guide, R17), then its palette. Timed.
+Statement ShowScene{}
+  SHARED sceneNow, allStarsOn, changes, changeSum, changeMax, changeLines
+  beginLine.l = RasterLine{}
+  sourceBitmap.w = #BM_NES
+  If allStarsOn = True Then sourceBitmap = #BM_ALLSTARS
+  Use BitMap #BM_FRONT
+  BlockScroll 0, sceneNow*#SCENE_H, #SCENE_W, #SCENE_H, 0, #SCENE_Y, sourceBitmap
+  SetScenePalette{}
+  changeLines = RasterLine{} - beginLine
+  If changeLines < 0 Then changeLines = changeLines + #LINES_PAL
+  changes = changes + 1
+  changeSum = changeSum + changeLines
+  If changeLines > changeMax Then changeMax = changeLines
+End Statement
+
+;; The HUD band: the 16 pens as boxes, 16 pixels each, from x 0 (the view's left).
+Statement DrawHud{}
+  Use BitMap #BM_HUD
+  Cls 0
+  For penIndex.w = 0 To 15
+    Boxf penIndex*16 + 1, 2, penIndex*16 + 14, 13, penIndex
+  Next
+End Statement
+
+Use BitMap #BM_FRONT
+Cls 0
+Use BitMap #BM_BACK
+Cls 0
+DrawHud{}
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, 48, 0
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 8, 0, 0
+DisplayControls 0, 0, 0, #BANK_XOR
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, #BANK_XOR
+DisplayAdjust 0, 0, 0, 0, 31, -33
+DisplayAdjust 1, 0, 0, 0, 31, -33
+CreateDisplay 0, 1
+DisplayBitMap 0, #BM_HUD, #SCROLL_BIAS, 0
+DisplayBitMap 1, #BM_FRONT, #SCROLL_BIAS, #VIEW_TOP, #BM_BACK, #SCROLL_BIAS, #VIEW_TOP
+ShowScene{}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  changeWanted.w = False
+  If RawStatus(#RAW_KEY_RIGHT)
+    If keyRight = False
+      sceneNow = (sceneNow + 1) MOD #JKB_SCENES
+      changeWanted = True
+    EndIf
+    keyRight = True
+  Else
+    keyRight = False
+  EndIf
+  If RawStatus(#RAW_KEY_LEFT)
+    If keyLeft = False
+      sceneNow = (sceneNow + #JKB_SCENES - 1) MOD #JKB_SCENES
+      changeWanted = True
+    EndIf
+    keyLeft = True
+  Else
+    keyLeft = False
+  EndIf
+  If RawStatus(#RAW_KEY_L)
+    If keyL = False
+      allStarsOn = NOT allStarsOn
+      changeWanted = True
+    EndIf
+    keyL = True
+  Else
+    keyL = False
+  EndIf
+  VWait
+  If changeWanted = True Then ShowScene{}
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/jukebox-scenes-results.txt")
+  FileOutput 0
+  NPrint "jukebox-scenes: the precut scenes on the game's display, both looks"
+  NPrint "a scene change (BlockScroll of 256 x 56 and the palette's 16 pens and DisplayPalette): ", changes, " changes, average ", changeSum/changes, " lines, worst ", changeMax
+  NPrint "last scene ", sceneNow, ", All-Stars ", allStarsOn
+  CloseFile 0
+EndIf
+End
+
+;; The NES look's front colours, the default palette (written by tools/build_jukebox_scenes.py's tables: nes_colours()).
+;; front set 0 (look set 0)
+Data.w 193, 224, 254
+Data.w 156, 74, 0
+Data.w 254, 205, 198
+Data.w 0, 0, 0
+Data.w 230, 156, 33
+Data.w 82, 33, 0
+Data.w 140, 214, 0
+Data.w 16, 148, 0
+Data.w 255, 255, 255
+Data.w 193, 224, 254
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+Data.w 230, 156, 33
+Data.w 254, 205, 198
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+;; front set 1 (look set 1)
+Data.w 0, 0, 0
+Data.w 0, 124, 142
+Data.w 181, 236, 243
+Data.w 0, 0, 0
+Data.w 230, 156, 33
+Data.w 82, 33, 0
+Data.w 140, 214, 0
+Data.w 16, 148, 0
+Data.w 255, 255, 255
+Data.w 0, 0, 0
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+Data.w 230, 156, 33
+Data.w 254, 205, 198
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+;; front set 2 (look set 4)
+Data.w 66, 64, 254
+Data.w 156, 74, 0
+Data.w 254, 205, 198
+Data.w 0, 0, 0
+Data.w 230, 156, 33
+Data.w 82, 33, 0
+Data.w 140, 214, 0
+Data.w 16, 148, 0
+Data.w 255, 255, 255
+Data.w 66, 64, 254
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+Data.w 230, 156, 33
+Data.w 254, 205, 198
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+;; front set 3 (look set 5)
+Data.w 0, 0, 0
+Data.w 174, 174, 174
+Data.w 254, 254, 254
+Data.w 0, 0, 0
+Data.w 230, 156, 33
+Data.w 82, 33, 0
+Data.w 140, 214, 0
+Data.w 16, 148, 0
+Data.w 255, 255, 255
+Data.w 0, 0, 0
+Data.w 108, 110, 0
+Data.w 181, 50, 32
+Data.w 230, 156, 33
+Data.w 254, 205, 198
+Data.w 108, 110, 0
+Data.w 181, 50, 32

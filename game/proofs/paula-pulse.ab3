@@ -1,0 +1,605 @@
+;; paula-pulse.ab3 -- the NES's pulse, triangle and noise channels on Amiga audio
+;; hardware (Paula), driven straight through its registers from Blitz mode. Compile in
+;; UAE. Not part of the game. Proof for the sound plan (git history).
+;;
+;; What it proves
+;;   1. Blitz mode can drive Paula directly: write a waveform pointer, a length, a
+;;      period and a volume per channel, start the audio DMA, and keep changing the
+;;      period and volume every frame. No AUDIOLIB, no OS.
+;;   2. Pitch range. A NES pulse note is an 11-bit timer value, 1.789773 MHz / (16 * (t + 1))
+;;      hertz. Paula's period cannot go below about 124, so a 32-byte cycle tops out near
+;;      0.9 kHz. The proof picks the longest cycle (32, 16 or 8 bytes) whose period still
+;;      fits, and plays notes from C4 to G7. Listen for the top octaves.
+;;   3. The four duty cycles (12.5, 25, 50 and 75 percent) as four small waveforms.
+;;   4. The triangle (32 steps, also in 16 and 8) and the noise: the cartridge's 15-bit
+;;      LFSR (long mode, 32767 steps, and the 93-step short mode) as looped sample data,
+;;      at the 16 noise periods.
+;;   5. Four channels at once, with an envelope updated every frame, and a "duck": a coin
+;;      effect takes over the melody channel for a few steps and the music resumes.
+;;   6. Clicks: a glide across the cycle-length boundary, a duty change every five frames
+;;      (the new waveform pointer is latched at the next wrap), and a volume ramp.
+;;   7. What the per-frame update costs, in raster lines, per phase.
+;;
+;; The channels: pulse 1 is Paula channel 0, the triangle 1, the noise 2, pulse 2 is 3.
+;; (Paula 0 and 3 are the left speaker, 1 and 2 the right.)
+;;
+;; It runs by itself, about 25 seconds, in six phases. The screen shows the phase number
+;; as that many white boxes, and a green bar for the time.
+;;   1  pulse 50 percent, notes C E G rising from C4 to G7, 12 notes
+;;   2  the four duty cycles on A4, 12.5 25 50 75 percent
+;;   3  triangle, C and G from C2 to G6, 10 notes
+;;   4  noise, the 16 periods in long mode, then the 16 in short mode
+;;   5  all four channels, a short tune twice; the second time a coin duck
+;;   6  a glide, then a duty change every 5 frames, then a volume ramp
+;;
+;; Keys   Esc quits
+;;
+;; What to listen for
+;;   - Phase 1: every note clean and rising; do the top ones (C7, E7, G7) still sound like
+;;     notes, or like a whistle that is out of tune or aliased? They are 8-byte cycles.
+;;   - Phase 2: four different timbres, the thinner ones more nasal.
+;;   - Phase 3: a soft, rounder tone than the pulse.
+;;   - Phase 4: hiss, getting lower; the short mode is more tonal (a buzz).
+;;   - Phase 5: a recognisable chip tune; the coin takes over the melody and gives it back.
+;;   - Phase 6: a smooth glide (any step or click where the cycle length changes?), a
+;;     buzz-free duty change, a clean ramp. Clicks at each note start in phases 1 to 3
+;;     are expected to be small: the volume goes to 0 between notes.
+;;
+;; Results are written to paula-pulse-results.txt on exit: the planned cycle length and
+;; period of every note, and the cost per frame of the update.
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+
+#COPPER_FLAGS = $10014
+#HUD_YPOS  = 44
+#VIEW_H    = 200
+
+;; Paula
+#AUDIO_BASE    = $dff0a0
+#DMACON        = $dff096
+#ADKCON        = $dff09e
+#DMA_AUDIO_ALL = $820f
+#PERIOD_MIN    = 124
+#PERIOD_MAX    = 65535
+
+;; The wave block, in Chip RAM: 4 duties x 3 cycle lengths of pulse (56 bytes each
+;; duty), the triangle in 3 lengths (56 bytes), the long noise (2 passes, 65534 bytes)
+;; and the short noise (2 passes, 186 bytes).
+#WAVE_BLOCK_BYTES = 66048
+#NOISE_LONG_BYTES = 65534
+#NOISE_SHORT_BYTES = 186
+#WAVE_LEVEL = 90
+
+;; Phases: first frame of each, and the total.
+#PHASE_1 = 0
+#PHASE_2 = 180
+#PHASE_3 = 300
+#PHASE_4 = 450
+#PHASE_5 = 770
+#PHASE_6 = 1026
+#TOTAL_FRAMES = 1246
+#PHASES = 6
+
+;; Cycle length index: 0 is 32 bytes, 1 is 16, 2 is 8.
+Dim cycleLength.l(2)
+cycleLength(0) = 32
+cycleLength(1) = 16
+cycleLength(2) = 8
+
+;; Byte offsets into the wave block.
+Dim pulseWaveOffset.l(11)
+Dim triangleWaveOffset.l(2)
+noiseLongOffset.l = 0
+noiseShortOffset.l = 0
+
+;; The notes of octave 4, in tenths of a hertz.
+Dim noteBaseTenths.l(11)
+noteBaseTenths(0) = 2616
+noteBaseTenths(1) = 2772
+noteBaseTenths(2) = 2937
+noteBaseTenths(3) = 3111
+noteBaseTenths(4) = 3296
+noteBaseTenths(5) = 3492
+noteBaseTenths(6) = 3700
+noteBaseTenths(7) = 3920
+noteBaseTenths(8) = 4153
+noteBaseTenths(9) = 4400
+noteBaseTenths(10) = 4662
+noteBaseTenths(11) = 4939
+
+;; The NES noise periods, in CPU cycles per LFSR step.
+Dim noisePeriodTable.l(15)
+noisePeriodTable(0) = 4
+noisePeriodTable(1) = 8
+noisePeriodTable(2) = 16
+noisePeriodTable(3) = 32
+noisePeriodTable(4) = 64
+noisePeriodTable(5) = 96
+noisePeriodTable(6) = 128
+noisePeriodTable(7) = 160
+noisePeriodTable(8) = 202
+noisePeriodTable(9) = 254
+noisePeriodTable(10) = 380
+noisePeriodTable(11) = 508
+noisePeriodTable(12) = 762
+noisePeriodTable(13) = 1016
+noisePeriodTable(14) = 2034
+noisePeriodTable(15) = 4068
+
+;; The short tune of phase 5, one note per 8 frames. A code is octave*12 + semitone + 1,
+;; 0 is a rest.
+Dim tuneMelody.l(15)
+Dim tuneHarmony.l(15)
+Dim tuneBass.l(15)
+
+;; What the proof records for the results file (notes of phases 1 and 3: index 0 to 21).
+Dim recordTenths.l(21)
+Dim recordTimer.l(21)
+Dim recordSize.l(21)
+Dim recordPeriod.l(21)
+
+;; Cost per frame, per phase (1 to 6).
+Dim phaseLineSum.l(6)
+Dim phaseLineMax.l(6)
+Dim phaseFrameCount.l(6)
+
+waveBlock.l = AllocMem(#WAVE_BLOCK_BYTES, 2 + 65536)
+shortRepeatMismatch.l = 0
+planSize.l = 0
+planPeriod.l = 0
+quitFlag.l = False
+
+;; =======================================================
+;; WAVES, BUILT IN AMIGA MODE (Chip RAM, signed bytes)
+;; =======================================================
+
+If waveBlock <> 0
+  waveOffset.l = 0
+  For dutyIndex.w = 0 To 3
+    If dutyIndex = 0 Then eighthsHigh.w = 1
+    If dutyIndex = 1 Then eighthsHigh.w = 2
+    If dutyIndex = 2 Then eighthsHigh.w = 4
+    If dutyIndex = 3 Then eighthsHigh.w = 6
+    For sizeIndex.w = 0 To 2
+      cycleBytes.w = cycleLength(sizeIndex)
+      highCount.w = (cycleBytes*eighthsHigh)/8
+      pulseWaveOffset(dutyIndex*3 + sizeIndex) = waveOffset
+      For sampleIndex.w = 0 To cycleBytes - 1
+        If sampleIndex < highCount
+          Poke.b waveBlock + waveOffset + sampleIndex, #WAVE_LEVEL
+        Else
+          Poke.b waveBlock + waveOffset + sampleIndex, -#WAVE_LEVEL
+        EndIf
+      Next
+      waveOffset = waveOffset + cycleBytes
+    Next
+  Next
+
+  For sizeIndex.w = 0 To 2
+    cycleBytes.w = cycleLength(sizeIndex)
+    halfBytes.w = cycleBytes/2
+    triangleWaveOffset(sizeIndex) = waveOffset
+    For sampleIndex.w = 0 To cycleBytes - 1
+      If sampleIndex < halfBytes
+        level.w = halfBytes - 1 - sampleIndex
+      Else
+        level.w = sampleIndex - halfBytes
+      EndIf
+      Poke.b waveBlock + waveOffset + sampleIndex, (level*240)/(halfBytes - 1) - 120
+    Next
+    waveOffset = waveOffset + cycleBytes
+  Next
+
+  ;; The cartridge's noise: a 15-bit shift register from 1, feedback bit 0 xor bit 1
+  ;; (long mode) or bit 0 xor bit 6 (short mode), the output high while bit 0 is clear.
+  noiseLongOffset = waveOffset
+  shiftRegister.l = 1
+  noiseIndex.l = 0
+  While noiseIndex < #NOISE_LONG_BYTES
+    lowBit.l = shiftRegister AND 1
+    tapBit.l = (shiftRegister/2) AND 1
+    feedback.l = Xor(lowBit, tapBit)
+    shiftRegister = (shiftRegister/2) OR (feedback*16384)
+    If lowBit = 0
+      Poke.b waveBlock + waveOffset + noiseIndex, #WAVE_LEVEL
+    Else
+      Poke.b waveBlock + waveOffset + noiseIndex, -#WAVE_LEVEL
+    EndIf
+    noiseIndex = noiseIndex + 1
+  Wend
+  waveOffset = waveOffset + #NOISE_LONG_BYTES
+
+  noiseShortOffset = waveOffset
+  shiftRegister = 1
+  noiseIndex = 0
+  While noiseIndex < #NOISE_SHORT_BYTES
+    lowBit.l = shiftRegister AND 1
+    tapBit.l = (shiftRegister/64) AND 1
+    feedback.l = Xor(lowBit, tapBit)
+    shiftRegister = (shiftRegister/2) OR (feedback*16384)
+    If lowBit = 0
+      Poke.b waveBlock + waveOffset + noiseIndex, #WAVE_LEVEL
+    Else
+      Poke.b waveBlock + waveOffset + noiseIndex, -#WAVE_LEVEL
+    EndIf
+    noiseIndex = noiseIndex + 1
+  Wend
+
+  ;; Does the short mode repeat after 93 steps? Count the bytes that differ from the
+  ;; byte 93 on.
+  For compareIndex.w = 0 To 92
+    If Peek.b(waveBlock + noiseShortOffset + compareIndex) <> Peek.b(waveBlock + noiseShortOffset + compareIndex + 93)
+      shortRepeatMismatch = shortRepeatMismatch + 1
+    EndIf
+  Next
+EndIf
+
+;; =======================================================
+;; PAULA AND THE DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return(rawPosition AND $1ff00)/256
+End Function
+
+;; A pitch in tenths of a hertz: the octave-4 table, shifted by whole octaves.
+Function.l NoteTenths{semitone.w, octave.w}
+  SHARED noteBaseTenths()
+  tenths.l = noteBaseTenths(semitone)
+  If octave > 4
+    For octaveStep.w = 5 To octave
+      tenths = tenths*2
+    Next
+  EndIf
+  If octave < 4
+    For octaveStep.w = octave To 3
+      tenths = tenths/2
+    Next
+  EndIf
+  Function Return tenths
+End Function
+
+;; A code of the tune (octave*12 + semitone + 1) in tenths of a hertz; 0 for a rest.
+Function.l CodeTenths{noteCode.w}
+  If noteCode = 0 Then Function Return 0
+  Function Return NoteTenths{(noteCode - 1) MOD 12, (noteCode - 1)/12}
+End Function
+
+;; The NES pulse timer for a pitch: 1789773 / (16 * hertz) - 1, rounded.
+Function.l PulseTimerFor{tenths.l}
+  Function Return (17897730 + 8*tenths)/(16*tenths) - 1
+End Function
+
+;; The NES triangle timer for a pitch: 1789773 / (32 * hertz) - 1, rounded.
+Function.l TriangleTimerFor{tenths.l}
+  Function Return (17897730 + 16*tenths)/(32*tenths) - 1
+End Function
+
+;; The cycle length index and Paula period for a timer value. scaleTimes10000 is the
+;; ratio of Paula's clock to the NES's, times the 16 or 32 steps of the NES's own
+;; cycle: 317081 for the pulse, 634162 for the triangle. The longest cycle whose period
+;; is not below #PERIOD_MIN wins; if none, the 8-byte cycle at the minimum.
+Statement PlanCycle{timerValue.l, scaleTimes10000.l}
+  SHARED planSize, planPeriod, cycleLength()
+  planSize = 2
+  planPeriod = #PERIOD_MIN
+  foundFlag.w = False
+  sizeIndex.w = 0
+  While sizeIndex <= 2 AND foundFlag = False
+    cycleBytes.l = cycleLength(sizeIndex)
+    periodNow.l = ((timerValue + 1)*scaleTimes10000 + cycleBytes*5000)/(cycleBytes*10000)
+    If periodNow >= #PERIOD_MIN
+      planSize = sizeIndex
+      planPeriod = periodNow
+      foundFlag = True
+    EndIf
+    sizeIndex = sizeIndex + 1
+  Wend
+  If planPeriod > #PERIOD_MAX Then planPeriod = #PERIOD_MAX
+End Statement
+
+;; One Paula channel: the waveform, its length in words, the period and the volume.
+;; The pointer and length are latched at the next wrap of the running waveform, so a
+;; change is click-free; the period and volume apply at once.
+Statement PaulaSet{channel.w, waveAddress.l, waveWords.l, periodValue.l, volumeValue.w}
+  registerBase.l = #AUDIO_BASE + channel*16
+  Poke.l registerBase, waveAddress
+  Poke.w registerBase + 4, waveWords
+  Poke.w registerBase + 6, periodValue
+  Poke.w registerBase + 8, volumeValue
+End Statement
+
+;; Volume only, keeping the running waveform.
+Statement PaulaVolume{channel.w, volumeValue.w}
+  Poke.w #AUDIO_BASE + channel*16 + 8, volumeValue
+End Statement
+
+;; A pulse note on a channel: duty 0 to 3, pitch in tenths of a hertz, volume 0 to 64.
+;; A volume of 0 or a pitch of 0 is a rest (the waveform is left alone).
+Statement PlayPulse{channel.w, dutyIndex.w, tenths.l, volumeValue.w}
+  SHARED waveBlock, pulseWaveOffset(), cycleLength(), planSize, planPeriod
+  If tenths = 0 OR volumeValue = 0
+    PaulaVolume{channel, 0}
+    Statement Return
+  EndIf
+  PlanCycle{PulseTimerFor{tenths}, 317081}
+  PaulaSet{channel, waveBlock + pulseWaveOffset(dutyIndex*3 + planSize), cycleLength(planSize)/2, planPeriod, volumeValue}
+End Statement
+
+Statement PlayTriangle{channel.w, tenths.l, volumeValue.w}
+  SHARED waveBlock, triangleWaveOffset(), cycleLength(), planSize, planPeriod
+  If tenths = 0 OR volumeValue = 0
+    PaulaVolume{channel, 0}
+    Statement Return
+  EndIf
+  PlanCycle{TriangleTimerFor{tenths}, 634162}
+  PaulaSet{channel, waveBlock + triangleWaveOffset(planSize), cycleLength(planSize)/2, planPeriod, volumeValue}
+End Statement
+
+;; The noise: a period index 0 to 15, long (0) or short (1) mode, volume 0 to 64. The
+;; NES period is in CPU cycles per LFSR step, Paula's twice that, and no faster than
+;; #PERIOD_MIN allows.
+Statement PlayNoise{channel.w, periodIndex.w, shortMode.w, volumeValue.w}
+  SHARED waveBlock, noiseLongOffset, noiseShortOffset, noisePeriodTable()
+  If volumeValue = 0
+    PaulaVolume{channel, 0}
+    Statement Return
+  EndIf
+  periodNow.l = (noisePeriodTable(periodIndex)*19818 + 5000)/10000
+  If periodNow < #PERIOD_MIN Then periodNow = #PERIOD_MIN
+  If shortMode = 0
+    PaulaSet{channel, waveBlock + noiseLongOffset, #NOISE_LONG_BYTES/2, periodNow, volumeValue}
+  Else
+    PaulaSet{channel, waveBlock + noiseShortOffset, #NOISE_SHORT_BYTES/2, periodNow, volumeValue}
+  EndIf
+End Statement
+
+Statement SilenceAll{}
+  For channelIndex.w = 0 To 3
+    PaulaVolume{channelIndex, 0}
+  Next
+End Statement
+
+Statement InitTune{}
+  SHARED tuneMelody(), tuneHarmony(), tuneBass()
+  ;; Melody (pulse 2): E5 E5 _ E5 _ C5 E5 _ G5 _ _ _ G4 _ _ _
+  tuneMelody(0) = 65 : tuneMelody(1) = 65 : tuneMelody(2) = 0 : tuneMelody(3) = 65
+  tuneMelody(4) = 0 : tuneMelody(5) = 61 : tuneMelody(6) = 65 : tuneMelody(7) = 0
+  tuneMelody(8) = 68 : tuneMelody(9) = 0 : tuneMelody(10) = 0 : tuneMelody(11) = 0
+  tuneMelody(12) = 56 : tuneMelody(13) = 0 : tuneMelody(14) = 0 : tuneMelody(15) = 0
+  ;; Harmony (pulse 1): F#4 F#4 _ F#4 _ F#4 F#4 _ B4 _ _ _ G3 _ _ _
+  tuneHarmony(0) = 55 : tuneHarmony(1) = 55 : tuneHarmony(2) = 0 : tuneHarmony(3) = 55
+  tuneHarmony(4) = 0 : tuneHarmony(5) = 55 : tuneHarmony(6) = 55 : tuneHarmony(7) = 0
+  tuneHarmony(8) = 60 : tuneHarmony(9) = 0 : tuneHarmony(10) = 0 : tuneHarmony(11) = 0
+  tuneHarmony(12) = 44 : tuneHarmony(13) = 0 : tuneHarmony(14) = 0 : tuneHarmony(15) = 0
+  ;; Bass (triangle): D3 _ D2 _ D3 _ D2 _ G2 _ G2 _ G2 _ D3 _
+  tuneBass(0) = 39 : tuneBass(1) = 0 : tuneBass(2) = 27 : tuneBass(3) = 0
+  tuneBass(4) = 39 : tuneBass(5) = 0 : tuneBass(6) = 27 : tuneBass(7) = 0
+  tuneBass(8) = 32 : tuneBass(9) = 0 : tuneBass(10) = 32 : tuneBass(11) = 0
+  tuneBass(12) = 32 : tuneBass(13) = 0 : tuneBass(14) = 39 : tuneBass(15) = 0
+End Statement
+
+;; A pulse envelope: 15 at the start of a note, down by 2 each frame, not below 4 until
+;; the note ends; scaled to Paula's 0 to 64.
+Function.w PulseEnvelope{ageFrames.w}
+  levelNow.w = 15 - ageFrames*2
+  If levelNow < 4 Then levelNow = 4
+  Function Return levelNow*4
+End Function
+
+;; The recording of a note's plan for the results file.
+Statement RecordNote{recordIndex.w, tenths.l, timerValue.l}
+  SHARED recordTenths(), recordTimer(), recordSize(), recordPeriod(), planSize, planPeriod
+  recordTenths(recordIndex) = tenths
+  recordTimer(recordIndex) = timerValue
+  recordSize(recordIndex) = planSize
+  recordPeriod(recordIndex) = planPeriod
+End Statement
+
+;; One frame of the script. The frame number picks the phase and what each channel does.
+Statement RunScript{frameNumber.l}
+  SHARED planSize, planPeriod, tuneMelody(), tuneHarmony(), tuneBass()
+  If frameNumber < #PHASE_2
+    ;; Phase 1: pulse 50 percent on channel 0, C E G in octaves 4 to 7, 15 frames a note.
+    phaseFrame.l = frameNumber - #PHASE_1
+    noteIndex.w = phaseFrame/15
+    stepInNote.w = phaseFrame MOD 15
+    chordStep.w = noteIndex MOD 3
+    If chordStep = 0 Then semitone.w = 0
+    If chordStep = 1 Then semitone.w = 4
+    If chordStep = 2 Then semitone.w = 7
+    tenths.l = NoteTenths{semitone, 4 + noteIndex/3}
+    volumeNow.w = 48
+    If stepInNote >= 13 Then volumeNow = 0
+    PlayPulse{0, 2, tenths, volumeNow}
+    If stepInNote = 0
+      RecordNote{noteIndex, tenths, PulseTimerFor{tenths}}
+    EndIf
+    Statement Return
+  EndIf
+  If frameNumber < #PHASE_3
+    ;; Phase 2: the four duty cycles on A4, channel 0.
+    phaseFrame.l = frameNumber - #PHASE_2
+    dutyIndex.w = phaseFrame/30
+    volumeNow.w = 48
+    If (phaseFrame MOD 30) >= 26 Then volumeNow = 0
+    PlayPulse{0, dutyIndex, 4400, volumeNow}
+    Statement Return
+  EndIf
+  If frameNumber < #PHASE_4
+    ;; Phase 3: the triangle on channel 1, C and G from C2 to G6.
+    phaseFrame.l = frameNumber - #PHASE_3
+    noteIndex.w = phaseFrame/15
+    If (noteIndex MOD 2) = 0 Then semitone.w = 0 Else semitone.w = 7
+    tenths.l = NoteTenths{semitone, 2 + noteIndex/2}
+    volumeNow.w = 64
+    If (phaseFrame MOD 15) >= 13 Then volumeNow = 0
+    PlayTriangle{1, tenths, volumeNow}
+    If (phaseFrame MOD 15) = 0
+      RecordNote{12 + noteIndex, tenths, TriangleTimerFor{tenths}}
+    EndIf
+    Statement Return
+  EndIf
+  If frameNumber < #PHASE_5
+    ;; Phase 4: noise on channel 2, the 16 periods long, then the 16 short.
+    phaseFrame.l = frameNumber - #PHASE_4
+    noteIndex.w = phaseFrame/10
+    ageFrames.w = phaseFrame MOD 10
+    volumeNow.w = 48 - ageFrames*3
+    shortMode.w = 0
+    If noteIndex >= 16 Then shortMode = 1
+    PlayNoise{2, noteIndex MOD 16, shortMode, volumeNow}
+    Statement Return
+  EndIf
+  If frameNumber < #PHASE_6
+    ;; Phase 5: the tune, 16 steps of 8 frames, twice. Pulse 1 is channel 0 (25 percent),
+    ;; the triangle 1, the noise 2, pulse 2 channel 3 (50 percent). On the second pass,
+    ;; steps 4 to 7 the coin takes over channel 3.
+    phaseFrame.l = frameNumber - #PHASE_5
+    passNumber.w = phaseFrame/128
+    stepNow.w = (phaseFrame MOD 128)/8
+    ageFrames.w = phaseFrame MOD 8
+
+    PlayPulse{0, 1, CodeTenths{tuneHarmony(stepNow)}, PulseEnvelope{ageFrames}}
+    PlayTriangle{1, CodeTenths{tuneBass(stepNow)}, 64}
+
+    If (stepNow MOD 4) = 0
+      PlayNoise{2, 10, 0, 48 - ageFrames*8}
+    Else
+      If (stepNow MOD 4) = 2
+        PlayNoise{2, 5, 1, 48 - ageFrames*8}
+      Else
+        PlayNoise{2, 5, 1, 0}
+      EndIf
+    EndIf
+
+    If passNumber = 1 AND stepNow >= 4 AND stepNow <= 7
+      If stepNow <= 5
+        PlayPulse{3, 2, 9878, 56}
+      Else
+        PlayPulse{3, 2, 13185, 56}
+      EndIf
+    Else
+      PlayPulse{3, 2, CodeTenths{tuneMelody(stepNow)}, PulseEnvelope{ageFrames}}
+    EndIf
+    Statement Return
+  EndIf
+  ;; Phase 6: a glide, a duty change every 5 frames, a volume ramp, all on channel 0.
+  phaseFrame.l = frameNumber - #PHASE_6
+  If phaseFrame < 100
+    tenths.l = 2200 + (phaseFrame*15800)/100
+    PlayPulse{0, 2, tenths, 48}
+    Statement Return
+  EndIf
+  If phaseFrame < 160
+    dutyIndex.w = ((phaseFrame - 100)/5) MOD 4
+    PlayPulse{0, dutyIndex, 4400, 48}
+    Statement Return
+  EndIf
+  PlayPulse{0, 2, 4400, phaseFrame - 160 + 1}
+End Statement
+
+;; The phase a frame belongs to, 1 to 6.
+Function.w PhaseOf{frameNumber.l}
+  If frameNumber < #PHASE_2 Then Function Return 1
+  If frameNumber < #PHASE_3 Then Function Return 2
+  If frameNumber < #PHASE_4 Then Function Return 3
+  If frameNumber < #PHASE_5 Then Function Return 4
+  If frameNumber < #PHASE_6 Then Function Return 5
+  Function Return 6
+End Function
+
+If waveBlock <> 0
+  InitTune{}
+  BitMap 0, 320, #VIEW_H, 4
+  Use BitMap 0
+  InitCopList 0, #HUD_YPOS, #VIEW_H, #COPPER_FLAGS, 8, 16, 0
+  CreateDisplay 0
+  AGAPalRGB 0, 0, 0, 0, 0
+  AGAPalRGB 0, 1, 255, 255, 255
+  AGAPalRGB 0, 2, 0, 200, 60
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, 0, 0, 0
+
+  ;; Paula: no modulation, every channel playing a silent 8-byte pulse, volume 0, then
+  ;; the audio DMA on.
+  Poke.w #ADKCON, $00ff
+  For channelIndex.w = 0 To 3
+    PaulaSet{channelIndex, waveBlock + pulseWaveOffset(2*3 + 2), 4, 400, 0}
+  Next
+  Poke.w #DMACON, #DMA_AUDIO_ALL
+
+  frameNumber.l = 0
+  phaseShown.w = 0
+  While quitFlag = False AND frameNumber < #TOTAL_FRAMES
+    If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+    VWait
+
+    phaseNow.w = PhaseOf{frameNumber}
+    If phaseNow <> phaseShown
+      phaseShown = phaseNow
+      Boxf 0, 0, 319, 80, 0
+      For boxIndex.w = 1 To phaseNow
+        Boxf 10 + (boxIndex - 1)*30, 20, 30 + (boxIndex - 1)*30, 40, 1
+      Next
+    EndIf
+    Boxf 0, 100, (frameNumber*319)/#TOTAL_FRAMES, 110, 2
+
+    lineBefore.l = RasterLine{}
+    RunScript{frameNumber}
+    lineAfter.l = RasterLine{}
+    scriptLines.l = lineAfter - lineBefore
+    If scriptLines < 0 Then scriptLines = scriptLines + 312
+    phaseFrameCount(phaseNow) = phaseFrameCount(phaseNow) + 1
+    phaseLineSum(phaseNow) = phaseLineSum(phaseNow) + scriptLines
+    If scriptLines > phaseLineMax(phaseNow) Then phaseLineMax(phaseNow) = scriptLines
+
+    frameNumber = frameNumber + 1
+  Wend
+
+  SilenceAll{}
+  VWait
+  Poke.w #DMACON, $000f
+EndIf
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/paula-pulse-results.txt")
+  FileOutput 0
+  NPrint "paula-pulse"
+  If waveBlock = 0
+    NPrint "AllocMem for the wave block FAILED"
+  Else
+    NPrint "wave block at ", waveBlock, ", ", #WAVE_BLOCK_BYTES, " bytes of Chip RAM"
+    NPrint "short noise: bytes that differ from the byte 93 on = ", shortRepeatMismatch, " (0 = the short mode repeats every 93 steps)"
+    NPrint "frames run = ", frameNumber, " of ", #TOTAL_FRAMES
+  EndIf
+  NPrint ""
+  NPrint "Planned cycle per note (size index 0 = 32 bytes, 1 = 16, 2 = 8)"
+  NPrint "note  tenths-of-Hz  timer  size  period"
+  For recordIndex.w = 0 To 21
+    NPrint recordIndex, "  ", recordTenths(recordIndex), "  ", recordTimer(recordIndex), "  ", recordSize(recordIndex), "  ", recordPeriod(recordIndex)
+  Next
+  NPrint "(notes 0 to 11 are the pulse of phase 1, 12 to 21 the triangle of phase 3)"
+  NPrint ""
+  NPrint "Cost of one frame's update, in raster lines (a line is about 63.5 us)"
+  NPrint "phase  frames  average  worst"
+  For phaseIndex.w = 1 To #PHASES
+    If phaseFrameCount(phaseIndex) > 0
+      NPrint phaseIndex, "  ", phaseFrameCount(phaseIndex), "  ", phaseLineSum(phaseIndex)/phaseFrameCount(phaseIndex), "  ", phaseLineMax(phaseIndex)
+    Else
+      NPrint phaseIndex, "  0 frames"
+    EndIf
+  Next
+  CloseFile 0
+EndIf
+End

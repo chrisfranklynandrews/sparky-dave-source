@@ -1,0 +1,138 @@
+;; =======================================================
+;; BRICK CHUNKS (BLITZ MODE)
+;; =======================================================
+
+;; Big Mario breaks a brick from below: the cell empties at once (no bob, no
+;; restore, unlike a bump), 50 points, and four chunks fly out and fall. The
+;; numbers are the cartridge's and are listed with #DEBRIS_* in constants.ab3.
+;; The chunks rise 61 px (upper pair) and 28 px (lower pair), move 1 px a tick sideways and are gone after
+;; 55 ticks (the main project's OBJECT_SYSTEM note).
+;;
+;; Two sets of chunks, like the cartridge's two block objects: it alternates
+;; between them on every hit (SprDataOffset_Ctrl, smbdis 7284), so two breaks
+;; can overlap and a third inside the first's 55 ticks takes that set over. The
+;; 16-tick lockout means breaks are at least 16 ticks apart. A break is never
+;; refused.
+
+;; Cut once at start, like every other shape. The art is the `brick_debris` cell
+;; of the items sheet: one 8x8 fragment drawn four times, mirrored, in a 16x16
+;; cell. The cartridge uses a single fragment tile for all four pieces too, so one
+;; quarter (the top left) is cut in the four flip variants. Needs the items sheet
+;; loaded.
+Statement CutDebrisShapes{}
+  Use BitMap #ITEMS_BM
+  For debrisVariant = 0 To #DEBRIS_VARIANTS - 1
+    debrisShapeSlot.w = #DEBRIS_SHAPE + debrisVariant
+    GetaShape debrisShapeSlot, #DEBRIS_ITEM_CELL*#TILE, 0, #DEBRIS_SIZE, #DEBRIS_SIZE
+    If (debrisVariant AND 1) <> 0 Then XFlip debrisShapeSlot
+    If (debrisVariant AND 2) <> 0 Then YFlip debrisShapeSlot
+  Next
+End Statement
+
+;; Starts a break on the next set in turn, taking over its pieces if they are
+;; still flying. The left piece of each pair starts at the brick's X and the
+;; right piece 8 px along; opposite X speeds are the mirror about the brick's
+;; centre.
+Statement StartBrickDebris{brickCellIndex.w}
+  SHARED debrisX(), debrisY(), debrisVelocityX(), debrisVelocityY()
+  SHARED debrisActive(), debrisAge(), debrisNextSet, mapWidth
+  chunkSet.w = debrisNextSet
+  debrisNextSet = 1 - debrisNextSet
+  pieceBase.w = chunkSet*#DEBRIS_PIECES
+  brickPixelX.l = (brickCellIndex MOD mapWidth)*#TILE
+  brickPixelY.l = (brickCellIndex/mapWidth)*#TILE
+  debrisX(pieceBase) = brickPixelX*256
+  debrisX(pieceBase + 1) = (brickPixelX + #DEBRIS_SIZE)*256
+  debrisX(pieceBase + 2) = brickPixelX*256
+  debrisX(pieceBase + 3) = (brickPixelX + #DEBRIS_SIZE)*256
+  debrisY(pieceBase) = brickPixelY*256
+  debrisY(pieceBase + 1) = brickPixelY*256
+  debrisY(pieceBase + 2) = (brickPixelY + #DEBRIS_SIZE)*256
+  debrisY(pieceBase + 3) = (brickPixelY + #DEBRIS_SIZE)*256
+  debrisVelocityX(pieceBase) = -256
+  debrisVelocityX(pieceBase + 1) = 256
+  debrisVelocityX(pieceBase + 2) = -256
+  debrisVelocityX(pieceBase + 3) = 256
+  debrisVelocityY(pieceBase) = #DEBRIS_UPPER_SPEED
+  debrisVelocityY(pieceBase + 1) = #DEBRIS_UPPER_SPEED
+  debrisVelocityY(pieceBase + 2) = #DEBRIS_LOWER_SPEED
+  debrisVelocityY(pieceBase + 3) = #DEBRIS_LOWER_SPEED
+  debrisAge(chunkSet) = 0
+  debrisActive(chunkSet) = True
+End Statement
+
+;; The break itself: collision opens at once, the cell paints sky, the chunks
+;; start, 50 points.
+Statement BreakBrick{brickCellIndex.w}
+  SHARED metatileBuffer(), mapBuffer(), bumpObjectCell
+  bumpObjectCell = brickCellIndex
+  StartBrickDebris{brickCellIndex}
+  metatileBuffer(brickCellIndex) = #MT_EMPTY
+  mapBuffer(brickCellIndex) = 0
+  QueueMetatileRedraw{brickCellIndex}
+  AddScore{#SCORE_BRICK}
+  SoundNoise{#SFX_BRICK_SHATTER}
+End Statement
+
+; How many sets are flying, for the tests.
+Function.w BrickDebrisSetsActive{}
+  SHARED debrisActive()
+  activeSets.w = 0
+  For chunkSet = 0 To #DEBRIS_SETS - 1
+    If debrisActive(chunkSet) = True Then activeSets = activeSets + 1
+  Next
+  Function Return activeSets
+End Function
+
+;; One sim tick: move, then add gravity, as ImposeGravity does. A set is finished
+;; when every piece has fallen past the bottom of the world.
+Statement UpdateBrickDebris{}
+  SHARED debrisX(), debrisY(), debrisVelocityX(), debrisVelocityY()
+  SHARED debrisActive(), debrisAge()
+  For chunkSet = 0 To #DEBRIS_SETS - 1
+    If debrisActive(chunkSet) = True
+      stillFlying.w = False
+      For debrisPiece = chunkSet*#DEBRIS_PIECES To chunkSet*#DEBRIS_PIECES + #DEBRIS_PIECES - 1
+        debrisX(debrisPiece) = debrisX(debrisPiece) + debrisVelocityX(debrisPiece)
+        debrisY(debrisPiece) = debrisY(debrisPiece) + debrisVelocityY(debrisPiece)
+        debrisVelocityY(debrisPiece) = debrisVelocityY(debrisPiece) + #DEBRIS_GRAVITY
+        If debrisVelocityY(debrisPiece) > #DEBRIS_TERMINAL Then debrisVelocityY(debrisPiece) = #DEBRIS_TERMINAL
+        If debrisY(debrisPiece)/256 < #WORLD_H Then stillFlying = True
+      Next
+      debrisAge(chunkSet) = debrisAge(chunkSet) + 1
+      If stillFlying = False Then debrisActive(chunkSet) = False
+    EndIf
+  Next
+End Statement
+
+;; Render only. A piece not wholly inside the bitmap vertically is not drawn
+;; (BBlit clipping at the edges is unconfirmed, and a brick near the top of the
+;; level sends its chunks above row 0), and one outside the view plus a guard is
+;; not drawn either. Its simulation is unaffected.
+Statement DrawBrickDebris{}
+  SHARED debrisX(), debrisY(), debrisActive(), debrisAge()
+  SHARED drawBitmap, drawBuffer, viewLeft, viewRight
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  For chunkSet = 0 To #DEBRIS_SETS - 1
+    If debrisActive(chunkSet) = True
+      debrisVariantNow.w = (debrisAge(chunkSet)/#DEBRIS_SPIN_TICKS) AND 3
+      For debrisPiece = 0 To #DEBRIS_PIECES - 1
+        pieceIndex.w = chunkSet*#DEBRIS_PIECES + debrisPiece
+        pixelX.w = debrisX(pieceIndex)/256
+        pixelY.w = debrisY(pieceIndex)/256
+        If debrisY(pieceIndex) >= 0
+          If pixelY + #DEBRIS_SIZE <= #SURFACE_H
+            If pixelX + #DEBRIS_SIZE > viewLeft - #VIEW_GUARD
+              If pixelX < viewRight + #VIEW_GUARD
+                BBlit drawBuffer, #DEBRIS_SHAPE + debrisVariantNow, pixelX, pixelY
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+      Next
+    EndIf
+  Next
+End Statement
+
+;; END OF BRICK CHUNKS (BLITZ MODE)

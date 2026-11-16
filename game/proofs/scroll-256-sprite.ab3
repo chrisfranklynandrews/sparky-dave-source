@@ -1,0 +1,417 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+
+;; =======================================================
+;; SCROLL-256-SPRITE: THE ATTACHED MARIO ON A DISPLAY WITH MORE SPRITE CHANNELS
+;; =======================================================
+;; Compile in UAE (S/run-proof scroll-256-sprite). Not part of the game. The all-stars branch (the all-stars plan).
+;;
+;; The question. The game's display fetches 320 pixels in fetch mode 3 and the window cuts them to 256. Fetch mode 3 leaves the
+;; hardware sprites ONE DMA channel at that width (proofs/sprite-channels.ab3, sprite-width.ab3, 2026-10-28), and a 15 colour attached
+;; sprite (All-Stars Mario) needs two (an even and the odd one after it): in the game he showed pens 1 to 3 only, the low two bits,
+;; with the rest of his face see-through (2026-10-31). proofs/sprite-attach.ab3 had all his colours, on a true 256 fetch, which
+;; proofs/scroll-256.ab3 then found does not scroll properly. sprite-channels measured fetch mode 1 and 2 leaving 5 channels, at
+;; the standard width.
+;;
+;; So: is there a display that (a) gives the attached sprite its two channels, (b) is 256 wide centred with the same lead-in bias
+;; as the game (-32), and (c) scrolls cleanly across 64 pixel blocks (no jump, no blue at the window's left)? This is
+;; scroll-256.ab3's display (the game's two lists: a HUD list of 4 planes over a dual playfield world list, a ruler on each, a
+;; world 704 wide, the sky green so the window shows) plus the 15 colour Mario on channels 0 and 1 and three small test sprites
+;; (plain 4 colour bars) on channels 2, 4 and 6, so that how many channels have their DMA shows at a glance.
+;;
+;; The five displays (keys 1 to 5), all with window 31 and -33, fetch width 0, bias -32, differing in fetch mode and DDF numbers:
+;;   1  fetch mode 3, start -16, stop -16     the game today (expect Mario in pens 1 to 3 only; the bars: how many show?)
+;;   2  fetch mode 1, start -16, stop -16
+;;   3  fetch mode 1, start 0, stop 0
+;;   4  fetch mode 2, start -16, stop -16
+;;   5  fetch mode 2, start 0, stop 0
+;;
+;; Keys: Right and Left scroll while held, Space starts and stops a scroll back and forth, 6 to 8 the speed (1, 2 or 3 pixels a frame),
+;; R back to 0, 9 and 0 the game's BPLCON1 string on and off (off at the start: its value is made for fetch mode 3 and is a separate
+;; question), Esc quits and writes scroll-256-sprite-results.txt.
+;;
+;; What to look at and report, for each display (1 to 5)
+;; 1. Mario: all his colours (face, hat, shirt, overalls, boots) or only the dark red, dark blue and black? How many of the three
+;;    bars (left to right, channels 2, 4 and 6) show?
+;; 2. At scroll 0 (hold Left): is the first box pole at the window's left edge (the bias -32 right), and the ground full width?
+;; 3. Hold Right across 64, 128, 192 and 256 (the poles), at speed 1 and at speed 3: smooth, or a jump (how much)? Blue at the
+;;    window's left while scrolled? Junk at the right edge? The picture centred (the same blue each side)?
+;; 4. Does Mario stay still on the screen while the picture scrolls past?
+
+WBStartup
+
+XINCLUDE "sprite-attach-data.ab3"
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_SPACE = $40
+#RAW_KEY_R     = $13
+#BPLCON1       = $102
+#BAND_LINE     = 80
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#WORLD_W    = 704
+#WORLD_H    = 256
+#HUD_W      = 704
+#SCROLL_MAX = 320
+#MARGIN     = 0
+
+#SPRITE_FLAG          = $400
+#PLAYFIELD2_OFFSET_16 = $1c00
+#BANK_XOR             = $33
+#DISPLAYS             = 5
+#VARIANTS             = 5
+#MARIO_W              = 16
+#MARIO_H              = 32
+
+#BM_FRONT = 0
+#BM_BACK  = 1
+#BM_HUD   = 2
+#BM_MARIO = 3
+#BM_BAR   = 4
+
+#SPRITE_MARIO = 0
+#SHAPE_MARIO  = 0
+#SPRITE_BAR   = 1
+#SHAPE_BAR    = 1
+
+quitFlag.w = False
+display.w = 0
+Dim displayFetchMode.w(#DISPLAYS - 1)
+Dim displayStart.w(#DISPLAYS - 1)
+Dim displayStop.w(#DISPLAYS - 1)
+displayFetchMode(0) = 3
+displayStart(0) = -16
+displayStop(0) = -16
+displayFetchMode(1) = 1
+displayStart(1) = -16
+displayStop(1) = -16
+displayFetchMode(2) = 1
+displayStart(2) = 0
+displayStop(2) = 0
+displayFetchMode(3) = 2
+displayStart(3) = -16
+displayStop(3) = -16
+displayFetchMode(4) = 2
+displayStart(4) = 0
+displayStop(4) = 0
+scrollX.l = 0
+autoScroll.w = False
+autoDir.w = 1
+scrollSpeed.w = 1
+bandOn.w = False
+keySpace.w = False
+frameCount.l = 0
+
+Dim marioRGB.w(#VARIANTS - 1, 15, 2)
+Dim marioPixel.w(#MARIO_H - 1, #MARIO_W - 1)
+readPixel.w = 0
+readRed.w = 0
+readGreen.w = 0
+readBlue.w = 0
+
+For variantIndex.w = 0 To #VARIANTS - 1
+  For penIndex.w = 1 To 15
+    Read readRed
+    Read readGreen
+    Read readBlue
+    marioRGB(variantIndex, penIndex, 0) = readRed
+    marioRGB(variantIndex, penIndex, 1) = readGreen
+    marioRGB(variantIndex, penIndex, 2) = readBlue
+  Next
+Next
+For rowIndex.w = 0 To #MARIO_H - 1
+  For columnIndex.w = 0 To #MARIO_W - 1
+    Read readPixel
+    marioPixel(rowIndex, columnIndex) = readPixel
+  Next
+Next
+
+BitMap #BM_FRONT, #WORLD_W, #WORLD_H, 4
+BitMap #BM_BACK, #WORLD_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_MARIO, #MARIO_W, #MARIO_H, 4
+BitMap #BM_BAR, 16, 8, 2
+
+;; Entries 0 to 15 the front's, 16 to 31 the back's, 33 to 47 Mario's (sprite bank 2).
+InitPalette 0, 48
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 40, 40, 40
+For penIndex.w = 16 To 31
+  AGAPalRGB 0, penIndex, 20 + (penIndex - 16)*6, 100 + (penIndex - 16)*6, 40 + (penIndex - 16)*3
+Next
+For penIndex.w = 1 To 15
+  AGAPalRGB 0, 32 + penIndex, marioRGB(0, penIndex, 0), marioRGB(0, penIndex, 1), marioRGB(0, penIndex, 2)
+Next
+
+BLITZ
+
+Statement BuildLists{}
+  SHARED displayFetchMode(), displayStart(), displayStop()
+  For displayIndex.w = 0 To #DISPLAYS - 1
+    hudList.w = displayIndex*2
+    worldList.w = hudList + 1
+    fetchBits.l = displayFetchMode(displayIndex)*$1000
+    InitCopList hudList, #HUD_YPOS, #HUD_H, $10014 + fetchBits + #SPRITE_FLAG, 0, 48, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, $10038 + fetchBits + #SPRITE_FLAG, 8, 0, 4
+    DisplayControls hudList, 0, 0, #BANK_XOR
+    DisplayControls worldList, 0, #PLAYFIELD2_OFFSET_16, #BANK_XOR
+    DisplayAdjust hudList, 0, displayStart(displayIndex), displayStop(displayIndex), 31, -33
+    DisplayAdjust worldList, 0, displayStart(displayIndex), displayStop(displayIndex), 31, -33
+  Next
+End Statement
+
+; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels (as sparkydave.parallax.blitz.ab3).
+Function.l ScrollPart{delay.l}
+  Function Return(delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+Statement ShowDisplay{displayIndex.w}
+  hudList.w = displayIndex*2
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, #BM_HUD, 0, 0
+  DisplayBitMap hudList + 1, #BM_FRONT, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+End Statement
+
+;; Poles with boxes every 64 pixels (one box for block 1, two for block 2...), 16 pixel ground columns in two greens.
+Statement DrawFront{}
+  Use BitMap #BM_FRONT
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    penIndex.w = 6
+    If columnIndex MOD 2 = 1 Then penIndex = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, penIndex
+  Next
+  For blockIndex.w = 0 To (#WORLD_W - #MARGIN)/64 - 1
+    poleX.w = #MARGIN + blockIndex*64
+    Boxf poleX, 40, poleX + 1, 207, 11
+    For boxIndex.w = 0 To blockIndex
+      Boxf poleX + 4, 48 + boxIndex*12, poleX + 11, 55 + boxIndex*12, 8
+    Next
+  Next
+End Statement
+
+;; Hills on the back playfield, every circle inside the bitmap (Blitz's Circlef is not safe to clip).
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 15
+  For hillIndex.w = 0 To 9
+    centreX.w = #MARGIN + 56 + hillIndex*54
+    Circlef centreX, 200, 50, 2
+    Circlef centreX, 200, 38, 3
+    Circlef centreX, 200, 22, 4
+  Next
+End Statement
+
+;; Ticks every 16 pixels of staircase height 1 to 8, repeating every 128; a long red one (12) every 64.
+Statement DrawHud{}
+  Use BitMap #BM_HUD
+  Cls 1
+  For tickIndex.w = 0 To (#HUD_W - #MARGIN)/16 - 1
+    tickHeight.w = 1 + (tickIndex MOD 8)
+    tickX.w = #MARGIN + tickIndex*16
+    Boxf tickX, 0, tickX, tickHeight - 1, 8
+    If tickIndex MOD 4 = 0 Then Boxf tickX + 1, 0, tickX + 2, 11, 11
+  Next
+End Statement
+
+;; The 15 colour sprite from the picture (as proofs/sprite-attach.ab3: a 4 plane shape, drawn with Plot from data), and a plain 4 colour
+;; bar (a 2 plane shape) for the test channels.
+Statement MakeSprites{}
+  SHARED marioPixel()
+  Use BitMap #BM_MARIO
+  Cls 0
+  For rowIndex.w = 0 To #MARIO_H - 1
+    For columnIndex.w = 0 To #MARIO_W - 1
+      Plot columnIndex, rowIndex, marioPixel(rowIndex, columnIndex)
+    Next
+  Next
+  GetaShape #SHAPE_MARIO, 0, 0, #MARIO_W, #MARIO_H
+  GetaSprite #SPRITE_MARIO, #SHAPE_MARIO
+  Use BitMap #BM_BAR
+  Cls 0
+  Boxf 0, 0, 15, 7, 1
+  GetaShape #SHAPE_BAR, 0, 0, 16, 8
+  GetaSprite #SPRITE_BAR, #SHAPE_BAR
+End Statement
+
+DrawFront{}
+DrawBack{}
+DrawHud{}
+MakeSprites{}
+BuildLists{}
+ShowDisplay{display}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  For displayKey.w = 1 To #DISPLAYS
+    If RawStatus(displayKey)
+      If display <> displayKey - 1
+        display = displayKey - 1
+        ShowDisplay{display}
+      EndIf
+    EndIf
+  Next
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If keySpace = False Then autoScroll = NOT autoScroll
+    keySpace = True
+  Else
+    keySpace = False
+  EndIf
+
+  If RawStatus(9) Then bandOn = True
+  If RawStatus(10) Then bandOn = False
+  If RawStatus(#RAW_KEY_R) Then scrollX = 0
+  For speedKey.w = 6 To 8
+    If RawStatus(speedKey) Then scrollSpeed = speedKey - 5
+  Next
+
+  If autoScroll = True
+    scrollX = scrollX + autoDir*scrollSpeed
+    If scrollX >= #SCROLL_MAX Then autoDir = -1
+    If scrollX <= 0 Then autoDir = 1
+  Else
+    If RawStatus(#RAW_KEY_RIGHT) AND scrollX < #SCROLL_MAX Then scrollX = scrollX + scrollSpeed
+    If RawStatus(#RAW_KEY_LEFT) AND scrollX > 0 Then scrollX = scrollX - scrollSpeed
+  EndIf
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+
+  VWait
+  frontX.q = scrollX - 32
+  backX.q = scrollX/2 - 32
+  worldList.w = display*2 + 1
+  DisplayBitMap worldList, #BM_FRONT, frontX, #VIEW_TOP, #BM_BACK, backX, #VIEW_TOP
+  DisplayBitMap display*2, #BM_HUD, frontX, 0
+  ;; Mario on channels 0 and 1, and the test bars on 2, 4 and 6, all still on the screen while the picture scrolls.
+  DisplaySprite worldList, #SPRITE_MARIO, 120, 100, 0
+  DisplaySprite worldList, #SPRITE_BAR, 40, 60, 2
+  DisplaySprite worldList, #SPRITE_BAR, 80, 60, 4
+  DisplaySprite worldList, #SPRITE_BAR, 120, 60, 6
+  ;; The game's one string, at its line: BPLCON1 with the value the header holds (made for fetch mode 3; off at the start).
+  If bandOn = True
+    frontQuarter.l = Int(frontX*4)
+    backQuarter.l = Int(backX*4)
+    control.l = ScrollPart{255 - (frontQuarter AND 255)} + ScrollPart{255 - (backQuarter AND 255)}*16
+    CustomString worldList, 0, #BAND_LINE - 1, Mki$(#BPLCON1) + Mki$(SignedWord{control})
+  Else
+    CustomString worldList, 0, #BAND_LINE - 1, Mki$($1fe) + Mki$(0)
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/scroll-256-sprite-results.txt")
+  FileOutput 0
+  NPrint "scroll-256-sprite: the attached Mario and the scroll across 64 pixel blocks, fetch modes 1, 2 and 3"
+  NPrint "Last display ", display + 1, " (fetch mode ", displayFetchMode(display), ", DDF start ", displayStart(display), ", stop ", displayStop(display), ")"
+  NPrint "scroll ", scrollX, ", speed ", scrollSpeed, ", band string ", bandOn, ", frames ", frameCount
+  CloseFile 0
+EndIf
+End

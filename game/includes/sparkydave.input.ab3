@@ -1,0 +1,137 @@
+;; =======================================================
+;; INPUT (BLITZ MODE)
+;; =======================================================
+
+Statement ReadControls{}
+  SHARED quitFlag
+  SHARED oldF1, oldF3, oldF2, oldF8, oldF9
+  SHARED playerStarIntervals, playerState
+  SHARED playerIsBig
+  SHARED lifeEvent
+  SHARED redefineActive, escapeGuard, coverKind, courseClearReady, overlayScreenWanted, menuEscape
+  SHARED debugMode, oldF10, parallaxPreset, wholePixelScroll, oldDel, oldCheckKey, watchOn, watchRowFrame()
+  SHARED debugInvincible, oldF7, allLevelsOpen
+
+  ; The joystick, once a frame, before anything here or in the sim ticks reads it.
+  UpdateJoystick{}
+
+  ;; Esc works only before a game is under way: on the title's menu it quits, and on the title's pages (the options, the
+  ;; jukebox, the palettes) it goes back (the menus read menuEscape). Once a game has started it does nothing (in play, on the pause
+  ;; menu and the pages opened from it, the continue screen, the course clear and the other covers), so an Esc pressed in a hurry
+  ;; cannot end a game; the way out of a game is the pause menu's QUIT TO TITLE. The redefine screen reads Esc itself (cancel,
+  ;; UpdateRedefine{}), wherever it was opened from. One press does one thing (escapeGuard, until Esc is let go): the Esc that goes
+  ;; back does not also quit, and one held from a game does nothing on the title it ends on.
+  escapeNow.w = RawStatus(#RAW_KEY_ESC)
+  If escapeNow = False Then escapeGuard = False
+  If escapeNow <> False AND redefineActive = False AND escapeGuard = False
+    escapeGuard = True
+    If coverKind = #COVER_TITLE
+      If overlayScreenWanted = #SCREEN_TITLE
+        quitFlag = True
+      Else
+        menuEscape = True
+      EndIf
+    EndIf
+  EndIf
+
+  ;; On the course-clear screen any of fire, jump, run or Return goes on, but only a press made after it came up: a
+  ;; button held through the end of the level must not skip it.
+  If lifeEvent = #LIFE_COMPLETE
+    startNow.w = CourseClearContinueDown{}
+    If startNow = False Then courseClearReady = True
+    If startNow <> False AND courseClearReady <> False Then lifeEvent = #LIFE_REPLAY
+  Else
+    courseClearReady = False
+  EndIf
+
+  ; F1: Reset level (edge triggered)
+  If RawStatus(#RAW_KEY_F1)
+    If oldF1 = False AND redefineActive = False Then lifeEvent = #LIFE_RESET
+  EndIf
+  oldF1 = RawStatus(#RAW_KEY_F1)
+
+  ;; F7: invincibility on or off, in debug mode or with the LEVELS argument (a lighter build to test in), shown in the HUD (I, or -
+  ;; when off): enemies cannot hurt him, without the Starman's colour cycling or music, so a stretch can be played through for its
+  ;; frame time.
+  If debugMode <> False OR allLevelsOpen <> False
+    If RawStatus(#RAW_KEY_INVINCIBLE)
+      If oldF7 = False
+        debugInvincible = NOT debugInvincible
+        ShowParallaxPreset{}
+      EndIf
+    EndIf
+    oldF7 = RawStatus(#RAW_KEY_INVINCIBLE)
+  EndIf
+
+  ;; The debug keys, all in the one block: nothing here is read outside debug mode, and each is edge triggered (its old* flag follows the
+  ;; key only while the block runs).
+  If debugMode <> False
+    ; Help: the next parallax speed preset, shown in the HUD.
+    If RawStatus(#RAW_KEY_HELP)
+      If oldF10 = False
+        parallaxPreset = parallaxPreset + 1
+        If parallaxPreset >= #PARALLAX_PRESETS Then parallaxPreset = 0
+        ShowParallaxPreset{}
+      EndIf
+    EndIf
+    oldF10 = RawStatus(#RAW_KEY_HELP)
+
+    ; Del: the world's scroll in whole pixels or with fractions, shown in the HUD.
+    If RawStatus(#RAW_KEY_DEL)
+      If oldDel = False
+        wholePixelScroll = NOT wholePixelScroll
+        ShowParallaxPreset{}
+      EndIf
+    EndIf
+    oldDel = RawStatus(#RAW_KEY_DEL)
+
+    ; F2: on to the next level in the table, as the end of one does, to reach a later level quickly.
+    If RawStatus(#RAW_KEY_F2)
+      If oldF2 = False AND lifeEvent = #LIFE_NONE Then lifeEvent = #LIFE_REPLAY
+    EndIf
+    oldF2 = RawStatus(#RAW_KEY_F2)
+
+    ; F8: the Starman, as a star block's would give it, for trying what it does to enemies.
+    If RawStatus(#RAW_KEY_STAR)
+      If oldF8 = False
+        playerStarIntervals = #STAR_INTERVALS
+        SoundAreaMusic{#MUSIC_STAR_POWER}
+      EndIf
+    EndIf
+    oldF8 = RawStatus(#RAW_KEY_STAR)
+
+    ; F9: a vine, two tiles ahead of Mario and from the ground he stands on, for trying the climb; pressed again it takes it away.
+    If RawStatus(#RAW_KEY_F9)
+      If oldF9 = False AND playerState = #PLAYER_ST_FREE AND coverKind = #COVER_NONE Then DebugVine{}
+    EndIf
+    oldF9 = RawStatus(#RAW_KEY_F9)
+
+    ; F3: the shell-chain benchmark scene.
+    If RawStatus(#RAW_KEY_F3)
+      If oldF3 = False Then SpawnShellChainBench{}
+    EndIf
+    oldF3 = RawStatus(#RAW_KEY_F3)
+
+    ;; F10: both world bitmaps checked against the map, for the report at exit (CheckWorldBitmaps{}), and the watch for stray words
+    ;; switched on or off (WatchWorldBitmaps{}). Switched on, no row has been looked at yet.
+    If RawStatus(#RAW_KEY_F10)
+      If oldCheckKey = False
+        If coverKind = #COVER_NONE Then CheckWorldBitmaps{}
+        watchOn = NOT watchOn
+        If watchOn <> False
+          For watchRowIndex.w = 0 To #WATCH_PIXEL_ROWS - 1
+            watchRowFrame(watchRowIndex) = -1
+          Next
+        EndIf
+      EndIf
+    EndIf
+    oldCheckKey = RawStatus(#RAW_KEY_F10)
+
+    ;; F4 grows and F5 shrinks, through the real state rather than a debug toggle,
+    ;; so both the animation and the taller head box are exercised.
+    If RawStatus(#RAW_KEY_BIG) Then StartResize{True}
+    If RawStatus(#RAW_KEY_SMALL) Then StartResize{False}
+  EndIf
+End Statement
+
+;; END OF INPUT (BLITZ MODE)

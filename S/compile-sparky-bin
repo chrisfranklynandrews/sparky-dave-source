@@ -1,0 +1,71 @@
+; Compile every build of Sparky Dave with AmiBlitz 3.13: each physics variant in each look, through
+; compile-sparky-one, one after the other:
+;   sparky-dave:compiled/SparkyDaveNTSC           the NTSC physics (60 ticks a second), the NES look
+;   sparky-dave:compiled/SparkyDavePal            the PAL physics (50 ticks a second), the NES look
+;   sparky-dave:compiled/SparkyDaveNTSCAllStars   the NTSC physics, the All-Stars look
+;   sparky-dave:compiled/SparkyDavePalAllStars    the PAL physics, the All-Stars look
+; and, first, the launcher's helper sparky-dave:compiled/DetectVideo (which says whether the
+; machine is PAL; see the SparkyDave script).
+; Each build is the same source with different copies of sparkydave.physics.ab3 and
+; sparkydave.look.ab3 (the files the game includes), so each compile copies its variant and look
+; files over them, and puts the committed copies (the NTSC physics, the NES look) back when it ends.
+; The first build that fails stops the rest (a compile error is almost always in all four, and each
+; compile takes minutes). Compile errors go to game/compile-<variant>-<look>.log and
+; game/compile-detect.log.
+
+FAILAT 21
+
+DELETE RAM:sparky-compile-failed QUIET
+DELETE sparky-dave:game/compile-detect.log QUIET
+DELETE sparky-dave:compiled/DetectVideo QUIET
+
+execute sparky-dave:S/stage-data
+IF ERROR
+  QUIT 20
+ENDIF
+
+; ---- The launcher's helper ----
+ECHO "Compiling DetectVideo"
+
+Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/launcher/detect-video.ab3 -e sparky-dave:compiled/DetectVideo -v 2 > sparky-dave:game/compile-detect.log
+
+IF ERROR
+  ECHO "DetectVideo compile failed"
+  TYPE sparky-dave:game/compile-detect.log
+  QUIT 20
+ENDIF
+
+SEARCH sparky-dave:game/compile-detect.log "Compiler Error" QUIET
+IF NOT WARN
+  ECHO "DetectVideo compile failed"
+  TYPE sparky-dave:game/compile-detect.log
+  QUIT 20
+ENDIF
+
+IF NOT EXISTS sparky-dave:compiled/DetectVideo
+  ECHO "DetectVideo compile failed: no program was made"
+  TYPE sparky-dave:game/compile-detect.log
+  QUIT 20
+ENDIF
+
+; ---- The four builds ----
+; Each one only while none before it has failed.
+execute sparky-dave:S/compile-sparky-one ntsc nes SparkyDaveNTSC
+IF NOT EXISTS RAM:sparky-compile-failed
+  execute sparky-dave:S/compile-sparky-one pal nes SparkyDavePal
+ENDIF
+IF NOT EXISTS RAM:sparky-compile-failed
+  execute sparky-dave:S/compile-sparky-one ntsc allstars SparkyDaveNTSCAllStars
+ENDIF
+IF NOT EXISTS RAM:sparky-compile-failed
+  execute sparky-dave:S/compile-sparky-one pal allstars SparkyDavePalAllStars
+ENDIF
+
+IF EXISTS RAM:sparky-compile-failed
+  DELETE RAM:sparky-compile-failed QUIET
+  ECHO "A build failed to compile, so the ones after it were not compiled (see the messages above"
+  ECHO "and game/compile-<variant>-<look>.log)"
+  QUIT 20
+ENDIF
+
+ECHO "All compiled with no errors: DetectVideo, SparkyDaveNTSC, SparkyDavePal, SparkyDaveNTSCAllStars and SparkyDavePalAllStars"

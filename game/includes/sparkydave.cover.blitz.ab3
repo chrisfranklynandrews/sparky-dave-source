@@ -1,0 +1,1429 @@
+;; =======================================================
+;; COVER SCREENS (BLITZ MODE)
+;; =======================================================
+;; The cartridge never shows a level being built: each area loads behind a screen that is turned off
+;; (smbdis 2906, 5711, 1558). The Amiga equivalent is a COVER: a finished bitmap (#COVER_BM) shown in the
+;; world's display slot with pen 0 black (sparkydave.palette.blitz.ab3), while the world reloads behind it.
+;; The status bar stays up, as on the cartridge's lives screen. When the cover ends, the display and the
+;; palette change in the same frame, so the first thing seen is the finished level.
+;;
+;; The kinds (the main project's SCREENS note):
+;;   blank     a pipe, either way: black, up only as long as the reload takes.
+;;   lives     "WORLD 1-1", a small Mario, "x" and the lives left, 7 intervals (147 ticks): start, death,
+;;             course clear.
+;;   timeup    "TIME UP", 7 intervals, before the lives screen (or game over).
+;;   gameover  "GAME OVER", 18 intervals (378 ticks); Return skips it.
+;;   title     an overlay on the back playfield, brought in front of the world at the start of 1-1
+;;             (ShowTitle{}), with its menu. It counts as a cover (the sim is paused, UpdateCover{}
+;;             runs) but shows the world.
+;;   menu      the pause menu and the options: the overlay in front of the black cover (OpenPauseMenu{}).
+;;   end       the end screen after the last level's castle (2-4's): what is to come, then the title; until Return.
+;; The sim is paused while a cover is up (RunSimTicks{} runs UpdateCover{} instead); cover time is in sim ticks.
+
+;; Ticks a cover stays up, from the cartridge's ScreenTimer (an interval timer: $07 is 7 intervals of 21 ticks; game over sets $12);
+;; -1 is until Return. The hold counts from the cover going up, not from the end of the work done behind it, as the cartridge's does.
+;; CoverTicksLeft{} gives a cover's timer once the ticks spent behind it before its first tick (a reload, a level read from disk) are
+;; taken off. It never goes below 1, so the cover still ends through UpdateCover{}; a timer of 0 or less (until Return) is left as it is.
+;; It has no side effects, so the tests can call it.
+Function.w CoverTicksLeft{timerNow.w, ticksWaited.l}
+  If timerNow <= 0 Then Function Return timerNow
+  ticksLeft.l = timerNow - ticksWaited
+  If ticksLeft < 1 Then ticksLeft = 1
+  Function Return ticksLeft
+End Function
+
+Function.w CoverTicksFor{coverNow.w}
+  If coverNow = #COVER_BLANK Then Function Return #COVER_BLANK_TICKS
+  If coverNow = #COVER_LIVES Then Function Return 7*#INTERVAL_PERIOD
+  If coverNow = #COVER_TIMEUP Then Function Return 7*#INTERVAL_PERIOD
+  If coverNow = #COVER_GAMEOVER Then Function Return 18*#INTERVAL_PERIOD
+  Function Return -1
+End Function
+
+;; True when the HUD is to be away this frame (ShowWorldLists{}): in play, and any of Mario above the world list's top.
+;; Asked for the frame his top is there, shown a frame or two later. Every overlay (the title, the options, the pause menu)
+;; has a cover up, so a cover is all that needs asking about: OverlayOverWorld{} and OverlayOverCover{} are False without one.
+Function.w HudAwayNeeded{}
+  SHARED coverKind, playerHidden
+  If coverKind <> #COVER_NONE Then Function Return False
+  If playerHidden = True Then Function Return False
+  Function Return HudAwayNeededForTop{PlayerTopRow{}}
+End Function
+
+;; The best score, for the title. Called as a game ends and as a level does (the course clear); kept in the settings file only when
+;; the game ends (SaveTopScoreIfNew{}).
+Statement UpdateTopScore{}
+  SHARED hudScore, hudTopScore
+  If hudScore > hudTopScore Then hudTopScore = hudScore
+End Statement
+
+;; The overlay's pages: the title, the options page and the pause menu are
+;; drawn on the back bitmap (#BACK_BM), on one of two pages: page 0 at x 0, page 1 at x
+;; #OVERLAY_PAGE_W. Each page shows from row #VIEW_TOP, as the cover does, so the rows' y values are
+;; the cover's. Pen 0 is transparent: the world (the title) or the black cover (the options, the
+;; pause menu) shows round the text.
+
+; A page's x on the back bitmap (OverlayPageX{}, in sparkydave.parallax.blitz.ab3).
+
+;; The title's panel, built from the nine 8x8 tiles of title-panel.iff (top-left, top-right, bottom-left, bottom-right, left, right, top,
+;; bottom, centre: #PRE_PANEL + #PT_*, tools/extract_frames.py `title-panel`), so it can be whatever size the text needs: as wide as the
+;; widest line plus #PANEL_PAD_X each side (to 32 px), from topY to bottomY (to a whole tile), centred. The top row, one middle row and
+;; the bottom row are tiles, all drawn with Blit (Block rounds x down to a multiple of 16, which would smear the 8 px tiles into bars;
+;; the corners' clear pixel is the rounded corner). The middle row is then copied down by the blitter, so a panel is about three rows of
+;; blits and a few copies. It is drawn after the page's clear and before the text.
+Statement DrawTitlePanel{pageX.w, widestText.w, topY.w, bottomY.w}
+  SHARED panelCachedW, panelCachedH, panelOffsetX
+  ;; A multiple of 32 wide, so that the panel's x is a multiple of 16 for Block (the page's x is one, and the view's width less a multiple
+  ;; of 32, halved, is a multiple of 16).
+  panelW.w = ((widestText + 2*#PANEL_PAD_X + 31)/32)*32
+  panelH.w = ((bottomY - topY + #PANEL_TILE)/#PANEL_TILE)*#PANEL_TILE
+  ; The whole-panel shape is #PANEL_MAX_H tall (InitShape{}): a taller panel (a row added to the title) is cut short rather than past it.
+  If panelH > #PANEL_MAX_H Then panelH = (#PANEL_MAX_H/#PANEL_TILE)*#PANEL_TILE
+  panelOffsetX = (#VIEW_W - panelW)/2
+  panelX.w = pageX + panelOffsetX
+  panelCols.w = panelW/#PANEL_TILE
+  panelRows.w = panelH/#PANEL_TILE
+  ;; The whole panel is cut into one shape once, then drawn as a single raw block each time the page is drawn (a blit per tile is about 70
+  ;; blits, enough to make the cursor judder). It is built from the tiles only the first time and when its size changes (the start line's
+  ;; width depends on the controls).
+  If panelW = panelCachedW AND panelH = panelCachedH
+    Block #PRE_PANEL_WHOLE, panelX, topY
+    Statement Return
+  EndIf
+  lastX.w = panelX + (panelCols - 1)*#PANEL_TILE
+  middleY.w = topY + #PANEL_TILE
+  bottomRowY.w = topY + (panelRows - 1)*#PANEL_TILE
+  Blit #PRE_PANEL + #PT_TL, panelX, topY
+  Blit #PRE_PANEL + #PT_TR, lastX, topY
+  Blit #PRE_PANEL + #PT_BL, panelX, bottomRowY
+  Blit #PRE_PANEL + #PT_BR, lastX, bottomRowY
+  Blit #PRE_PANEL + #PT_L, panelX, middleY
+  Blit #PRE_PANEL + #PT_R, lastX, middleY
+  For panelCol.w = 1 To panelCols - 2
+    Blit #PRE_PANEL + #PT_T, panelX + panelCol*#PANEL_TILE, topY
+    Blit #PRE_PANEL + #PT_C, panelX + panelCol*#PANEL_TILE, middleY
+    Blit #PRE_PANEL + #PT_B, panelX + panelCol*#PANEL_TILE, bottomRowY
+  Next
+  ; The middle row, copied down: each copy doubles what is done (the top rows of the middle again below them), the last the rest.
+  rowsDone.w = 1
+  While rowsDone < panelRows - 2
+    copyRows.w = rowsDone
+    If rowsDone + copyRows > panelRows - 2 Then copyRows = panelRows - 2 - rowsDone
+    Scroll panelX, middleY, panelW, copyRows*#PANEL_TILE, panelX, middleY + rowsDone*#PANEL_TILE
+    rowsDone = rowsDone + copyRows
+  Wend
+  GetaShape #PRE_PANEL_WHOLE, panelX, topY, panelW, panelH
+  panelCachedW = panelW
+  panelCachedH = panelH
+End Statement
+
+;; The options page's baseline: what the page opened with (the controls, the keys, the two forgiveness
+;; levels, the continues and the sound's five settings, which the jukebox changes), so BACK can say SAVE AND BACK while
+;; anything differs and Esc can put it all back. The unsaved state of the settings file is kept too, so a discard leaves it as it was.
+Statement TakeOptionsBaseline{}
+  SHARED keyboardMode, joystickMode, keyMap(), forgivenessLevel(), optionsBaselineMode, optionsBaselineJoystick, optionsBaselineKeys()
+  SHARED optionsBaselineForgiveness(), settingsDirty, optionsDirtyAtEntry, paletteChoice, optionsBaselinePalette
+  SHARED continuesChoice, optionsBaselineContinues
+  optionsBaselineMode = keyboardMode
+  optionsBaselineJoystick = joystickMode
+  optionsBaselinePalette = paletteChoice
+  optionsBaselineContinues = continuesChoice
+  For keyIndex.w = 0 To #KEY_COUNT - 1
+    optionsBaselineKeys(keyIndex) = keyMap(keyIndex)
+  Next
+  optionsBaselineForgiveness(0) = forgivenessLevel(#FORGIVENESS_BUFFER)
+  optionsBaselineForgiveness(1) = forgivenessLevel(#FORGIVENESS_COYOTE)
+  TakeSoundBaseline{5}
+  optionsDirtyAtEntry = settingsDirty
+End Statement
+
+Function.w OptionsChanged{}
+  SHARED keyboardMode, joystickMode, keyMap(), forgivenessLevel(), optionsBaselineMode, optionsBaselineJoystick, optionsBaselineKeys()
+  SHARED optionsBaselineForgiveness(), paletteChoice, optionsBaselinePalette, continuesChoice, optionsBaselineContinues
+  differs.w = False
+  If keyboardMode <> optionsBaselineMode Then differs = True
+  If joystickMode <> optionsBaselineJoystick Then differs = True
+  If continuesChoice <> optionsBaselineContinues Then differs = True
+  If paletteChoice <> optionsBaselinePalette Then differs = True
+  For keyIndex.w = 0 To #KEY_COUNT - 1
+    If keyMap(keyIndex) <> optionsBaselineKeys(keyIndex) Then differs = True
+  Next
+  If forgivenessLevel(#FORGIVENESS_BUFFER) <> optionsBaselineForgiveness(0) Then differs = True
+  If forgivenessLevel(#FORGIVENESS_COYOTE) <> optionsBaselineForgiveness(1) Then differs = True
+  If SoundDiffersFromBaseline{5} <> False Then differs = True
+  Function Return differs
+End Function
+
+Statement RestoreOptionsBaseline{}
+  SHARED keyboardMode, joystickMode, keyMap(), forgivenessLevel(), optionsBaselineMode, optionsBaselineJoystick, optionsBaselineKeys()
+  SHARED optionsBaselineForgiveness(), settingsDirty, optionsDirtyAtEntry, paletteChoice, optionsBaselinePalette
+  SHARED continuesChoice, optionsBaselineContinues
+  keyboardMode = optionsBaselineMode
+  joystickMode = optionsBaselineJoystick
+  continuesChoice = optionsBaselineContinues
+  If paletteChoice <> optionsBaselinePalette
+    paletteChoice = optionsBaselinePalette
+    ApplyNesPalette{paletteChoice}
+  EndIf
+  For keyIndex.w = 0 To #KEY_COUNT - 1
+    keyMap(keyIndex) = optionsBaselineKeys(keyIndex)
+  Next
+  forgivenessLevel(#FORGIVENESS_BUFFER) = optionsBaselineForgiveness(0)
+  forgivenessLevel(#FORGIVENESS_COYOTE) = optionsBaselineForgiveness(1)
+  ApplyForgiveness{}
+  RestoreSoundBaseline{5}
+  settingsDirty = optionsDirtyAtEntry
+End Statement
+
+;; THE OVERLAY'S ROWS. The title's menu, the options page and the pause menu are each a few rows of text. A page is cleared and drawn
+;; whole only when the screen on it is not the one wanted (or the title's score or start line changed: pageStaticKey$), because the clear
+;; alone is about 100 raster lines and a whole page 170 or more, enough to make a cursor move visibly slow. Otherwise only the rows that
+;; differ from what the page was last drawn with are redrawn (pageRowKey$: the row's text and whether the cursor is on it, compared as a
+;; string), each by erasing and redrawing its 8 px band. A page is brought up to date whenever it is the hidden one, so each of the two
+;; keeps its own record (pageScreenDrawn), and anything else that draws on the back bitmap marks both pages unknown (TakeBackAsCanvas{};
+;; the jukebox sets the page it draws).
+
+; How many rows a screen has.
+Function.w OverlayRowCount{screenKind.w}
+  rowCount.w = 0
+  If screenKind = #SCREEN_TITLE Then rowCount = #TITLE_ROWS
+  If screenKind = #SCREEN_OPTIONS Then rowCount = #OPTIONS_ROWS
+  If screenKind = #SCREEN_PAUSE Then rowCount = #PAUSE_ROWS
+  If screenKind = #SCREEN_CONTINUE Then rowCount = #CONTINUE_ROWS
+  If screenKind = #SCREEN_PALETTE Then rowCount = #PAL_PAGE_ROWS
+  Function Return rowCount
+End Function
+
+; A row's label and its value (the title's rows are all label: "LEVEL 1-1" is one text).
+Function.s OverlayRowLabel{screenKind.w, rowIndex.w}
+  SHARED startLevelChosen, paletteChoice, paletteBaseline
+  labelText$ = ""
+  If screenKind = #SCREEN_TITLE
+    If rowIndex = 0 Then labelText$ = "1 PLAYER GAME"
+    If rowIndex = #TITLE_LEVEL Then labelText$ = "LEVEL " + LevelNameText{startLevelChosen}
+    If rowIndex = #TITLE_OPTIONS Then labelText$ = "OPTIONS"
+  EndIf
+  If screenKind = #SCREEN_OPTIONS
+    If rowIndex = #OPT_KEYBOARD Then labelText$ = "KEYBOARD"
+    If rowIndex = #OPT_JOYSTICK Then labelText$ = "JOYSTICK"
+    If rowIndex = #OPT_KEYS Then labelText$ = "REDEFINE KEYS"
+    If rowIndex = #OPT_JUMP_BUFFER Then labelText$ = "JUMP BUFFER"
+    If rowIndex = #OPT_COYOTE Then labelText$ = "COYOTE TIME"
+    If rowIndex = #OPT_CONTINUES Then labelText$ = "CONTINUES"
+    If rowIndex = #OPT_SOUND Then labelText$ = "SOUND"
+    If rowIndex = #OPT_PALETTE Then labelText$ = "PALETTE"
+    If rowIndex = #OPT_DEFAULTS Then labelText$ = "DEFAULTS"
+    If rowIndex = #OPT_BACK
+      labelText$ = "BACK"
+      If OptionsChanged{} <> False Then labelText$ = "SAVE AND BACK"
+    EndIf
+  EndIf
+  If screenKind = #SCREEN_PAUSE
+    If rowIndex = #PAUSE_RESUME Then labelText$ = "RESUME"
+    If rowIndex = #PAUSE_OPTIONS Then labelText$ = "OPTIONS"
+    If rowIndex = #PAUSE_QUIT Then labelText$ = "QUIT TO TITLE"
+  EndIf
+  If screenKind = #SCREEN_CONTINUE
+    If rowIndex = #CONTINUE_YES Then labelText$ = "YES"
+    If rowIndex = #CONTINUE_NO Then labelText$ = "NO"
+  EndIf
+  ;; The palette page: the palette's name is the first row's label (up to 26 glyphs from the label's column, too long for the value's),
+  ;; and BACK says SAVE AND BACK while the choice differs from the one the page opened with, as the jukebox's does.
+  If screenKind = #SCREEN_PALETTE
+    If rowIndex = #PAL_PAGE_CHOICE Then labelText$ = PaletteChoiceName{paletteChoice}
+    If rowIndex = #PAL_PAGE_LOOK Then labelText$ = "LOOK"
+    If rowIndex = #PAL_PAGE_MARIO Then labelText$ = "MARIO"
+    If rowIndex = #PAL_PAGE_BACK
+      labelText$ = "BACK"
+      If paletteChoice <> paletteBaseline Then labelText$ = "SAVE AND BACK"
+    EndIf
+  EndIf
+  Function Return labelText$
+End Function
+
+Function.s OverlayRowValue{screenKind.w, rowIndex.w}
+  SHARED keyboardMode, joystickMode, forgivenessLevel(), forgivenessName$(), paletteChoice, paletteBaseline, paletteLook, paletteMarioMode
+  SHARED paletteLookName$(), paletteMarioName$(), continuesChoice, continuesName$()
+  valueText$ = ""
+  If screenKind = #SCREEN_OPTIONS
+    If rowIndex = #OPT_KEYBOARD
+      valueText$ = "2 KEY"
+      If keyboardMode = #KEYBOARD_THREE_KEY Then valueText$ = "3 KEY"
+    EndIf
+    If rowIndex = #OPT_JOYSTICK
+      valueText$ = "2 BUTTON"
+      If joystickMode = #JOYSTICK_ONE_BUTTON Then valueText$ = "1 BUTTON"
+    EndIf
+    If rowIndex = #OPT_JUMP_BUFFER Then valueText$ = forgivenessName$(forgivenessLevel(#FORGIVENESS_BUFFER))
+    If rowIndex = #OPT_COYOTE Then valueText$ = forgivenessName$(forgivenessLevel(#FORGIVENESS_COYOTE))
+    If rowIndex = #OPT_CONTINUES Then valueText$ = continuesName$(continuesChoice)
+    If rowIndex = #OPT_SOUND Then valueText$ = "JUKEBOX"
+    ; The palette's name, cut to the value's column's room (19 glyphs to the view's edge).
+    If rowIndex = #OPT_PALETTE Then valueText$ = Left$(PaletteChoiceName{paletteChoice}, (#VIEW_W - #MENU_VALUE_X)/8)
+    If rowIndex = #OPT_BACK
+      If OptionsChanged{} <> False Then valueText$ = DiscardHint{}
+    EndIf
+  EndIf
+  If screenKind = #SCREEN_PALETTE
+    If rowIndex = #PAL_PAGE_LOOK Then valueText$ = paletteLookName$(paletteLook)
+    If rowIndex = #PAL_PAGE_MARIO Then valueText$ = paletteMarioName$(paletteMarioMode)
+    If rowIndex = #PAL_PAGE_BACK
+      If paletteChoice <> paletteBaseline Then valueText$ = DiscardHint{}
+    EndIf
+  EndIf
+  Function Return valueText$
+End Function
+
+; What decides whether a row is drawn as it was: the cursor mark, the label and the value.
+Function.s OverlayRowKey{screenKind.w, rowIndex.w}
+  SHARED titleCursor, optionsCursor, pauseCursor, paletteCursor, continueCursor
+  chosenRow.w = -1
+  If screenKind = #SCREEN_CONTINUE Then chosenRow = continueCursor
+  If screenKind = #SCREEN_PALETTE Then chosenRow = paletteCursor
+  If screenKind = #SCREEN_TITLE Then chosenRow = titleCursor
+  If screenKind = #SCREEN_OPTIONS Then chosenRow = optionsCursor
+  If screenKind = #SCREEN_PAUSE Then chosenRow = pauseCursor
+  cursorMark$ = "-"
+  If rowIndex = chosenRow Then cursorMark$ = "*"
+  Function Return cursorMark$ + OverlayRowLabel{screenKind, rowIndex} + "|" + OverlayRowValue{screenKind, rowIndex}
+End Function
+
+;; One row, at its place on the page at pageX: with erase set (a page drawn up to date, not whole), its 8 px band first made what is behind
+;; it (the title's panel: the centre pen inside its edges; the others: clear). The mushroom beside the chosen row, the label, the value.
+Statement DrawOverlayRow{screenKind.w, rowIndex.w, pageX.w, erase.w}
+  SHARED titleCursor, optionsCursor, pauseCursor, glyphOverBackground, panelOffsetX, panelCachedW, paletteCursor, continueCursor
+  ; The continue screen's two rows: centred as a block under CONTINUE, the mushroom beside the chosen one.
+  If screenKind = #SCREEN_CONTINUE
+    continueRowY.w = #CONTINUE_ROWS_Y + rowIndex*#TITLE_LINE
+    continueX.w = pageX + (#VIEW_W - #CONTINUE_MENU_W)/2
+    If erase <> False Then Boxf pageX, continueRowY, pageX + #VIEW_W - 1, continueRowY + 7, 0
+    If rowIndex = continueCursor Then DrawGlyphInto{#BACK_BM, #HUD_G_MENU_CURSOR, continueX, continueRowY}
+    DrawTextInto{#BACK_BM, OverlayRowLabel{screenKind, rowIndex}, continueX + 16, continueRowY}
+    Statement Return
+  EndIf
+  If screenKind = #SCREEN_TITLE
+    rowY.w = #TITLE_MENU_Y + rowIndex*#TITLE_LINE
+    menuX.w = pageX + (#VIEW_W - #TITLE_MENU_W)/2
+    If erase <> False
+      Boxf pageX + panelOffsetX + #PANEL_TILE, rowY, pageX + panelOffsetX + panelCachedW - #PANEL_TILE - 1, rowY + 7, #PANEL_CENTRE_PEN
+    EndIf
+    ; The text goes over the panel: its glyphs do not clear the cell they are in, or the panel would be gone behind each letter.
+    glyphOverBackground = True
+    If rowIndex = titleCursor Then DrawGlyphInto{#BACK_BM, #HUD_G_MENU_CURSOR, menuX, rowY}
+    DrawTextInto{#BACK_BM, OverlayRowLabel{screenKind, rowIndex}, menuX + 16, rowY}
+    glyphOverBackground = False
+  Else
+    rowY = #MENU_ROWS_Y + rowIndex*#TITLE_LINE
+    If erase <> False Then Boxf pageX, rowY, pageX + #VIEW_W - 1, rowY + 7, 0
+    chosenRow.w = optionsCursor
+    If screenKind = #SCREEN_PAUSE Then chosenRow = pauseCursor
+    If screenKind = #SCREEN_PALETTE Then chosenRow = paletteCursor
+    If rowIndex = chosenRow Then DrawGlyphInto{#BACK_BM, #HUD_G_MENU_CURSOR, pageX + #MENU_CURSOR_X, rowY}
+    DrawTextInto{#BACK_BM, OverlayRowLabel{screenKind, rowIndex}, pageX + #MENU_LABEL_X, rowY}
+    DrawTextInto{#BACK_BM, OverlayRowValue{screenKind, rowIndex}, pageX + #MENU_VALUE_X, rowY}
+  EndIf
+End Statement
+
+; What the page holds besides its rows, as a string that changes when it must be drawn whole again: the title's best score and start line.
+Function.s OverlayStaticKey{screenKind.w}
+  SHARED hudTopScore
+  staticKey$ = ""
+  If screenKind = #SCREEN_TITLE Then staticKey$ = Str$(hudTopScore) + "|" + StartPromptText{}
+  Function Return staticKey$
+End Function
+
+;; What a page has besides its rows: the title's logo, panel, best score and start line; the options page's heading and hint; the pause
+;; menu's heading. (The panel is made first: the rows are drawn over it.)
+Statement DrawOverlayStatic{screenKind.w, pageX.w}
+  SHARED hudTopScore, glyphOverBackground
+  If screenKind = #SCREEN_TITLE
+    Blit #LOGO_SHAPE, pageX + (#VIEW_W - #LOGO_W)/2, 48
+    scoreRowY.w = #TITLE_MENU_Y + (#TITLE_ROWS - 1)*#TITLE_LINE + #TITLE_GAP
+    promptRowY.w = scoreRowY + #TITLE_GAP
+    scoreLabel$ = "TOP - "
+    ; The widest line, for the panel behind them: the menu with its cursor, the best score (its label and six digits), or the start line.
+    widestText.w = #TITLE_MENU_W
+    If (Len(scoreLabel$) + 6)*8 > widestText Then widestText = (Len(scoreLabel$) + 6)*8
+    If Len(StartPromptText{})*8 > widestText Then widestText = Len(StartPromptText{})*8
+    DrawTitlePanel{pageX, widestText, #TITLE_MENU_Y - #PANEL_PAD_Y, promptRowY + 8 + #PANEL_PAD_Y - 1}
+    glyphOverBackground = True
+    scoreX.w = pageX + (#VIEW_W - (Len(scoreLabel$) + 6)*8)/2
+    DrawTextInto{#BACK_BM, scoreLabel$, scoreX, scoreRowY}
+    DrawNumberInto{#BACK_BM, hudTopScore, 6, scoreX + Len(scoreLabel$)*8, scoreRowY}
+    DrawTextCentredAt{#BACK_BM, StartPromptText{}, pageX, promptRowY}
+    glyphOverBackground = False
+  EndIf
+  If screenKind = #SCREEN_OPTIONS
+    DrawTextCentredAt{#BACK_BM, "OPTIONS", pageX, #MENU_HEADING_Y}
+    DrawTextCentredAt{#BACK_BM, "LEFT-RIGHT TO CHANGE", pageX, #MENU_HINT_Y}
+  EndIf
+  If screenKind = #SCREEN_PAUSE Then DrawTextCentredAt{#BACK_BM, "PAUSED", pageX, #MENU_HEADING_Y}
+  ;; The continue screen: GAME OVER, CONTINUE and how many are left (nothing for INFINITE). The count does not change while the screen
+  ;; is up, so it needs no static key.
+  If screenKind = #SCREEN_CONTINUE
+    DrawTextCentredAt{#BACK_BM, "GAME OVER", pageX, #CONTINUE_HEADING_Y}
+    DrawTextCentredAt{#BACK_BM, "CONTINUE", pageX, #CONTINUE_ASK_Y}
+    continuesNow.w = ContinuesLeft{}
+    If continuesNow > 0 Then DrawTextCentredAt{#BACK_BM, Str$(continuesNow) + " LEFT", pageX, #CONTINUE_LEFT_Y}
+  EndIf
+  If screenKind = #SCREEN_PALETTE Then DrawTextCentredAt{#BACK_BM, "PALETTE", pageX, #MENU_HEADING_Y}
+End Statement
+
+;; A page for the screen wanted: whole (cleared, its static part, every row) when the screen on it is not that one or its static key changed, else
+;; only the rows that differ from what it was last drawn with (see THE OVERLAY'S ROWS above). A whole page about 170 lines; a row a few.
+Statement DrawOverlayPage{pageIndex.w}
+  SHARED overlayScreenWanted, pageScreenDrawn(), pageRowKey$(), pageStaticKey$()
+  pageX.w = OverlayPageX{pageIndex}
+  Use BitMap #BACK_BM
+  staticKey$ = OverlayStaticKey{overlayScreenWanted}
+  upToDate.w = False
+  If pageScreenDrawn(pageIndex) = overlayScreenWanted
+    If pageStaticKey$(pageIndex) = staticKey$ Then upToDate = True
+  EndIf
+  If upToDate = False
+    ; The whole page, the rows above the view too (a tall list can show them, and they may hold the HUD's copy or a strip).
+    Boxf pageX, 0, pageX + #OVERLAY_PAGE_W - 1, #WORLD_H - 1, 0
+    DrawOverlayStatic{overlayScreenWanted, pageX}
+  EndIf
+  For rowIndex.w = 0 To OverlayRowCount{overlayScreenWanted} - 1
+    rowKey$ = OverlayRowKey{overlayScreenWanted, rowIndex}
+    If upToDate = False OR rowKey$ <> pageRowKey$(pageIndex*#OVERLAY_ROWS_MAX + rowIndex)
+      DrawOverlayRow{overlayScreenWanted, rowIndex, pageX, upToDate}
+      pageRowKey$(pageIndex*#OVERLAY_ROWS_MAX + rowIndex) = rowKey$
+    EndIf
+  Next
+  pageScreenDrawn(pageIndex) = overlayScreenWanted
+  pageStaticKey$(pageIndex) = staticKey$
+End Statement
+
+;; Once a frame from the main loop, before the VWait. A change (another screen wanted, or
+;; overlayDirty set by a menu's keys) is drawn whole on the page that is not shown, which the main
+;; loop then shows, with the front and the palette for that screen (overlayScreenShown is set here,
+;; with the page). Nothing is ever drawn on the page being displayed, so nothing flickers; the
+;; other page is out of date until the next change draws over it before it is shown.
+Statement UpdateOverlayPages{}
+  SHARED coverKind, overlayDirty, overlayPageShown, overlayBackX, overlayScreenWanted
+  SHARED overlayScreenShown
+  If coverKind <> #COVER_TITLE AND coverKind <> #COVER_MENU
+    overlayDirty = False
+    Statement Return
+  EndIf
+  If overlayScreenWanted = #SCREEN_NONE Then Statement Return
+  ;; The jukebox changes every frame (the hopping characters), so it is drawn a part at a time, whether
+  ;; or not anything marked the page, and by the main loop right after the vertical blank
+  ;; (UpdateJukeboxPage{}), not here.
+  If overlayScreenWanted = #SCREEN_JUKEBOX Then Statement Return
+  If overlayScreenWanted <> overlayScreenShown Then overlayDirty = True
+  If overlayDirty = False Then Statement Return
+  hiddenPage.w = 1 - overlayPageShown
+  DrawOverlayPage{hiddenPage}
+  overlayPageShown = hiddenPage
+  overlayBackX = OverlayPageX{overlayPageShown}
+  overlayScreenShown = overlayScreenWanted
+  overlayDirty = False
+End Statement
+
+;; The attract mode's enemies, in place of the cartridge's demo play: the area's Goombas and Koopas
+;; built where the map puts them as the camera reaches them, as in play (ActivateGoombas{}, ActivateKoopas{}), walking (or a
+;; Paratroopa flapping) on the spot: only their animation steps, nothing moves or meets anything. Freed 64 px behind the camera,
+;; as in play. The pool and the spawn tables start again with each pass; the game's own reload clears them for play.
+Statement AttractEnemiesReset{}
+  PoolInit{}
+  ArmGoombas{0}
+  ArmKoopas{0}
+End Statement
+
+Statement AttractEnemies{}
+  SHARED objActive(), objType(), objX(), objAnimTimer(), objAnimFrame(), objSprite(), cameraX
+  ActivateGoombas{}
+  ActivateKoopas{}
+  For attractSlot.w = 0 To #MAX_OBJECTS - 1
+    If objActive(attractSlot) = True
+      If objX(attractSlot) < cameraX - 64
+        PoolFree{attractSlot}
+      Else
+        ; A Goomba's two-frame walk (UpdateObjects{}'s, without the walk); a Koopa's walk or a Paratroopa's flap.
+        If objType(attractSlot) = #OBJ_GOOMBA
+          objAnimTimer(attractSlot) = objAnimTimer(attractSlot) + 1
+          If objAnimTimer(attractSlot) >= #GOOMBA_ANIM_SPEED
+            objAnimTimer(attractSlot) = 0
+            objAnimFrame(attractSlot) = 1 - objAnimFrame(attractSlot)
+            objSprite(attractSlot) = #GOOMBA_F_WALK1 + objAnimFrame(attractSlot)
+          EndIf
+        EndIf
+        If objType(attractSlot) = #OBJ_KOOPA Then KoopaAnimStep{attractSlot}
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; Once per sim tick on the title (not while the redefine screen is up): the attract mode's camera
+;; It scrolls right #ATTRACT_STEP/256 px a tick to the level's
+;; end, holds on the castle, then a short black cover (the main loop shows the cover bitmap while
+;; the phase is #ATTRACT_BLANK, OverlayOverWorld{}) while it goes back to the start. No sim, no
+;; Mario (hidden); the enemies on the spot (AttractEnemies{}). cameraX and its fraction are set from
+;; the position, so BuildRenderView{} and the draw see an ordinary camera; the game's reload puts it back at 0.
+Statement AdvanceAttract{}
+  SHARED attractPhase, attractPosition, attractPauseTicks, cameraX, cameraFractionX, areaColumns
+  If attractPhase = #ATTRACT_OFF Then Statement Return
+  If attractPhase = #ATTRACT_SCROLL
+    ; In two steps: the end in 1/256 px is past a word. The area's own end, as the camera's (#MAP_W is the widest area's).
+    endPosition.l = areaColumns*#TILE - #VIEW_W
+    endPosition = endPosition*256
+    attractPosition = attractPosition + #ATTRACT_STEP
+    If attractPosition >= endPosition
+      attractPosition = endPosition
+      attractPhase = #ATTRACT_HOLD
+      attractPauseTicks = #ATTRACT_HOLD_TICKS
+    EndIf
+  Else
+    attractPauseTicks = attractPauseTicks - 1
+    If attractPauseTicks <= 0
+      If attractPhase = #ATTRACT_HOLD
+        ; The cover bitmap is not on screen at this point and may still hold the redefine screen, so clear it.
+        Use BitMap #COVER_BM
+        Cls 0
+        attractPhase = #ATTRACT_BLANK
+        attractPauseTicks = #ATTRACT_BLANK_TICKS
+      Else
+        attractPosition = -#SCROLL_BIAS*256
+        attractPhase = #ATTRACT_SCROLL
+        ; A new pass: the enemies from the start again, under the black cover.
+        AttractEnemiesReset{}
+      EndIf
+    EndIf
+  EndIf
+  ; Longs, so the division is a whole number of pixels.
+  wholePixels.l = attractPosition/256
+  cameraX = wholePixels
+  cameraFractionX = attractPosition - wholePixels*256
+  If attractPhase <> #ATTRACT_BLANK Then AttractEnemies{}
+End Statement
+
+;; The cover's picture, cleared and drawn once when it starts. The positions are the
+;; cartridge's (WorldLivesDisplay, 1646; IntermediatePlayerData, 14536) in 8 px
+;; steps, unmoved: the view is the cartridge's width.
+Statement DrawCoverScreen{coverNow.w}
+  SHARED playerLives, hudWorld, hudLevel
+  Use BitMap #COVER_BM
+  Cls 0
+  If coverNow = #COVER_LIVES
+    DrawTextInto{#COVER_BM, "WORLD " + Chr$(48 + hudWorld) + "-" + Chr$(48 + hudLevel), 88, 80}
+    ; The 15 colour look shows him as the hardware sprite (ShowMarioSprite{}); the NES art is a bob.
+    If #MARIO_SPRITE_COLOURS <> 15 Then Blit #PRE_SMALL_R + #MARIO_F_IDLE, #COVER_MARIO_X, #COVER_MARIO_Y
+    DrawGlyphInto{#COVER_BM, #HUD_G_X, 120, 112}
+    livesShown.w = playerLives + 1
+    If livesShown > 9
+      DrawGlyphInto{#COVER_BM, livesShown/10, 136, 112}
+      DrawGlyphInto{#COVER_BM, livesShown MOD 10, 144, 112}
+    Else
+      DrawGlyphInto{#COVER_BM, livesShown, 144, 112}
+    EndIf
+  EndIf
+  If coverNow = #COVER_TIMEUP Then DrawTextInto{#COVER_BM, "TIME UP", 96, 128}
+  If coverNow = #COVER_GAMEOVER Then DrawTextInto{#COVER_BM, "GAME OVER", 88, 128}
+  ; The end screen's text (the HUD glyphs have no full stop).
+  If coverNow = #COVER_END
+    DrawTextCentred{#COVER_BM, "THANK YOU FOR PLAYING!", 80}
+    DrawTextCentred{#COVER_BM, "WORLDS 1 AND 2 ARE DONE", 112}
+    DrawTextCentred{#COVER_BM, "MORE WORLDS ARE ON THE WAY", 128}
+    DrawTextCentred{#COVER_BM, StartPromptText{}, 176}
+  EndIf
+End Statement
+
+;; Write the settings file from the middle of the running display: out to Amiga mode without touching the
+;; display (QAMIGA), write, wait for the disk, back to Blitz mode.
+Statement SaveSettingsNow{}
+  SHARED settingsDirty
+  QAMIGA
+  writtenOk.w = WriteSettings{}
+  ; The wait is for the disk to take the file; a write that failed (a write-protected disk: no requester, SystemRequestersOff{}) has none.
+  If writtenOk <> False Then VWait #SAVE_DELAY_FRAMES
+  BLITZ
+  If writtenOk <> False Then settingsDirty = False
+End Statement
+
+;; A game has ended (the game over, the end screen, QUIT TO TITLE, Esc on a cover, F1): a top score above the one in the file is written,
+;; with whatever else is unwritten. Not at quitting, and not from a game still going (WriteSettings{} writes topScoreSaved). Not in debug
+;; mode or with the parameter levels either, as the level reached is not (BeginLevel{}): a score from F2's jumps and the debug keys is
+;; shown on the title for the run but not kept.
+Statement SaveTopScoreIfNew{}
+  SHARED hudTopScore, topScoreSaved, debugMode, allLevelsOpen
+  If hudTopScore <= topScoreSaved Then Statement Return
+  If debugMode <> False OR allLevelsOpen <> False Then Statement Return
+  topScoreSaved = hudTopScore
+  SaveSettingsNow{}
+End Statement
+
+;; The first raw key code (0 to #KEY_LAST) that is down now and was not down at the last call, or
+;; -1 if there is none. redefineKeyDown() keeps every key's state from the last call, so a key
+;; tapped while another is held (Ctrl held, Left Alt tapped) is a new press and counts.
+Function.w ScanNewKey{}
+  SHARED redefineKeyDown()
+  foundCode.w = -1
+  For scanCode.w = 0 To #KEY_LAST
+    downNow.w = RawStatus(scanCode)
+    If downNow <> False Then downNow = True
+    If downNow <> False AND redefineKeyDown(scanCode) = False AND foundCode < 0 Then foundCode = scanCode
+    redefineKeyDown(scanCode) = downNow
+  Next
+  Function Return foundCode
+End Function
+
+;; One row of the redefine list: the action, and its key (the new one once chosen, else the
+;; present one), with the mushroom beside the row being asked for.
+Statement DrawKeyRow{rowIndex.w}
+  SHARED redefineIndex, redefineMap(), keyMap(), keyNames$(), keyActionNames$()
+  rowY.w = #KEYS_LIST_Y + rowIndex*#TITLE_LINE
+  Use BitMap #COVER_BM
+  Boxf 0, rowY, #VIEW_W + 15, rowY + 7, 0
+  If rowIndex = redefineIndex Then DrawGlyphInto{#COVER_BM, #HUD_G_MENU_CURSOR, #KEYS_CURSOR_X, rowY}
+  DrawTextInto{#COVER_BM, keyActionNames$(rowIndex), #KEYS_ACTION_X, rowY}
+  keyShown.w = keyMap(rowIndex)
+  If rowIndex < redefineIndex Then keyShown = redefineMap(rowIndex)
+  DrawTextInto{#COVER_BM, keyNames$(keyShown), #KEYS_NAME_X, rowY}
+End Statement
+
+;; The y of the prompt block under the list (a gap below the last row: with eight rows the block's last line ends on row 231, inside the
+;; bitmap; #KEYS_LIST_Y), and that block cleared (to the bottom of the cover).
+Function.w KeysPromptY{}
+  Function Return #KEYS_LIST_Y + (#KEY_COUNT - 1)*#TITLE_LINE + #TITLE_GAP
+End Function
+
+Statement ClearKeysPrompt{}
+  clearY.w = KeysPromptY{}
+  Use BitMap #COVER_BM
+  Boxf 0, clearY, #VIEW_W + 15, #WORLD_H - 1, 0
+End Statement
+
+;; The rows under the list, cleared and drawn again: what is being asked for, a refusal if the
+;; last key was refused, and the way out.
+Statement DrawKeysPrompt{}
+  SHARED redefineIndex, redefineMessage$, keyActionNames$()
+  promptY.w = KeysPromptY{}
+  ClearKeysPrompt{}
+  DrawTextCentred{#COVER_BM, "PRESS KEY FOR " + keyActionNames$(redefineIndex), promptY}
+  DrawTextCentred{#COVER_BM, redefineMessage$, promptY + #TITLE_LINE}
+  DrawTextCentred{#COVER_BM, "ESC TO CANCEL", promptY + #TITLE_LINE + #TITLE_GAP}
+End Statement
+
+; The whole redefine screen, cleared and drawn once when it opens.
+Statement DrawKeysScreen{}
+  Use BitMap #COVER_BM
+  Cls 0
+  ; The heading on row 32, the first the display shows (#VIEW_TOP).
+  DrawTextCentred{#COVER_BM, "REDEFINE KEYS", #KEYS_LIST_Y - #TITLE_LINE}
+  For rowIndex.w = 0 To #KEY_COUNT - 1
+    DrawKeyRow{rowIndex}
+  Next
+  DrawKeysPrompt{}
+End Statement
+
+; REDEFINE KEYS on the options page: the actions (left, right, jump, down, run, fire, up, pause) are asked for in turn.
+Statement StartRedefine{}
+  SHARED redefineActive, redefineIndex, redefineMessage$, redefineMap(), keyMap()
+  For index.w = 0 To #KEY_COUNT - 1
+    redefineMap(index) = keyMap(index)
+  Next
+  redefineActive = True
+  redefineIndex = 0
+  ;; The Return that opened the screen is still down: this scan records it (and every other key
+  ;; held now) as already down, so only a key pressed after this counts.
+  snapshotKey.w = ScanNewKey{}
+  redefineMessage$ = ""
+  DrawKeysScreen{}
+End Statement
+
+;; Back to the options page: the overlay's pages were not touched, so the main loop just shows
+;; them again, over the cover cleared to black; a key held now (Return, or the key that ended the
+;; last row) must not choose a row.
+Statement EndRedefine{}
+  SHARED redefineActive, coverStartHeld, menuAxisHeld()
+  redefineActive = False
+  Use BitMap #COVER_BM
+  Cls 0
+  coverStartHeld = ScreenStartDown{}
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = 0
+End Statement
+
+;; All chosen: they become the keys and the options return. They are written, like every change on the
+;; options page, when the page's BACK is chosen, and put back by its Esc.
+Statement CommitRedefine{}
+  SHARED redefineMap(), keyMap(), settingsDirty
+  For index.w = 0 To #KEY_COUNT - 1
+    keyMap(index) = redefineMap(index)
+  Next
+  settingsDirty = True
+  EndRedefine{}
+End Statement
+
+;; Once per sim tick while the redefine screen is up: one fresh key press at a time. Esc cancels
+;; (and is guarded, so the same press does not also quit); Return, F1 to F3 and Caps Lock are the
+;; game's own and are refused, as is a key already given to an earlier action.
+Statement UpdateRedefine{}
+  SHARED redefineIndex, redefineMessage$, redefineMap(), escapeGuard
+  pressedCode.w = ScanNewKey{}
+  If pressedCode < 0 Then Statement Return
+  If pressedCode = #RAW_KEY_ESC
+    escapeGuard = True
+    EndRedefine{}
+    Statement Return
+  EndIf
+  If KeyAllowed{pressedCode} = False
+    redefineMessage$ = "THAT KEY IS RESERVED"
+    DrawKeysPrompt{}
+    Statement Return
+  EndIf
+  For earlier.w = 0 To redefineIndex - 1
+    If redefineMap(earlier) = pressedCode
+      ; UP may be the JUMP key (KeysUsable{}): the stick's up is both in the one button choice, and climbing does not read jump.
+      If earlier <> #KEY_JUMP OR redefineIndex <> #KEY_UP
+        redefineMessage$ = "KEY ALREADY USED"
+        DrawKeysPrompt{}
+        Statement Return
+      EndIf
+    EndIf
+  Next
+  redefineMap(redefineIndex) = pressedCode
+  redefineMessage$ = ""
+  askedRow.w = redefineIndex
+  redefineIndex = redefineIndex + 1
+  DrawKeyRow{askedRow}
+  If redefineIndex >= #KEY_COUNT
+    CommitRedefine{}
+  Else
+    DrawKeyRow{redefineIndex}
+    DrawKeysPrompt{}
+  EndIf
+End Statement
+
+;; Put a cover's content and timer in place (no display change): the first
+;; showing, and each step of a chain.
+Statement SetCover{coverNow.w}
+  SHARED coverKind, coverTimer, coverNext, coverStartHeld, coverShownAt, coverClockPending
+  DrawCoverScreen{coverNow}
+  coverKind = coverNow
+  coverTimer = CoverTicksFor{coverNow}
+  coverShownAt = ReadTimeOfDay{}
+  coverClockPending = True
+  coverNext = #COVER_NONE
+  ;; A Return held now (from the last screen, or through a cover that cannot be
+  ;; skipped) must not skip this one: it counts only once it has been let go.
+  coverStartHeld = ScreenStartDown{}
+End Statement
+
+;; The cover's frame on screen: the cover bitmap on the back's display with its band and its palette,
+;; then two frames so it is really there. The caller sets the overlay's front first, as needed.
+;; The palette first, then a VWait, then the picture: the colours are written past the HUD list's palette load (UpdatePalette{} waits
+;; for #PALETTE_SAFE_LINE), so they start with the next frame, while the bitmap pointers, the band and the All-Stars sky's strings act on
+;; the Copper's pass at once. Written in that order, all of them change on the frame after the VWait. The other way round, the frame it
+;; is called in would show the cover in the world's colours with the back's hills at its x 0, and the sky's bands part way down the old
+;; world: a flash of scenery.
+;; If the tall list (list 2, the HUD away) is the one on show (Mario was up above the picture when the cover was asked for: a vine took
+;; him out of the top), the cover goes on it too, in its palette, and the HUD and world lists are put back (CreateDisplay takes effect
+;; at the next frame, which the two frames below give): else the tall list stays on screen and the area is seen being built behind it.
+Statement PresentCoverFrame{}
+  SHARED hudAwayShown, hudAwayWanted, bandLastHillBlock
+  UpdatePalette{}
+  VWait
+  HideMarioSpriteNow{}
+  DisplayBitMap 1, #COVER_BM, #SCROLL_BIAS, #VIEW_TOP, #BACK_BM, BackViewX{0}, #VIEW_TOP
+  If hudAwayShown <> False
+    GiveAwayListPage{#COVER_BM, #SCROLL_BIAS, BackViewX{0}}
+    hudAwayWanted = False
+  EndIf
+  UpdateBand{#SCROLL_BIAS, BackViewX{0}, BackViewX{0}}
+  ShowAllStarsSky{}
+  If hudAwayShown <> False
+    CreateDisplay 0, 1
+    hudAwayShown = False
+    ; The rebuilt lists start from their built strings: the next frame pokes the pointers again.
+    bandLastHillBlock = -1
+  EndIf
+  VWait
+  VWait
+End Statement
+
+;; Cover the screen NOW, before anything heavy: the content, the display and the
+;; palette (pen 0 black), then two frames so it is really on screen. The caller does
+;; its reload after this returns and may set coverNext for a chain. The status bar
+;; is not covered.
+Statement ShowCover{coverNow.w}
+  SHARED gamePaused, backHoldsOverlay, attractPhase, overlayScreenWanted, overlayScreenShown
+  SHARED overlayDirty, coverShownAt
+  ; Whatever put a cover up (F1 while paused) ends the pause.
+  gamePaused = False
+  MarkTransition{"ShowCover: begin"}
+  SetCover{coverNow}
+  MarkTransition{"ShowCover: cover drawn"}
+  SoundMute{}
+  PresentCoverFrame{}
+  ;; The hold counts from here, with the cover on screen (CoverTicksLeft{}), not from SetCover{}'s draw: the VWaits while presenting it
+  ;; are not time spent behind it. A cover chained by UpdateCover{} is on screen the frame SetCover{} draws it.
+  coverShownAt = ReadTimeOfDay{}
+  MarkTransition{"ShowCover: on screen (after two VWaits)"}
+  ;; Leaving the overlay (the title's Return, F1, QUIT TO TITLE; even during the attract mode's
+  ;; black cover): the back goes behind the front again and its clouds and hills are stamped back
+  ;; over the overlay's pages, here behind the cover, where the cover's palette keeps the back
+  ;; unseen (a few frames: the strip being rebuilt can be seen otherwise). The attract mode stops.
+  If backHoldsOverlay <> False
+    SetOverlayFront{False}
+    RestoreBackStrip{}
+    backHoldsOverlay = False
+    attractPhase = #ATTRACT_OFF
+    overlayScreenWanted = #SCREEN_NONE
+    overlayScreenShown = #SCREEN_NONE
+    overlayDirty = False
+    MarkTransition{"ShowCover: the overlay gone, the back strip stamped"}
+  EndIf
+End Statement
+
+;; The title, over 1-1 with the attract mode's camera, behind the cover now up (the start, or a
+;; new game): the level's state reset (ResetLevel{}, no stamping), Mario hidden, both world
+;; bitmaps stamped and the clouds and hills stamped into them (the back is the title's canvas),
+;; then the title drawn on a page. It is a cover kind (the sim paused, UpdateCover{} for its keys
+;; and the camera) but not a cover picture: the next frame the main loop shows the world with the page and
+;; brings the back in front (SetOverlayFront{}), and the palette has the world's colours. Ended by
+;; ShowCover{}: Return (#LIFE_START_GAME, the lives cover and the game's reload) or F1. Left out
+;; of the frame time report, as a reload is.
+Statement ShowTitle{}
+  SHARED coverKind, coverTimer, coverStartHeld, overlayPageShown, overlayBackX
+  SHARED overlayDirty, menuAxisHeld(), drawBitmap, drawBuffer, playerHidden, playerStarIntervals
+  SHARED attractPhase, attractPosition, attractPauseTicks, backHoldsOverlay
+  SHARED frameTimePrimed, frameTimeRestarts, overlayScreenWanted, overlayScreenShown
+  SHARED titleCursor
+  MarkTransition{"ShowTitle: begin"}
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+  ;; StampBothPlayfields{} reassigns drawBitmap and drawBuffer: the main loop's pair is put back
+  ;; (as RestartLevel{} does).
+  keepBitmap.w = drawBitmap
+  keepBuffer.w = drawBuffer
+  ResetLevel{}
+  playerStarIntervals = 0
+  playerHidden = True
+  EnsureTileSet{}
+  StampBothPlayfields{}
+  StampAttractScenery{}
+  drawBitmap = keepBitmap
+  drawBuffer = keepBuffer
+  ; Start at the lead-in so the front x handed to the display is never negative; a negative x puts the band's parts a pixel off.
+  attractPosition = -#SCROLL_BIAS*256
+  attractPauseTicks = 0
+  attractPhase = #ATTRACT_SCROLL
+  AttractEnemiesReset{}
+  MarkTransition{"ShowTitle: the level and the scenery stamped"}
+  backHoldsOverlay = True
+  TakeBackAsCanvas{}
+  titleCursor = 0
+  overlayScreenWanted = #SCREEN_TITLE
+  DrawOverlayPage{0}
+  overlayPageShown = 0
+  overlayBackX = OverlayPageX{0}
+  overlayScreenShown = #SCREEN_TITLE
+  overlayDirty = False
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = 0
+  coverKind = #COVER_TITLE
+  coverTimer = CoverTicksFor{#COVER_TITLE}
+  coverStartHeld = ScreenStartDown{}
+  MarkTransition{"ShowTitle: the title drawn"}
+End Statement
+
+;; A menu's direction on one axis (#MENU_AXIS_*), once for each press: the direction held now
+;; (-1, 0 or 1) when it differs from the last tick's and is not 0, else 0. The one press rule for
+;; both axes.
+Function.w MenuAxisPressed{axisIndex.w, directionNow.w}
+  SHARED menuAxisHeld()
+  pressedNow.w = 0
+  If directionNow <> 0 AND directionNow <> menuAxisHeld(axisIndex) Then pressedNow = directionNow
+  menuAxisHeld(axisIndex) = directionNow
+  Function Return pressedNow
+End Function
+
+; Up and down held now (the arrow keys, or the stick: JoystickAxis{}): -1 up, 1 down, 0 none.
+Function.w MenuVerticalHeld{}
+  directionNow.w = JoystickAxis{#MENU_AXIS_VERTICAL}
+  If RawStatus(#RAW_KEY_DOWN) <> False Then directionNow = 1
+  If RawStatus(#RAW_KEY_UP) <> False Then directionNow = -1
+  Function Return directionNow
+End Function
+
+; Up and down on a menu, once for each press: -1 up, 1 down, 0 none.
+Function.w MenuVerticalPressed{}
+  Function Return MenuAxisPressed{#MENU_AXIS_VERTICAL, MenuVerticalHeld{}}
+End Function
+
+; Left and right on a menu: -1 left, 1 right, 0 none.
+Function.w MenuHorizontalPressed{}
+  directionNow.w = JoystickAxis{#MENU_AXIS_HORIZONTAL}
+  If RawStatus(#RAW_KEY_RIGHT) <> False Then directionNow = 1
+  If RawStatus(#RAW_KEY_LEFT) <> False Then directionNow = -1
+  Function Return MenuAxisPressed{#MENU_AXIS_HORIZONTAL, directionNow}
+End Function
+
+;; A fresh press of the screens' start (Return, either joystick button:
+;; ScreenStartDown{}): one held from before, from the screen that came before, does not count.
+Function.w MenuSelectPressed{}
+  SHARED coverStartHeld
+  startNow.w = ScreenStartDown{}
+  pressedNow.w = False
+  If startNow <> False AND coverStartHeld = False Then pressedNow = True
+  coverStartHeld = False
+  If startNow <> False Then coverStartHeld = True
+  Function Return pressedNow
+End Function
+
+;; Both pages and the front go out at once: nothing wanted or shown, the cover up with the back's colours
+;; hidden, two frames so it is really on screen (as the pause menu does). Before something changes the
+;; cover bitmap or the pages under an overlay page that is on show.
+Statement BlankOverlay{}
+  SHARED overlayScreenWanted, overlayScreenShown, overlayDirty, frameTimePrimed, frameTimeRestarts
+  overlayScreenWanted = #SCREEN_NONE
+  overlayScreenShown = #SCREEN_NONE
+  overlayDirty = False
+  SetOverlayFront{False}
+  PresentCoverFrame{}
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+End Statement
+
+;; The options page, from the title or the pause menu (returnTo, the #SCREEN_* it goes back to). The
+;; cover bitmap is the page's black, cleared here (it may still hold the redefine screen). What it opens
+;; with is its baseline.
+Statement OpenOptions{returnTo.w}
+  SHARED overlayScreenWanted, optionsCursor, optionsReturnTo, menuAxisHeld()
+  optionsReturnTo = returnTo
+  optionsCursor = #OPT_KEYBOARD
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  TakeOptionsBaseline{}
+  Use BitMap #COVER_BM
+  Cls 0
+  overlayScreenWanted = #SCREEN_OPTIONS
+End Statement
+
+;; Back to the options page from the jukebox: the cover black again, the cursor still on SOUND, and the
+;; page's baseline as it was (the jukebox's changes count as the options page's).
+Statement ReturnToOptions{}
+  SHARED overlayScreenWanted, menuAxisHeld(), coverStartHeld
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = 0
+  Use BitMap #COVER_BM
+  Cls 0
+  coverStartHeld = ScreenStartDown{}
+  overlayScreenWanted = #SCREEN_OPTIONS
+End Statement
+
+;; Leave the options page. BACK (keepChanges True) writes the settings file if anything differs or was left
+;; unwritten; Esc (False) puts back what the page opened with, the sound on the hardware too, and writes
+;; nothing.
+Statement LeaveOptions{keepChanges.w}
+  SHARED overlayScreenWanted, optionsReturnTo, settingsDirty
+  If keepChanges <> False
+    If OptionsChanged{} <> False OR settingsDirty <> False Then SaveSettingsNow{}
+  Else
+    If OptionsChanged{} <> False Then RestoreOptionsBaseline{}
+  EndIf
+  overlayScreenWanted = optionsReturnTo
+End Statement
+
+;; The options page's SOUND row opens the jukebox. It only asks: the work runs from HandleLifeEvent{} in the
+;; main loop (OpenJukeboxNow{}), so the two frames of VWait it takes do not stall the sim tick that asked.
+Statement OpenJukebox{}
+  SHARED jukeboxOpenWanted
+  jukeboxOpenWanted = True
+End Statement
+
+;; The jukebox, from the options page's SOUND row: the page and the front out (BlankOverlay{}), the
+;; backdrop (the scene of the song on the SONG row) copied in behind the black cover, the sound engine's state kept and a clean one started
+;; (SoundJukeboxBegin{}), the sound's settings as they are now the page's baseline, then the page wanted;
+;; UpdateOverlayPages{} draws it and the palette gives it its sky on the same frame.
+Statement OpenJukeboxNow{}
+  SHARED overlayScreenWanted, menuAxisHeld(), coverStartHeld, jukeboxCursor, jukeboxPlaying
+  SHARED jukeboxPending, jukeboxReadout$, jukeboxHopHeight(), jukeboxHopSpeed(), jukeboxBackChanged
+  SHARED jukeboxSong, jukeboxSceneShown, jukeboxSceneOfSong()
+  MarkTransition{"> the jukebox"}
+  BlankOverlay{}
+  ; The backdrop: the scene of the song on the SONG row, behind the black cover (ShowJukeboxScene{}).
+  Use BitMap #COVER_BM
+  Cls 0
+  jukeboxSceneShown = jukeboxSceneOfSong(jukeboxSong)
+  ShowJukeboxScene{}
+  SoundJukeboxBegin{}
+  TakeSoundBaseline{0}
+  jukeboxCursor = #JKB_SONG
+  jukeboxPlaying = -1
+  jukeboxPending = -1
+  jukeboxReadout$ = "SILENT"
+  jukeboxBackChanged = False
+  For channelIndex.w = 0 To 3
+    jukeboxHopHeight(channelIndex) = 0
+    jukeboxHopSpeed(channelIndex) = 0
+  Next
+  MarkAllJukeboxRows{}
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = 0
+  ; The Return that chose SOUND is still down: it must not choose a row at once.
+  coverStartHeld = ScreenStartDown{}
+  overlayScreenWanted = #SCREEN_JUKEBOX
+  MarkTransition{"jukebox: opened"}
+End Statement
+
+;; The options page's PALETTE row opens the palette page. It only asks, as the jukebox does: the work runs from
+;; HandleLifeEvent{} in the main loop (OpenPalettePageNow{}).
+Statement OpenPalettePage{}
+  SHARED paletteOpenWanted
+  paletteOpenWanted = True
+End Statement
+
+;; The palette page: the page and the front out (BlankOverlay{}), its scene stamped on the front behind the black cover, the choice it
+;; opens with kept (Esc puts it back), the ground look and normal Mario, then the page wanted; UpdateOverlayPages{} draws its rows and the
+;; palette gives it its colours (the look's backdrop in pen 0) on the same frame.
+Statement OpenPalettePageNow{}
+  SHARED overlayScreenWanted, menuAxisHeld(), coverStartHeld, paletteCursor, paletteLook, paletteMarioMode, paletteBaseline
+  SHARED paletteChoice, palettePageTicks
+  MarkTransition{"> the palette page"}
+  BlankOverlay{}
+  StampPaletteScene{}
+  paletteBaseline = paletteChoice
+  paletteCursor = #PAL_PAGE_CHOICE
+  paletteLook = 0
+  paletteMarioMode = 0
+  palettePageTicks = 0
+  menuAxisHeld(#MENU_AXIS_HORIZONTAL) = 0
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = 0
+  ; The Return that chose PALETTE is still down: it must not choose a row at once.
+  coverStartHeld = ScreenStartDown{}
+  overlayScreenWanted = #SCREEN_PALETTE
+End Statement
+
+;; A page's SAVE AND BACK commits what it changed (the palette page's and the jukebox's): its caller has made the change the options
+;; page's baseline, so that page's Esc does not undo it; here the settings are marked to be written at the next save (the options page's
+;; BACK, a game's start, the program's end), the options page's Esc included (optionsDirtyAtEntry, which its Esc puts back). They are
+;; not written now, because the file would also take the options page's own changes that have not been kept.
+Statement CommitToOptions{}
+  SHARED settingsDirty, optionsDirtyAtEntry
+  settingsDirty = True
+  optionsDirtyAtEntry = True
+End Statement
+
+;; Out of the palette page, back to the options page. BACK (keepChanges True: SAVE AND BACK) commits a changed choice (CommitToOptions{});
+;; Esc (False) puts back the choice the page opened with.
+Statement LeavePalettePage{keepChanges.w}
+  SHARED paletteChoice, paletteBaseline, optionsBaselinePalette
+  MarkTransition{"> out of the palette page"}
+  If paletteChoice <> paletteBaseline
+    If keepChanges = False
+      paletteChoice = paletteBaseline
+      ApplyNesPalette{paletteChoice}
+    Else
+      optionsBaselinePalette = paletteChoice
+      CommitToOptions{}
+    EndIf
+  EndIf
+  BlankOverlay{}
+  ReturnToOptions{}
+End Statement
+
+;; Out of the jukebox, back to the options page. BACK (keepChanges True) commits what was changed (written at
+;; the next save, below); Esc (False) puts the sound back as the jukebox found it. Either way the
+;; engine's own state comes back (SoundJukeboxEnd{}), so a game's music goes on where it was.
+Statement LeaveJukebox{keepChanges.w}
+  MarkTransition{"> out of the jukebox"}
+  If keepChanges = False Then RestoreSoundBaseline{0}
+  ; SAVE AND BACK commits what changed: the sound as it is now the options page's baseline too (CommitToOptions{}).
+  If keepChanges <> False
+    If SoundDiffersFromBaseline{5} <> False
+      TakeSoundBaseline{5}
+      CommitToOptions{}
+    EndIf
+  EndIf
+  SoundJukeboxEnd{}
+  BlankOverlay{}
+  ReturnToOptions{}
+End Statement
+
+;; Once per sim tick on the title: the attract mode's camera; up and down choose between the game
+;; and the options, and a fresh start chooses. The game: the main loop's HandleLifeEvent{} shows the
+;; lives cover, which takes the overlay down, and reloads the level (#LIFE_START_GAME).
+Statement UpdateTitleMenu{}
+  SHARED titleCursor, overlayDirty, lifeEvent, settingsDirty, startLevelChosen
+  AdvanceAttract{}
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    titleCursor = (titleCursor + moveNow + #TITLE_ROWS) MOD #TITLE_ROWS
+    overlayDirty = True
+  EndIf
+  ; LEVEL: left and right choose among the levels reached (every level in debug mode). A choice for this run, not a setting to save.
+  changeNow.w = MenuHorizontalPressed{}
+  If changeNow <> 0 AND titleCursor = #TITLE_LEVEL
+    startLevelNew.w = startLevelChosen + changeNow
+    If startLevelNew >= 0 AND startLevelNew <= StartLevelLimit{}
+      startLevelChosen = startLevelNew
+      overlayDirty = True
+    EndIf
+  EndIf
+  If MenuSelectPressed{} = False Then Statement Return
+  If titleCursor = #TITLE_OPTIONS
+    OpenOptions{#SCREEN_TITLE}
+  Else
+    If settingsDirty <> False Then SaveSettingsNow{}
+    lifeEvent = #LIFE_START_GAME
+  EndIf
+End Statement
+
+;; The options page's settings back to how the game comes: the controls and the keys, the two forgiveness
+;; levels, the continues (NONE) and the NES palette (#PALETTE_DEFAULT, the whole screen's colours at once). The sound has its own
+;; DEFAULTS, on the jukebox page.
+Statement RestoreDefaults{}
+  SHARED keyboardMode, joystickMode, forgivenessLevel(), paletteChoice, continuesChoice
+  keyboardMode = #KEYBOARD_TWO_KEY
+  joystickMode = #JOYSTICK_TWO_BUTTON
+  continuesChoice = #CONTINUES_DEFAULT
+  If paletteChoice <> #PALETTE_DEFAULT
+    paletteChoice = #PALETTE_DEFAULT
+    ApplyNesPalette{paletteChoice}
+  EndIf
+  SetDefaultKeys{}
+  forgivenessLevel(#FORGIVENESS_BUFFER) = #FORGIVENESS_DEFAULT
+  forgivenessLevel(#FORGIVENESS_COYOTE) = #FORGIVENESS_DEFAULT
+  ApplyForgiveness{}
+End Statement
+
+;; Once per sim tick on the options page: up and down choose a row, left and right change its value
+;; (redrawn at once), a fresh start on REDEFINE KEYS opens the redefine screen, on
+;; SOUND opens the jukebox, on PALETTE the palette page, on DEFAULTS puts the controls, keys, forgiveness, continues
+;; and palette back and on BACK saves and goes back; Esc goes back and discards what the page changed (LeaveOptions{}).
+;; What the jukebox and the palette page committed (CommitToOptions{}) is the page's baseline and stays.
+Statement UpdateOptionsMenu{}
+  SHARED optionsCursor, overlayDirty, menuEscape, settingsDirty, forgivenessLevel(), continuesChoice
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    optionsCursor = (optionsCursor + moveNow + #OPTIONS_ROWS) MOD #OPTIONS_ROWS
+    overlayDirty = True
+  EndIf
+  ;; Only a row whose value changes marks the settings to save and the page to draw: not
+  ;; REDEFINE KEYS, SOUND or BACK.
+  changeNow.w = MenuHorizontalPressed{}
+  If changeNow <> 0
+    valueChanged.w = False
+    If optionsCursor = #OPT_KEYBOARD
+      ChangeKeyboardMode{changeNow}
+      valueChanged = True
+    EndIf
+    If optionsCursor = #OPT_JOYSTICK
+      ChangeJoystickMode{changeNow}
+      valueChanged = True
+    EndIf
+    If optionsCursor >= #OPT_JUMP_BUFFER AND optionsCursor <= #OPT_COYOTE
+      forgivenessSetting.w = optionsCursor - #OPT_JUMP_BUFFER + #FORGIVENESS_BUFFER
+      levelNew.w = forgivenessLevel(forgivenessSetting) + changeNow
+      If levelNew >= 0 AND levelNew < #FORGIVENESS_LEVELS
+        forgivenessLevel(forgivenessSetting) = levelNew
+        ApplyForgiveness{}
+        valueChanged = True
+      EndIf
+    EndIf
+    ; CONTINUES steps through its choices without wrapping, as the forgiveness rows do.
+    If optionsCursor = #OPT_CONTINUES
+      choiceNew.w = continuesChoice + changeNow
+      If choiceNew >= 0 AND choiceNew < #CONTINUES_CHOICES
+        continuesChoice = choiceNew
+        valueChanged = True
+      EndIf
+    EndIf
+    If valueChanged <> False
+      settingsDirty = True
+      overlayDirty = True
+    EndIf
+  EndIf
+  selectNow.w = MenuSelectPressed{}
+  If menuEscape <> False
+    LeaveOptions{False}
+    Statement Return
+  EndIf
+  If selectNow = False Then Statement Return
+  If optionsCursor = #OPT_BACK
+    LeaveOptions{True}
+    Statement Return
+  EndIf
+  If optionsCursor = #OPT_SOUND
+    OpenJukebox{}
+    Statement Return
+  EndIf
+  If optionsCursor = #OPT_PALETTE
+    OpenPalettePage{}
+    Statement Return
+  EndIf
+  If optionsCursor = #OPT_DEFAULTS
+    RestoreDefaults{}
+    settingsDirty = True
+    overlayDirty = True
+  EndIf
+  If optionsCursor = #OPT_KEYS Then StartRedefine{}
+End Statement
+
+;; Once per sim tick on the jukebox page: a song waiting for the silence before it starts; up and down
+;; choose a row, left and right change its value, a fresh start acts on the SONG, EFFECT, DEFAULTS and BACK
+;; rows; Esc goes back and discards what the page changed. BACK keeps it (the options page's BACK writes).
+Statement UpdateJukeboxMenu{}
+  SHARED jukeboxCursor, menuEscape, jukeboxBackChanged
+  UpdateJukeboxSongState{}
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    MarkJukeboxCursor{jukeboxCursor}
+    jukeboxCursor = (jukeboxCursor + moveNow + #JKB_ROWS) MOD #JKB_ROWS
+    MarkJukeboxCursor{jukeboxCursor}
+  EndIf
+  changeNow.w = MenuHorizontalPressed{}
+  If changeNow <> 0 Then ChangeJukeboxRow{changeNow}
+  selectNow.w = MenuSelectPressed{}
+  If menuEscape <> False
+    LeaveJukebox{False}
+    Statement Return
+  EndIf
+  If selectNow = False Then Statement Return
+  If jukeboxCursor = #JKB_SONG Then PressJukeboxSong{}
+  If jukeboxCursor = #JKB_EFFECT Then PlayJukeboxEffect{}
+  If jukeboxCursor = #JKB_DEFAULTS
+    RestoreSoundDefaults{}
+    jukeboxBackChanged = SoundDiffersFromBaseline{0}
+    MarkAllJukeboxRows{}
+  EndIf
+  If jukeboxCursor = #JKB_BACK Then LeaveJukebox{True}
+End Statement
+
+;; Once per sim tick on the palette page: up and down choose a row; left and right change the palette (at once, on the whole screen), the
+;; look or Mario's colours to see it with; a fresh start on BACK keeps the choice and goes back; Esc goes back and puts the choice back.
+Statement UpdatePaletteMenu{}
+  SHARED paletteCursor, paletteChoice, paletteLook, paletteMarioMode, overlayDirty, menuEscape, palettePageTicks
+  ; The page's own sim ticks, for the glint and the Starman (UpdatePalette{}): this runs once a sim tick, as the game's sim would.
+  palettePageTicks = palettePageTicks + 1
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    paletteCursor = (paletteCursor + moveNow + #PAL_PAGE_ROWS) MOD #PAL_PAGE_ROWS
+    overlayDirty = True
+  EndIf
+  changeNow.w = MenuHorizontalPressed{}
+  If changeNow <> 0
+    If paletteCursor = #PAL_PAGE_CHOICE
+      ; Outside debug mode only the palettes a release keeps (PaletteChoiceAllowed{}).
+      paletteChoice = NextPaletteChoice{paletteChoice, changeNow}
+      ApplyNesPalette{paletteChoice}
+    EndIf
+    If paletteCursor = #PAL_PAGE_LOOK Then paletteLook = (paletteLook + changeNow + #PALETTE_LOOKS) MOD #PALETTE_LOOKS
+    If paletteCursor = #PAL_PAGE_MARIO Then paletteMarioMode = (paletteMarioMode + changeNow + #PALETTE_MARIO_MODES) MOD #PALETTE_MARIO_MODES
+    overlayDirty = True
+  EndIf
+  selectNow.w = MenuSelectPressed{}
+  If menuEscape <> False
+    LeavePalettePage{False}
+    Statement Return
+  EndIf
+  If selectNow = False Then Statement Return
+  If paletteCursor = #PAL_PAGE_BACK Then LeavePalettePage{True}
+End Statement
+
+;; A menu over the black cover (the pause menu, the continue screen): the cover up at once with the back's colours hidden
+;; (UpdatePalette{}), then the screen asked for is drawn on an overlay page and shown over the cover (UpdateOverlayPages{}), so its
+;; cursor moves with no flicker. The world's bitmaps are not touched. Whatever is held as it opens counts only once it is let go: the
+;; start (coverStartHeld), up or down (menuAxisHeld, seeded with the direction held now) and Esc (escapeGuard).
+Statement OpenMenuOverCover{screenKind.w}
+  SHARED coverKind, coverTimer, coverStartHeld, overlayScreenWanted, overlayScreenShown
+  SHARED overlayDirty, backHoldsOverlay, menuAxisHeld(), frameTimePrimed, frameTimeRestarts, escapeGuard
+  Use BitMap #COVER_BM
+  Cls 0
+  coverKind = #COVER_MENU
+  coverTimer = CoverTicksFor{#COVER_MENU}
+  overlayScreenWanted = #SCREEN_NONE
+  overlayScreenShown = #SCREEN_NONE
+  overlayDirty = False
+  SetOverlayFront{False}
+  PresentCoverFrame{}
+  backHoldsOverlay = True
+  TakeBackAsCanvas{}
+  menuAxisHeld(#MENU_AXIS_VERTICAL) = MenuVerticalHeld{}
+  overlayScreenWanted = screenKind
+  coverStartHeld = ScreenStartDown{}
+  escapeGuard = True
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+End Statement
+
+;; The pause menu. UpdatePause{} has paused the game (its tone,
+;; its lockout); the next frame, from HandleLifeEvent{}, this opens it over the black cover. Resuming
+;; needs no reload, only the back strip stamped again. The pause key (or play) that paused is still down:
+;; it must not resume at once (UpdatePause{}: a fresh press only, and the lockout).
+Statement OpenPauseMenu{}
+  SHARED pauseCursor
+  MarkTransition{"> the pause menu"}
+  SHARED pauseMenuResume
+  pauseCursor = #PAUSE_RESUME
+  pauseMenuResume = False
+  OpenMenuOverCover{#SCREEN_PAUSE}
+  MarkTransition{"pause menu: the cover up"}
+End Statement
+
+;; RESUME, or the pause key on the pause menu: the overlay taken down behind the black cover, the back strip
+;; stamped again (about 14 frames), and the game goes on where it was, with its music (the sound
+;; engine's resume tone, as UpdatePause{} would give) and the cartridge's lockout before the next
+;; pause.
+Statement ResumeFromMenu{}
+  SHARED coverKind, overlayScreenWanted, overlayScreenShown, overlayDirty, backHoldsOverlay
+  SHARED gamePaused, pauseTimer, frameTimePrimed, frameTimeRestarts
+  MarkTransition{"> resume from the pause menu"}
+  overlayScreenWanted = #SCREEN_NONE
+  overlayScreenShown = #SCREEN_NONE
+  overlayDirty = False
+  SetOverlayFront{False}
+  PresentCoverFrame{}
+  RestoreBackStrip{}
+  backHoldsOverlay = False
+  MarkTransition{"resume: the back strip stamped"}
+  coverKind = #COVER_NONE
+  gamePaused = False
+  SoundPause{2}
+  pauseTimer = #PAUSE_LOCKOUT_TICKS
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+End Statement
+
+;; Once per sim tick on the pause menu: up and down choose a row; a fresh start chooses it; the pause key (or a CD32 pad's play) resumes
+;; (pauseMenuResume, from UpdatePause{}), whichever row the cursor is on. Esc does nothing here (ReadControls{}).
+Statement UpdatePauseMenu{}
+  SHARED pauseCursor, overlayDirty, pauseMenuResume, lifeEvent
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    pauseCursor = (pauseCursor + moveNow + #PAUSE_ROWS) MOD #PAUSE_ROWS
+    overlayDirty = True
+  EndIf
+  selectNow.w = MenuSelectPressed{}
+  If pauseMenuResume <> False
+    pauseMenuResume = False
+    ResumeFromMenu{}
+    Statement Return
+  EndIf
+  If selectNow = False Then Statement Return
+  If pauseCursor = #PAUSE_RESUME
+    ResumeFromMenu{}
+    Statement Return
+  EndIf
+  If pauseCursor = #PAUSE_OPTIONS
+    OpenOptions{#SCREEN_PAUSE}
+    Statement Return
+  EndIf
+  ; QUIT TO TITLE: the score is kept as the best, then a new game and the title.
+  lifeEvent = #LIFE_TITLE
+End Statement
+
+;; The continue screen: a game over with continues left, over the black cover as the pause menu is. Nothing held
+;; through the death answers it (OpenMenuOverCover{}: a fire, a stick held down, a CD32 pad's blue), and it waits for the answer: no
+;; timeout. The game-over music plays on under it.
+Statement OpenContinueMenu{}
+  SHARED continueCursor
+  MarkTransition{"> the continue screen"}
+  continueCursor = #CONTINUE_YES
+  OpenMenuOverCover{#SCREEN_CONTINUE}
+  MarkTransition{"continue screen: the cover up"}
+End Statement
+
+;; Once per sim tick on the continue screen: up and down choose YES or NO, a fresh start picks. YES: a continue (ContinueGame{}) and then
+;; a respawn as after any death, from the death point (HandleLifeEvent{}: the lives cover, RestartLevel{False}); TIME UP was shown before
+;; the screen, so not again. NO: the game ends as QUIT TO TITLE ends it (the top score kept, a new game, the title). Esc does nothing here
+;; (ReadControls{}), so a stray press cannot end the game.
+Statement UpdateContinueMenu{}
+  SHARED continueCursor, overlayDirty, lifeEvent, timeUpDeath
+  moveNow.w = MenuVerticalPressed{}
+  If moveNow <> 0
+    continueCursor = (continueCursor + moveNow + #CONTINUE_ROWS) MOD #CONTINUE_ROWS
+    overlayDirty = True
+  EndIf
+  selectNow.w = MenuSelectPressed{}
+  If selectNow = False Then Statement Return
+  If continueCursor = #CONTINUE_YES
+    MarkTransition{"> continue: yes"}
+    ContinueGame{}
+    SoundEventMusic{#MUSIC_SILENCE}
+    timeUpDeath = False
+    lifeEvent = #LIFE_RESPAWN
+    Statement Return
+  EndIf
+  MarkTransition{"> continue: no"}
+  lifeEvent = #LIFE_TITLE
+End Statement
+
+;; Once per sim tick while a cover is up, from RunSimTicks{}. The title and the pause menu go to
+;; their menus. Any other ends when its time is up, or on a fresh Return for game over. A chain goes on to the
+;; next kind; game over ends in a new game, with the cover left up until the main
+;; loop replaces it; anything else just ends (the next frame shows the world and the
+;; level's palette together).
+Statement UpdateCover{}
+  SHARED coverKind, coverTimer, coverNext, coverStartHeld, lifeEvent, continueOpenWanted
+  SHARED redefineActive, frameTimePrimed, frameTimeRestarts, overlayScreenWanted, menuEscape
+  SHARED coverShownAt, coverClockPending, simStepNumerator, simStepDenominator
+  ;; The title and the pause menu: the menu on screen has the keys (the redefine screen, opened
+  ;; from the options, while it is up). They end through the menus, never by time.
+  If coverKind = #COVER_TITLE OR coverKind = #COVER_MENU
+    If redefineActive <> False
+      UpdateRedefine{}
+    Else
+      ; One screen per call: a menu can change the screen it is on, so the screen is read once.
+      screenNow.w = overlayScreenWanted
+      If screenNow = #SCREEN_TITLE Then UpdateTitleMenu{}
+      If screenNow = #SCREEN_OPTIONS Then UpdateOptionsMenu{}
+      If screenNow = #SCREEN_JUKEBOX Then UpdateJukeboxMenu{}
+      If screenNow = #SCREEN_PALETTE Then UpdatePaletteMenu{}
+      If screenNow = #SCREEN_PAUSE Then UpdatePauseMenu{}
+      If screenNow = #SCREEN_CONTINUE Then UpdateContinueMenu{}
+    EndIf
+    menuEscape = False
+    Statement Return
+  EndIf
+  ;; The first tick since the cover went up: the display frames spent behind it with no tick (the reload, the disk) come off its
+  ;; hold, as sim ticks (#SIM_HZ to the display's rate).
+  If coverClockPending <> False
+    coverClockPending = False
+    coverTimer = CoverTicksLeft{coverTimer, FramesSince{coverShownAt}*simStepNumerator/simStepDenominator}
+  EndIf
+  startNow.w = ScreenStartDown{}
+  If startNow = False Then coverStartHeld = False
+  If coverTimer > 0 Then coverTimer = coverTimer - 1
+  coverDone.w = False
+  If coverTimer = 0 Then coverDone = True
+  If coverKind = #COVER_GAMEOVER OR coverKind = #COVER_END
+    If startNow <> False AND coverStartHeld = False Then coverDone = True
+  EndIf
+  If coverDone = False Then Statement Return
+  If coverNext <> #COVER_NONE
+    If coverNext = #COVER_GAMEOVER OR coverNext = #COVER_CONTINUE Then SoundEventMusic{#MUSIC_GAME_OVER}
+    ;; The continue screen next (HandleLifeEvent{} chose it after TIME UP): not a cover, so it is asked for and opened by
+    ;; HandleLifeEvent{} before the next sim (opening it changes the display); the TIME UP cover stays up until then.
+    If coverNext = #COVER_CONTINUE
+      coverNext = #COVER_NONE
+      coverTimer = -1
+      continueOpenWanted = True
+      Statement Return
+    EndIf
+    SetCover{coverNext}
+    Statement Return
+  EndIf
+  ; The end screen ends as game over does: a new game, from the title (the score already kept as the best).
+  If coverKind = #COVER_GAMEOVER OR coverKind = #COVER_END
+    ; TerminateGame silences the music (smbdis 2978).
+    SoundEventMusic{#MUSIC_SILENCE}
+    lifeEvent = #LIFE_NEWGAME
+    coverTimer = 1
+    Statement Return
+  EndIf
+  ; The level appears: its music starts (the cartridge's GetAreaMusic, 2742).
+  QueueAreaMusic{}
+  ;; Leave this frame out of the frame time report, as a reload is: otherwise the first frame after a cover
+  ;; reads as a 304 line sim.
+  frameTimePrimed = False
+  frameTimeRestarts = frameTimeRestarts + 1
+  MarkTransition{"cover ended, the level is shown"}
+  coverKind = #COVER_NONE
+End Statement
+
+;; END OF COVER SCREENS (BLITZ MODE)

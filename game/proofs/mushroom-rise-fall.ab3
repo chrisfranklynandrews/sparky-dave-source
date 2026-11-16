@@ -1,0 +1,276 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "MushroomRiseFallProof"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: the mushroom rise/fall profile, against the settled spec.
+;;
+;; Pure arithmetic, no map and no engine includes beyond the constants, so the
+;; values under test are the shipped #MUSHROOM_GRAVITY / #MUSHROOM_FALL_MAX /
+;; #ITEM_H and not a hand copy:
+;;
+;;   Rise -- the mushroom spawns fully inside the block (mushroomY = block top)
+;;   and rises #ITEM_H over exactly one real second, simStepNumerator
+;;   ticks, at a fixed 1/256 px step, snapping to the target on the final tick.
+;;   Checked at both clock rates: PAL, step 81 over 50 ticks; NTSC, step 68
+;;   over 60 ticks.
+;;
+;;   Fall -- from rest, gravity #MUSHROOM_GRAVITY (1/256 px/tick^2) capped at
+;;   #MUSHROOM_FALL_MAX: the cap lands exactly on tick 16, the displacement at
+;;   tick 16 is exactly 17 px with zero residue, and the step is exactly
+;;   2 px/tick thereafter.
+;;
+;; One square per check along the bottom: pen 3 pass, pen 2 fail. The full
+;; report is written to mushroom-rise-fall-results.txt on quit. ESC quits.
+
+WBStartup
+
+#PROOF_COP_FLAGS = $10004
+
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+
+Dim checkPen.w(15)
+Dim checkLabel.s(15)
+Dim checkExpected.w(15)
+Dim checkActual.w(15)
+;; Typed BEFORE the statements below: an untyped SHARED inside a Statement
+;; declares the variable as float at the statement's position, and a later
+;; file-scope `.w` assignment would collide with it (Mismatched types).
+checkIndex.w = 0
+failCount.w = 0
+riseY.w = 0
+riseFraction.w = 0
+fallVelocity.w = 0
+fallFraction.w = 0
+fallY.w = 0
+
+screenHeight = DispHeight
+quitFlag.w = False
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 120, 120, 120
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 0, 200, 0
+AGAPalRGB 0, 4, 60, 60, 60
+AGAPalRGB 0, 5, 252, 252, 252
+
+BLITZ
+;; Non-scrolling display: $10004, not the scrolling $10014 in the constants.
+InitCopList 0, #PROOF_COP_FLAGS
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+;; ---------------------------------------------------------------
+;; The three building blocks
+;; ---------------------------------------------------------------
+
+;; Records one check the way the test program's Assert{} does. The condition is
+;; passed as an expression, exactly like Assert{mushroomActive = True}.
+Statement Check{condition.w, label.s, expected.w, actual.w}
+  SHARED checkPen(), checkLabel(), checkExpected(), checkActual()
+  SHARED checkIndex, failCount
+  If condition = 0
+    checkPen(checkIndex) = 2
+    failCount = failCount + 1
+  Else
+    checkPen(checkIndex) = 3
+  EndIf
+  checkLabel(checkIndex) = label
+  checkExpected(checkIndex) = expected
+  checkActual(checkIndex) = actual
+  checkIndex = checkIndex + 1
+End Statement
+
+;; One rise tick, the UpdateMushroom{} rise branch with the counter already
+;; handled by the caller: step the 1/256 carry, take at most one whole pixel.
+Statement RiseTick{riseStep.w}
+  SHARED riseY, riseFraction
+  riseFraction = riseFraction + riseStep
+  If riseFraction >= 256
+    riseY = riseY - 1
+    riseFraction = riseFraction - 256
+  EndIf
+End Statement
+
+;; One fall tick, the UpdateMushroom{} fall branch: add gravity, cap, split the
+;; 1/256 px/tick velocity into whole pixels and the carry, step both.
+Statement FallTick{}
+  SHARED fallVelocity, fallFraction, fallY
+  fallVelocity = fallVelocity + #MUSHROOM_GRAVITY
+  If fallVelocity > #MUSHROOM_FALL_MAX Then fallVelocity = #MUSHROOM_FALL_MAX
+  wholePx.w = fallVelocity/256
+  fallFraction = fallFraction + (fallVelocity - wholePx*256)
+  fallY = fallY + wholePx
+  If fallFraction >= 256
+    fallY = fallY + 1
+    fallFraction = fallFraction - 256
+  EndIf
+End Statement
+
+;; ---------------------------------------------------------------
+;; Rise, PAL
+;; ---------------------------------------------------------------
+;; Spawn at the block's top pixel; the rise ends 16 px above it.
+
+riseStep.w = (#ITEM_H*256)/#SIM_HZ_PAL
+Check{riseStep = 81, "PAL rise step (4096/50)", 81, riseStep}
+riseY = 0
+riseFraction = 0
+For riseTick = 0 To #SIM_HZ_PAL - 1
+  RiseTick{riseStep}
+Next
+Check{riseY = -15, "PAL rise, un-snapped y", -15, riseY}
+Check{riseFraction = 210, "PAL rise, un-snapped carry", 210, riseFraction}
+riseShortfall.w = #ITEM_H*256 - riseStep*#SIM_HZ_PAL
+Check{riseShortfall = 46, "PAL rise, shortfall 46/256 px", 46, riseShortfall}
+riseY = -#ITEM_H
+Check{riseY = -#ITEM_H, "PAL rise, snap to target", -#ITEM_H, riseY}
+
+;; ---------------------------------------------------------------
+;; Rise, NTSC
+;; ---------------------------------------------------------------
+;; Same one-second rise at the NTSC clock rate: step 68 over 60 ticks.
+
+riseStep = (#ITEM_H*256)/(#SIM_HZ_PAL + #SIM_HZ_STEP)
+Check{riseStep = 68, "NTSC rise step (4096/60)", 68, riseStep}
+riseY = 0
+riseFraction = 0
+For riseTick = 0 To #SIM_HZ_PAL + #SIM_HZ_STEP - 1
+  RiseTick{riseStep}
+Next
+Check{riseY = -15, "NTSC rise, un-snapped y", -15, riseY}
+Check{riseFraction = 240, "NTSC rise, un-snapped carry", 240, riseFraction}
+riseShortfall = #ITEM_H*256 - riseStep*(#SIM_HZ_PAL + #SIM_HZ_STEP)
+Check{riseShortfall = 16, "NTSC rise, shortfall 16/256 px", 16, riseShortfall}
+riseY = -#ITEM_H
+Check{riseY = -#ITEM_H, "NTSC rise, snap to target", -#ITEM_H, riseY}
+
+;; ---------------------------------------------------------------
+;; Fall
+;; ---------------------------------------------------------------
+fallVelocity.w = 0
+fallFraction.w = 0
+fallY.w = 0
+For fallTick = 1 To 15
+  FallTick{}
+Next
+Check{fallVelocity = 480, "fall v at tick 15, under cap", 480, fallVelocity}
+FallTick{}
+Check{fallVelocity = #MUSHROOM_FALL_MAX, "fall v at tick 16, at cap", #MUSHROOM_FALL_MAX, fallVelocity}
+Check{fallY = 17, "fall displacement at tick 16", 17, fallY}
+Check{fallFraction = 0, "fall residue at tick 16", 0, fallFraction}
+For fallTick = 1 To 5
+  FallTick{}
+Next
+Check{fallY = 27, "fall 5 ticks past cap, 2 px/tick", 27, fallY}
+Check{fallVelocity = #MUSHROOM_FALL_MAX, "fall v held at cap", #MUSHROOM_FALL_MAX, fallVelocity}
+
+;; ---------------------------------------------------------------
+;; Result panel
+;; ---------------------------------------------------------------
+While quitFlag = False
+  Use BitMap 1
+  Cls 0
+  For drawCheck = 0 To checkIndex - 1
+    Boxf 4 + drawCheck*24, screenHeight - 24, 4 + drawCheck*24 + 20, screenHeight - 4, checkPen(drawCheck)
+  Next
+  VWait
+  DisplayBitMap 0, 1
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/mushroom-rise-fall-results.txt")
+  FileOutput 0
+  NPrint "Mushroom rise/fall profile: ", checkIndex - failCount, " of ", checkIndex, " checks pass"
+  NPrint ""
+  For reportCheck = 0 To checkIndex - 1
+    If checkPen(reportCheck) = 3
+      status$ = "PASS"
+    Else
+      status$ = "FAIL"
+    EndIf
+    NPrint status$, "-", checkLabel(reportCheck)
+    NPrint "  expected", checkExpected(reportCheck), "actual", checkActual(reportCheck)
+  Next
+  CloseFile 0
+EndIf
+End

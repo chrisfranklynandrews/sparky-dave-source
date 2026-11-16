@@ -1,0 +1,342 @@
+;; =======================================================
+;; DEBUG REPORTS (AMIGA MODE)
+;; =======================================================
+;; The two reports written at exit, in debug mode: the frame time report and the chip RAM report. File output
+;; is Amiga mode, so everything here is above BLITZ. The numbers come from the frame-time marks
+;; (sparkydave.frametime.blitz.ab3), the transition marks (sparkydave.timing-marks.blitz.ab3) and the chip RAM
+;; samples (sparkydave.memory.ab3). SparkyDave.ab3 calls WriteDebugReports{} once, at exit.
+
+Statement WriteFrameTimeReport{reportSuffix$}
+  SHARED reportDir$, videoIsNtsc, parallaxPreset, wholePixelScroll, debugMode, playerState
+  SHARED frameTimeFrames, frameTimeOverruns, frameTimeRestarts, frameTimeDeadlineMax, frameTimeStartSum
+  SHARED frameTimeDisplayPasses, frameTimeDisplaySum, frameTimeDisplayMax, frameTimeClipCuts, displayLogCount, displayLogLines()
+  SHARED displayLogLevel(), displayLogArea(), displayLogCamera(), displayLogState(), displayLogClip(), displayLogPass()
+  SHARED frameTimeSimSum, frameTimeSimMax, frameTimeEventsSum, frameTimeEventsMax
+  SHARED frameTimePlayerSum, frameTimePlayerMax, frameTimeObjectsSum, frameTimeObjectsMax
+  SHARED frameTimeSoundSum, frameTimeSoundMax, frameTimeSoundPartSum(), frameTimeSoundPartMax()
+  SHARED frameTimeDrawSum, frameTimeDrawMax, frameTimeWorldSum, frameTimeWorldMax
+  SHARED frameTimeHudSum, frameTimeHudMax, frameTimeRestSum, frameTimeRestMax
+  SHARED frameTimeWorkSum, frameTimeWorkMax
+  SHARED slowLogCount, slowLogFrame(), slowLogSim(), slowLogEvents(), slowLogObjectLines(), slowLogSound()
+  SHARED slowLogSoundTicks(), slowLogMusic(), slowLogSfx(), slowLogDraw(), slowLogWorld(), slowLogHud()
+  SHARED slowLogStart(), slowLogWork(), slowLogTicks(), slowLogObjects(), slowLogFloaters(), slowLogArea()
+  SHARED slowLogState(), slowLogLevel(), slowLogCamera(), slowLogStar(), slowLogVblank(), slowLogCrossAt()
+  SHARED frameTimeCrossings, frameTimeHidden, slowLogLoop(), frameTimeLongLoops, frameTimeLongLoopsFit, frameTimeLoopTotal
+  SHARED frameTimeOwnSum, frameTimeOwnMax
+  SHARED hudStampTimed, hudStampLines, hudStampWorst, clipCutTimed, clipCutLines, clipCutWorst, clipDrawn
+  SHARED jukeboxTimedFrames, jukeboxTotalSum, jukeboxTotalMax, jukeboxPartSum(), jukeboxPartMax()
+  SHARED transitionCount, transitionLabel$(), transitionTime(), transitionDropped, stampSkipped
+  If debugMode = False Then Statement Return
+  If frameTimeFrames <= 0 Then Statement Return
+  If WriteFile(0, reportDir$ + "frame-time-report" + reportSuffix$ + ".txt")
+    FileOutput 0
+    frameLines.l = #PERF_LINES_PAL
+    If videoIsNtsc = True Then frameLines = #PERF_LINES_NTSC
+    NPrint "SparkyDave frame time"
+    NPrint ""
+    NPrint "One raster line is about 63.5 microseconds. A frame is ", frameLines, " lines."
+    NPrint "display flags: HUD $", Hex$(#COPPER_FLAGS), ", world $", Hex$(#WORLD_FLAGS)
+    NPrint "parallax speed preset P", parallaxPreset + 1, " at exit (Help)"
+    If wholePixelScroll = True
+      NPrint "world scroll at exit: whole pixels (Del)"
+    Else
+      NPrint "world scroll at exit: with fractions (Del)"
+    EndIf
+    NPrint "frames measured  ", frameTimeFrames
+    NPrint ""
+    NPrint "                  average lines  worst lines  average us  worst us"
+    NPrint "input and sim    ", frameTimeSimSum/frameTimeFrames, "  ", frameTimeSimMax, "  ", (frameTimeSimSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeSimMax*#RASTER_LINE_US_X2/2
+    NPrint "  input, events  ", frameTimeEventsSum/frameTimeFrames, "  ", frameTimeEventsMax, "  ", (frameTimeEventsSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeEventsMax*#RASTER_LINE_US_X2/2
+    NPrint "  player, rest   ", frameTimePlayerSum/frameTimeFrames, "  ", frameTimePlayerMax, "  ", (frameTimePlayerSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimePlayerMax*#RASTER_LINE_US_X2/2
+    NPrint "  objects        ", frameTimeObjectsSum/frameTimeFrames, "  ", frameTimeObjectsMax, "  ", (frameTimeObjectsSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeObjectsMax*#RASTER_LINE_US_X2/2
+    NPrint "  sound          ", frameTimeSoundSum/frameTimeFrames, "  ", frameTimeSoundMax, "  ", (frameTimeSoundSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeSoundMax*#RASTER_LINE_US_X2/2
+    Print "    clocks ", frameTimeSoundPartSum(#SOUND_PART_CLOCKS)/frameTimeFrames, " / ", frameTimeSoundPartMax(#SOUND_PART_CLOCKS)
+    Print "  effects ", frameTimeSoundPartSum(#SOUND_PART_SFX)/frameTimeFrames, " / ", frameTimeSoundPartMax(#SOUND_PART_SFX)
+    Print "  music ", frameTimeSoundPartSum(#SOUND_PART_MUSIC)/frameTimeFrames, " / ", frameTimeSoundPartMax(#SOUND_PART_MUSIC)
+    NPrint "  Paula ", frameTimeSoundPartSum(#SOUND_PART_PAULA)/frameTimeFrames, " / ", frameTimeSoundPartMax(#SOUND_PART_PAULA), "  (average / worst lines)"
+    NPrint "draw and HUD     ", frameTimeDrawSum/frameTimeFrames, "  ", frameTimeDrawMax, "  ", (frameTimeDrawSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeDrawMax*#RASTER_LINE_US_X2/2
+    NPrint "  world          ", frameTimeWorldSum/frameTimeFrames, "  ", frameTimeWorldMax, "  ", (frameTimeWorldSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeWorldMax*#RASTER_LINE_US_X2/2
+    NPrint "  HUD            ", frameTimeHudSum/frameTimeFrames, "  ", frameTimeHudMax, "  ", (frameTimeHudSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeHudMax*#RASTER_LINE_US_X2/2
+    NPrint "  palette, rest  ", frameTimeRestSum/frameTimeFrames, "  ", frameTimeRestMax, "  ", (frameTimeRestSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeRestMax*#RASTER_LINE_US_X2/2
+    If hudStampTimed > 0
+      NPrint "  (the HUD copied into the back bitmap when it changed while away: ", hudStampTimed, " copies, ", hudStampLines/hudStampTimed, " lines on average and ", hudStampWorst, " at worst, the blitter finishing it included; inside HUD above)"
+    EndIf
+    If clipDrawn > 0
+      If clipCutTimed > 0
+        NPrint "  (Mario cut short at the top of the bitmap: drawn ", clipDrawn, " times, cut afresh ", clipCutTimed, " times at ", clipCutLines/clipCutTimed, " lines on average and ", clipCutWorst, " at worst; inside world above)"
+      Else
+        NPrint "  (Mario cut short at the top of the bitmap: drawn ", clipDrawn, " times, never cut afresh; inside world above)"
+      EndIf
+    EndIf
+    NPrint "total work       ", frameTimeWorkSum/frameTimeFrames, "  ", frameTimeWorkMax, "  ", (frameTimeWorkSum/frameTimeFrames)*#RASTER_LINE_US_X2/2, "  ", frameTimeWorkMax*#RASTER_LINE_US_X2/2
+    If jukeboxTimedFrames > 0
+      NPrint ""
+      NPrint "jukebox page, ", jukeboxTimedFrames, " frames; average / worst lines a frame (inside input and events above, the page is drawn right after the vertical blank):"
+      NPrint "  whole page ", jukeboxTotalSum/jukeboxTimedFrames, " / ", jukeboxTotalMax
+      NPrint "  static draw ", jukeboxPartSum(0)/jukeboxTimedFrames, " / ", jukeboxPartMax(0)
+      NPrint "  hops ", jukeboxPartSum(1)/jukeboxTimedFrames, " / ", jukeboxPartMax(1)
+      NPrint "  stage ", jukeboxPartSum(2)/jukeboxTimedFrames, " / ", jukeboxPartMax(2)
+      NPrint "  rows ", jukeboxPartSum(3)/jukeboxTimedFrames, " / ", jukeboxPartMax(3)
+    EndIf
+    NPrint ""
+    ; The average lines first, then the share: the sum times 100 overflows a long on a long run.
+    NPrint "average work share of the frame  ", (frameTimeWorkSum/frameTimeFrames)*100/frameLines, " percent"
+    NPrint "worst work share of the frame    ", frameTimeWorkMax*100/frameLines, " percent"
+    NPrint "beam line when work starts: average ", frameTimeStartSum/frameTimeFrames
+    If frameTimeDisplayPasses > 0
+      NPrint "the display stretch after the VWait (the lists, the sky, Mario's sprite and any clip sprite cut for him; inside the start line):"
+      NPrint "  average ", frameTimeDisplaySum/frameTimeDisplayPasses, ", worst ", frameTimeDisplayMax, " lines over ", frameTimeDisplayPasses, " passes; clip sprites cut: ", frameTimeClipCuts
+      NPrint "  its slowest passes: lines  level  area  camera  state  clip cuts  pass"
+      For displayIndex.w = 0 To displayLogCount - 1
+        Print "  ", displayLogLines(displayIndex), "  ", LevelNameText{displayLogLevel(displayIndex)}, "  ", displayLogArea(displayIndex), "  "
+        NPrint displayLogCamera(displayIndex), "  ", displayLogState(displayIndex), "  ", displayLogClip(displayIndex), "  ", displayLogPass(displayIndex)
+      Next
+    EndIf
+    NPrint "start line plus work: worst ", frameTimeDeadlineMax, " of ", frameLines
+    NPrint "frames over budget (start line plus work reached a whole frame): ", frameTimeOverruns
+    NPrint "frames that ran into the next display frame (CIA-A's frame count): ", frameTimeCrossings, ", of which the lines called in budget: ", frameTimeHidden
+    NPrint "the whole loop, start to start (CIA-A): ", frameTimeLoopTotal, " display frames for ", frameTimeFrames, " passes; passes of 2 frames or more: ", frameTimeLongLoops, ", of which the work had fitted: ", frameTimeLongLoopsFit
+    NPrint "frames left out (a reload: a death, F1, a pipe; or the end of a cover): ", frameTimeRestarts
+    NPrint "the report's own work after its last mark, in no figure above: average ", frameTimeOwnSum/frameTimeFrames, ", worst ", frameTimeOwnMax, " lines"
+    NPrint "(debug mode only, with the marks' 2 lines each: a player's build does none of it)"
+    NPrint ""
+    NPrint "heaviest frames (work of ", #SLOW_LOG_LINES, " lines or more; at most ", #SLOW_LOG_MAX, "), worst first"
+    NPrint "sim = events + player and the rest + objs + sound; draw = world + hud + palette and the rest"
+    NPrint "area 0 main, 1 bonus; state is playerState (#PLAYER_ST_*); objects is how many were live"
+    NPrint "sound's parts: sticks is the frame's sound ticks, music and sfx their lines (the rest is clocks and Paula)"
+    NPrint "level and camera: where it was (the camera's x, the view's left); star 1 while the Starman is on"
+    NPrint "vbl: display frames begun during the work (CIA-A), at: the first part one began in (1 events, 2 ticks, 3 sound, 4 world, 5 HUD, 6 rest)"
+    NPrint "loop: display frames the pass before took, start to start (1 at full rate)"
+    NPrint "frame  sim  events  objs  sound  sticks  music  sfx  draw  world  hud  start  work  ticks  objects  floaters  area  state  level  camera  star  vbl  at  loop"
+    For logIndex.w = 0 To slowLogCount - 1
+      Print slowLogFrame(logIndex), "  ", slowLogSim(logIndex), "  ", slowLogEvents(logIndex), "  ", slowLogObjectLines(logIndex), "  ", slowLogSound(logIndex), "  "
+      Print slowLogSoundTicks(logIndex), "  ", slowLogMusic(logIndex), "  ", slowLogSfx(logIndex), "  "
+      Print slowLogDraw(logIndex), "  ", slowLogWorld(logIndex), "  ", slowLogHud(logIndex), "  "
+      Print slowLogStart(logIndex), "  ", slowLogWork(logIndex), "  ", slowLogTicks(logIndex), "  ", slowLogObjects(logIndex), "  ", slowLogFloaters(logIndex), "  "
+      Print slowLogArea(logIndex), "  ", slowLogState(logIndex), "  "
+      Print LevelNameText{slowLogLevel(logIndex)}, "  ", slowLogCamera(logIndex), "  ", slowLogStar(logIndex), "  "
+      NPrint slowLogVblank(logIndex), "  ", slowLogCrossAt(logIndex), "  ", slowLogLoop(logIndex)
+    Next
+    NPrint ""
+    NPrint "transitions: each step's frames since the last mark, then (frames since the transition began), then the step"
+    NPrint "(CIA-A time of day, one count a display frame; a step under a frame reads 0)"
+    beganAt.l = 0
+    lastAt.l = 0
+    ; Marks before the first transition begins (the load) count from the first mark.
+    If transitionCount > 0
+      beganAt = transitionTime(0)
+      lastAt = transitionTime(0)
+    EndIf
+    For markIndex.w = 0 To transitionCount - 1
+      If Left$(transitionLabel$(markIndex), 1) = ">"
+        beganAt = transitionTime(markIndex)
+        NPrint ""
+        NPrint transitionLabel$(markIndex)
+      Else
+        NPrint "  ", transitionTime(markIndex) - lastAt, "  (", transitionTime(markIndex) - beganAt, ")  ", transitionLabel$(markIndex)
+      EndIf
+      lastAt = transitionTime(markIndex)
+    Next
+    If transitionDropped > 0 Then NPrint "transition marks dropped, the log was full (#TRANSITION_LOG_MAX): ", transitionDropped
+    If stampSkipped > 0 Then NPrint "cells the last stamp skipped, GID above #STAMP_GID_MAX: ", stampSkipped
+    CloseFile 0
+  EndIf
+End Statement
+
+Statement WriteChipRamReport{reportSuffix$}
+  SHARED reportDir$, debugMode
+  SHARED chipRamLaunch, chipRamLaunchLargest, chipRamAfterInit, chipRamAfterInitLargest
+  SHARED chipRamLive, chipRamLiveLargest, chipRamLast, chipRamLowest, chipRamLowestLargest, chipRamSamples
+  SHARED fastRamLaunch, fastRamLaunchLargest, fastRamAfterInit, fastRamAfterInitLargest
+  SHARED fastRamLive, fastRamLiveLargest, fastRamLast, fastRamLowest, fastRamLowestLargest
+  If debugMode = False Then Statement Return
+  If WriteFile(0, reportDir$ + "chip-ram-report" + reportSuffix$ + ".txt")
+    FileOutput 0
+    NPrint "SparkyDave chip RAM (bytes)"
+    NPrint "display flags: HUD $", Hex$(#COPPER_FLAGS), ", world $", Hex$(#WORLD_FLAGS)
+    NPrint ""
+    NPrint "                 free chip   largest block"
+    NPrint "launch          ", chipRamLaunch, "  ", chipRamLaunchLargest
+    NPrint "after init      ", chipRamAfterInit, "  ", chipRamAfterInitLargest
+    NPrint "live baseline   ", chipRamLive, "  ", chipRamLiveLargest
+    NPrint "last sample     ", chipRamLast
+    NPrint "lowest sample   ", chipRamLowest, "  ", chipRamLowestLargest
+    NPrint ""
+    NPrint "init cost       ", chipRamLaunch - chipRamAfterInit
+    NPrint "display and load", chipRamAfterInit - chipRamLive
+    NPrint "total used      ", chipRamLaunch - chipRamLive
+    NPrint "drift after baseline", chipRamLive - chipRamLast
+    NPrint "samples taken   ", chipRamSamples, " every ", #MEM_SAMPLE_FRAMES, " frames"
+    NPrint ""
+    NPrint "Fast RAM (the code and every Dim array; none on a machine without it)"
+    NPrint "                 free fast   largest block"
+    NPrint "launch          ", fastRamLaunch, "  ", fastRamLaunchLargest
+    NPrint "after init      ", fastRamAfterInit, "  ", fastRamAfterInitLargest
+    NPrint "live baseline   ", fastRamLive, "  ", fastRamLiveLargest
+    NPrint "last sample     ", fastRamLast
+    NPrint "lowest sample   ", fastRamLowest, "  ", fastRamLowestLargest
+    NPrint ""
+    NPrint "init cost       ", fastRamLaunch - fastRamAfterInit
+    NPrint "display and load", fastRamAfterInit - fastRamLive
+    NPrint "total used      ", fastRamLaunch - fastRamLive
+    NPrint "drift after baseline", fastRamLive - fastRamLast
+    CloseFile 0
+  EndIf
+End Statement
+
+;; The file names' suffix says what ran: the build (#SIM_HZ is 60 in the NTSC variant and 50 in the
+;; PAL one), the look (#LOOK_ALLSTARS), and the machine when it is the other standard. So
+;; frame-time-report-pal-nes.txt, frame-time-report-ntsc-allstars-on-pal.txt.
+;; The world bitmap check's report (F10, CheckWorldBitmaps{}), when F10 was pressed: each press, then each word that differed. The
+;; changed bits are the found word xor the wanted one; "both" marks a word that differs in both bitmaps at the same place, "one" a
+;; word in that bitmap alone (what a stray row on one buffer would be).
+Statement WriteBitmapCheckReport{reportSuffix$}
+  SHARED reportDir$, checkPressCount, checkWordCount, checkPressLevel(), checkPressArea(), checkPressCamera()
+  SHARED checkPressDrawBitmap(), checkPressQueued(), checkPressWords(), checkPressSkipped(), checkWordPress()
+  SHARED checkWordBitmap(), checkWordColumn(), checkWordRow(), checkWordPlane(), checkWordWanted(), checkWordFound()
+  SHARED watchFramesOn, watchFoundTotal, watchFoundCount, watchFoundBitmap(), watchFoundColumn(), watchFoundCamera()
+  SHARED watchFoundRow(), watchFoundPlane(), watchFoundWanted(), watchFoundFrame(), watchFoundSince(), watchFoundRing(), watchFoundConfirmed(), watchConfirmedTotal
+  SHARED checkPressStrays(), checkStrayCount, checkStrayPress(), checkStrayBitmap(), checkStrayColumn(), checkStrayRow()
+  SHARED checkStrayPlane(), checkStrayWanted()
+  SHARED stampCheckTotal, stampBadCount, stampWordCount, stampBadNumber(), stampBadLevel(), stampBadArea(), stampBadType()
+  SHARED stampBadSetChanged(), stampBadWords(), stampWordStamp(), stampWordColumn(), stampWordRow(), stampWordPlane()
+  SHARED stampWordKnown(), stampWordWanted(), stampWordFoundA(), stampWordFoundB()
+  If checkPressCount = 0 AND stampCheckTotal = 0 Then Statement Return
+  If WriteFile(0, reportDir$ + "bitmap-check-report" + reportSuffix$ + ".txt")
+    FileOutput 0
+    NPrint "SparkyDave world bitmap check (F10)"
+    NPrint ""
+    NPrint "Each press compares the view's cells in both world bitmaps (0 and 1) with the atlas tiles the map gives them, one 16 px"
+    NPrint "word a cell row a plane. Enemies, coins, the bumped block and the warp zone's text differ as well; a stray row is a word in"
+    NPrint "one bitmap where nothing is drawn. x is the world's (the cell's left), screen x the view's, y the world's row of pixels."
+    NPrint ""
+    NPrint "press  level  area  camera  drawing into  cells queued  words differing  cells not checked"
+    For pressIndex.w = 0 To checkPressCount - 1
+      Print pressIndex + 1, "  ", LevelNameText{checkPressLevel(pressIndex)}, "  ", checkPressArea(pressIndex), "  ", checkPressCamera(pressIndex), "  "
+      NPrint checkPressDrawBitmap(pressIndex), "  ", checkPressQueued(pressIndex), "  ", checkPressWords(pressIndex), "  ", checkPressSkipped(pressIndex)
+    Next
+    If checkWordCount >= #BITMAP_CHECK_MAX Then NPrint "(the first ", #BITMAP_CHECK_MAX, " words kept; the rest only counted)"
+    NPrint ""
+    NPrint "press  bitmap  x  screen x  y  cell row  plane  wanted  found  bits changed  in"
+    For wordIndex.w = 0 To checkWordCount - 1
+      wantedNow.l = checkWordWanted(wordIndex) AND $FFFF
+      foundNow.l = checkWordFound(wordIndex) AND $FFFF
+      ; The same word differing in the other bitmap, on the same press.
+      inBoth.w = False
+      For otherIndex.w = 0 To checkWordCount - 1
+        If checkWordPress(otherIndex) = checkWordPress(wordIndex) AND checkWordBitmap(otherIndex) <> checkWordBitmap(wordIndex)
+          If checkWordColumn(otherIndex) = checkWordColumn(wordIndex) AND checkWordRow(otherIndex) = checkWordRow(wordIndex)
+            If checkWordPlane(otherIndex) = checkWordPlane(wordIndex) Then inBoth = True
+          EndIf
+        EndIf
+      Next
+      Print checkWordPress(wordIndex) + 1, "  ", checkWordBitmap(wordIndex), "  ", checkWordColumn(wordIndex)*#TILE, "  "
+      Print checkWordColumn(wordIndex)*#TILE - checkPressCamera(checkWordPress(wordIndex)), "  ", checkWordRow(wordIndex), "  "
+      Print checkWordRow(wordIndex) MOD #TILE, "  ", checkWordPlane(wordIndex), "  $", Right$(Hex$(wantedNow), 4), "  $", Right$(Hex$(foundNow), 4), "  "
+      Print "$", Right$(Hex$(Xor(wantedNow, foundNow)), 4), "  "
+      If inBoth = True
+        NPrint "both"
+      Else
+        NPrint "one"
+      EndIf
+    Next
+    NPrint ""
+    NPrint "Strays anywhere in the area, in view or not, on each press: a $FFFF in one bitmap where the other holds what the map"
+    NPrint "wants, in one plane only (a moving object's row can pass this too, for the frame it is caught in)."
+    NPrint "press  strays"
+    For pressIndex = 0 To checkPressCount - 1
+      NPrint pressIndex + 1, "  ", checkPressStrays(pressIndex)
+    Next
+    If checkStrayCount >= #BITMAP_CHECK_STRAYS Then NPrint "(the first ", #BITMAP_CHECK_STRAYS, " strays kept; the rest only counted)"
+    NPrint "press  bitmap  x  screen x  y  cell row  plane  wanted"
+    For strayIndex.w = 0 To checkStrayCount - 1
+      Print checkStrayPress(strayIndex) + 1, "  ", checkStrayBitmap(strayIndex), "  ", checkStrayColumn(strayIndex)*#TILE, "  "
+      Print checkStrayColumn(strayIndex)*#TILE - checkPressCamera(checkStrayPress(strayIndex)), "  ", checkStrayRow(strayIndex), "  "
+      NPrint checkStrayRow(strayIndex) MOD #TILE, "  ", checkStrayPlane(strayIndex), "  $", Right$(Hex$(checkStrayWanted(strayIndex) AND $FFFF), 4)
+    Next
+    NPrint ""
+    Print "The watch (on and off with F10): on for ", watchFramesOn, " frames; it looks at ", #WATCH_ROWS_A_FRAME, " of the world's ", #WATCH_PIXEL_ROWS
+    NPrint " pixel rows a frame, across the view and ", #WATCH_AHEAD_COLUMNS, " columns past its right edge."
+    NPrint "A candidate is a $FFFF in one bitmap where the other holds what the map wants, in one plane only; a stray is a candidate"
+    NPrint "seen again in the same place a sweep later (a moving object's row, a lift's, has gone by then). Each stray is shown with"
+    NPrint "the frame it was first seen and the frame its row was last seen clean, so it was written in a frame after that one, up to"
+    NPrint "the frame first seen (-1: its row not looked at since the watch went on; -2: looked at, but not that column, so it came"
+    NPrint "in from further right). Then the state of the frames kept before it was first seen."
+    NPrint "candidates seen: ", watchFoundTotal, ", strays among them: ", watchConfirmedTotal, " (", #WATCH_MAX, " kept at a time)"
+    For foundIndex.w = 0 To watchFoundCount - 1
+      If watchFoundConfirmed(foundIndex) <> 0
+        NPrint ""
+        Print "stray ", foundIndex + 1, ": bitmap ", watchFoundBitmap(foundIndex), ", x ", watchFoundColumn(foundIndex)*#TILE
+        Print " (screen x ", watchFoundColumn(foundIndex)*#TILE - watchFoundCamera(foundIndex), "), y ", watchFoundRow(foundIndex)
+        Print " (cell row ", watchFoundRow(foundIndex) MOD #TILE, "), plane ", watchFoundPlane(foundIndex), ", wanted $"
+        NPrint Right$(Hex$(watchFoundWanted(foundIndex) AND $FFFF), 4), "; first seen at frame ", watchFoundFrame(foundIndex), ", seen again at frame ", watchFoundConfirmed(foundIndex), ", clean at frame ", watchFoundSince(foundIndex)
+        NPrint "frame  camera  x  y  state  big  life event  area  drawn into  bump  bump cell  objects  debris  fireballs  floaters  queued"
+        For ringIndex.w = 0 To #WATCH_RING - 1
+          ringAt.l = (foundIndex*#WATCH_RING + ringIndex)*#WATCH_FIELDS
+          ; Only the frames since its row was clean (and the one before), or all of them when it was never seen clean.
+          If watchFoundRing(ringAt) > 0 AND watchFoundRing(ringAt) >= watchFoundSince(foundIndex) - 1
+            For fieldIndex.w = 0 To #WATCH_FIELDS - 2
+              Print watchFoundRing(ringAt + fieldIndex), "  "
+            Next
+            NPrint watchFoundRing(ringAt + #WATCH_FIELDS - 1)
+          EndIf
+        Next
+      EndIf
+    Next
+    NPrint ""
+    NPrint "The stamp repair (every stamp, no key; RepairStampedBitmaps in the code): right after a stamp the two world bitmaps hold the map alone,"
+    NPrint "so they are the same word for word. Each word that differs was set in both to the word wanted, the atlas's (0 for a cell"
+    NPrint "the stamp does not draw: not stamped). Shown as found, before the repair: wrong in bitmap 0, 1 or both. Set changed is 1"
+    NPrint "when the tile set had just been changed (All-Stars). A word moved by a blit's last write shows as a missing word and a"
+    NPrint "stray in the same bitmap, $20000 bytes apart."
+    NPrint "stamps checked: ", stampCheckTotal, ", with words differing: ", stampBadCount
+    If stampBadCount > 0
+      NPrint "stamp  level  area  area type  set changed  words differing"
+      For badIndex.w = 0 To stampBadCount - 1
+        Print stampBadNumber(badIndex), "  ", LevelNameText{stampBadLevel(badIndex)}, "  ", stampBadArea(badIndex), "  "
+        NPrint stampBadType(badIndex), "  ", -stampBadSetChanged(badIndex), "  ", stampBadWords(badIndex)
+      Next
+      If stampWordCount >= #STAMP_CHECK_WORDS Then NPrint "(the first ", #STAMP_CHECK_WORDS, " words kept; the rest only counted)"
+      NPrint "stamp  wrong in  x  y  cell row  plane  wanted  bitmap 0  bitmap 1"
+      For stampWordIndex.w = 0 To stampWordCount - 1
+        wrongIn$ = "not stamped"
+        If stampWordKnown(stampWordIndex) <> False
+          wrongA.w = False
+          wrongB.w = False
+          If stampWordFoundA(stampWordIndex) <> stampWordWanted(stampWordIndex) Then wrongA = True
+          If stampWordFoundB(stampWordIndex) <> stampWordWanted(stampWordIndex) Then wrongB = True
+          wrongIn$ = "both"
+          If wrongA = True AND wrongB = False Then wrongIn$ = "0"
+          If wrongA = False AND wrongB = True Then wrongIn$ = "1"
+        EndIf
+        Print stampWordStamp(stampWordIndex), "  ", wrongIn$, "  ", stampWordColumn(stampWordIndex)*#TILE, "  ", stampWordRow(stampWordIndex), "  "
+        Print stampWordRow(stampWordIndex) MOD #TILE, "  ", stampWordPlane(stampWordIndex), "  $", Right$(Hex$(stampWordWanted(stampWordIndex) AND $FFFF), 4)
+        NPrint "  $", Right$(Hex$(stampWordFoundA(stampWordIndex) AND $FFFF), 4), "  $", Right$(Hex$(stampWordFoundB(stampWordIndex) AND $FFFF), 4)
+      Next
+    EndIf
+    CloseFile 0
+    DefaultOutput
+  EndIf
+End Statement
+
+Statement WriteDebugReports{}
+  SHARED debugMode, videoIsNtsc
+  If debugMode = False Then Statement Return
+  reportSuffix$ = "-pal"
+  If #SIM_HZ = 60 Then reportSuffix$ = "-ntsc"
+  If #LOOK_ALLSTARS = 1
+    reportSuffix$ = reportSuffix$ + "-allstars"
+  Else
+    reportSuffix$ = reportSuffix$ + "-nes"
+  EndIf
+  If #SIM_HZ = 60
+    If videoIsNtsc = False Then reportSuffix$ = reportSuffix$ + "-on-pal"
+  Else
+    If videoIsNtsc = True Then reportSuffix$ = reportSuffix$ + "-on-ntsc"
+  EndIf
+  WriteFrameTimeReport{reportSuffix$}
+  WriteChipRamReport{reportSuffix$}
+  WriteBitmapCheckReport{reportSuffix$}
+End Statement
+
+;; END OF DEBUG REPORTS (AMIGA MODE)

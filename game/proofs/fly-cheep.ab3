@@ -1,0 +1,596 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "FlyCheepProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: the flying Cheep-Cheep (the level-2-3 plan, step 4). FOLDED 2026-10-22 into sparkydave.object-system.blitz.ab3 and
+;; sparkydave.enemies.blitz.ab3 (the scaled set as the PAL variant's numbers); kept as the record of the two sets' comparison and as
+;; tools/record/fly_cheep_model.py's check. The cartridge's flying frenzy, as the routines it became in the
+;; engine, on the cartridge's own terms: its six enemy slots (a flyer only in slots 0 to 2), its pseudorandom register, its frame order
+;; (the register steps, Mario moves, the frame timers count down, then each slot in turn either moves or, empty, may take a flyer), and
+;; its arithmetic exactly: the x in sixteenths (MoveObjectHorizontally), the y with its speed's fraction and the position's own
+;; fraction (ImposeGravity), and the force nudge near some heights (MoveFlyingCheepCheep's PRandomSubtracter, read past its end as
+;; the cartridge does). From smbdis: InitFlyingCheepCheep 8419, MoveFlyingCheepCheep 9922, ImposeGravity 7704, MoveObjectHorizontally
+;; 7541, CheckFrenzyBuffer 8003, OffscreenBoundsCheck (a flyer is never erased sideways), EnemyGfxHandler (erased once below the screen).
+;;
+;; Two sets, F1 to swap (decision 3, the user chose the scaled one for the PAL build):
+;;   set 0, orange  the cartridge's NTSC numbers: launch -5, gravity 13, top fall speed 5, the nudge 16, the timers 16/96/32/72, the
+;;                  sideways speeds 14 to 34 sixteenths
+;;   set 1, purple  ours, scaled to 50 ticks a second: speeds x1.2 (launch -6, top fall 6, sideways 17 to 41), forces x1.44 (gravity
+;;                  19, the nudge 23), timers x5/6 (13/80/27/60); heights and distances unscaled
+;; Mario's "running" cutoff is his walking top speed + 1 in both (the cartridge's $19; the PAL listing's $1d, our PAL Mario's).
+;; Compiled with the NTSC variant, set 0 is the cartridge; with PAL, set 1 is what the PAL build will use.
+;;
+;; Keys: LEFT and RIGHT walk, with CTRL run; F1 swaps the set and starts again; F2 turns the frenzy off and on; ESC quits and
+;; writes the results. Mario is the red box on the ground; the flyers come up from below the screen around him, orange or purple by
+;; the set. Top left: the set's colour, and a white box while the frenzy is on (it starts on). The screen is the world's 256 rows (the status bar's 32 at the top, darker), squeezed on an NTSC screen.
+;;
+;; What to look for: they leap from below the screen in a high arc, to near the status bar, and fall back out of sight; at most three
+;; at once; standing still they come from either side and either way, walking they go right and land ahead of or behind him, running
+;; (or walking left: the cartridge compares his speed unsigned) they are faster. Set 1 on PAL should look like set 0 on NTSC.
+;;
+;; The results file (proofs/fly-cheep-results.txt) has, for each set, five scripted runs of 240 ticks from Mario at x 1000, each
+;; slot's x and y every tick (-1 when empty), to check against tools/record/fly_cheep_model.py: 0 and 1 standing (two register states),
+;; 2 walking right (16), 3 running right (40), 4 walking left (-20).
+
+OPTIMIZE 1
+
+WBStartup
+
+;; The proof's own display: names of its own, since constants.ab3 has the game's #COPPER_FLAGS ($13014: smooth scrolling and fetch
+;; mode 3, which reads 64 px past each row of a bitmap with no guard for it). #PLAYFIELD_PLANES (4) and #VIEW_W (320) are the game's.
+#FLY_COP_FLAGS = $10004
+#FLY_COP_COLORS = 16
+#FLY_COP_YPOS = 44
+#WORLD_ROWS = 256
+#STATUS_ROWS = 32
+#GROUND_Y = 208
+
+#FLY_SET_CARTRIDGE = 0
+#FLY_SET_SCALED = 1
+#FLY_SLOTS = 6
+#FLY_MAX = 3
+#FLY_SPAWN_Y = $f8
+#FLY_ERASE_Y = 256
+#FLY_SIZE = 16
+
+#TRACE_RUNS = 5
+#TRACE_TICKS = 240
+#TRACE_MARIO_X = 1000
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+
+;; The cartridge's pseudorandom register (PseudoRandomBitReg, seven bytes, $a5 then six zeros at power on).
+Dim randomRegister.w(6)
+;; The enemy slots, as the cartridge's: in use, x, y, the x's sixteenths carried (Enemy_X_MoveForce's high nybble), the x speed in
+;; sixteenths (Enemy_X_Speed), the y speed in whole pixels (Enemy_Y_Speed), its fraction (Enemy_Y_MoveForce), the y's own fraction
+;; (Enemy_YMF_Dummy), the moving direction.
+Dim flyActive.w(#FLY_SLOTS - 1)
+Dim flyX.w(#FLY_SLOTS - 1)
+Dim flyY.w(#FLY_SLOTS - 1)
+Dim flyFractionX.w(#FLY_SLOTS - 1)
+Dim flySpeedX.w(#FLY_SLOTS - 1)
+Dim flySpeedY.w(#FLY_SLOTS - 1)
+Dim flyForceY.w(#FLY_SLOTS - 1)
+Dim flyDummyY.w(#FLY_SLOTS - 1)
+Dim flyDirection.w(#FLY_SLOTS - 1)
+;; The set's tables: FlyCCXSpeedData (12), FlyCCTimerData (4), FlyCCXPositionData (16) and the nudge's heights (PRandomSubtracter's
+;; five, then the eleven bytes after it that the cartridge reads too: FlyCCBPriority and MoveFlyingCheepCheep's first instructions).
+Dim flySpeedData.w(11)
+Dim flyTimerData.w(3)
+Dim flyPositionData.w(15)
+Dim flyNudgeHeights.w(15)
+
+Dim traceX.w(2*#TRACE_RUNS*#TRACE_TICKS*#FLY_MAX - 1)
+Dim traceY.w(2*#TRACE_RUNS*#TRACE_TICKS*#FLY_MAX - 1)
+
+flySet.w = #FLY_SET_CARTRIDGE
+flyLaunchSpeed.w = 0
+flyGravity.w = 0
+flyFallMax.w = 0
+flyNudgeForce.w = 0
+flyRunCutoff.w = #MARIO_MAX_WALK + 1
+flyTimer.w = 0
+stepFraction.w = 0
+flyFrenzyOn.w = True
+marioX.w = #TRACE_MARIO_X
+marioFractionX.w = 0
+marioSpeedX.w = 0
+quitFlag.w = False
+screenHeight.w = DispHeight
+drawBitmap.w = 0
+lastF1.w = False
+lastF2.w = False
+
+InitPalette 0, #FLY_COP_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 200, 76, 12
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 252, 252, 252
+AGAPalRGB 0, 4, 30, 30, 120
+AGAPalRGB 0, 5, 252, 152, 56
+AGAPalRGB 0, 6, 200, 0, 200
+AGAPalRGB 0, 7, 0, 0, 0
+BitMap 0, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+BLITZ
+;; As tall as the bitmaps (the short InitCopList form is always 256 lines: on NTSC, past the 200-line bitmap's end), from the
+;; standard window's top line, which an NTSC screen's 200 lines fit below too.
+InitCopList 0, #FLY_COP_YPOS, screenHeight, #FLY_COP_FLAGS, 0, #FLY_COP_COLORS, 0
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+;; ---------------------------------------------------------------
+;; The two sets
+;; ---------------------------------------------------------------
+
+Statement SelectFlySet{setIndex.w}
+  SHARED flySet, flyLaunchSpeed, flyGravity, flyFallMax, flyNudgeForce
+  SHARED flySpeedData(), flyTimerData(), flyPositionData(), flyNudgeHeights()
+  flySet = setIndex
+  ; FlyCCXPositionData.
+  flyPositionData(0) = $80
+  flyPositionData(1) = $30
+  flyPositionData(2) = $40
+  flyPositionData(3) = $80
+  flyPositionData(4) = $30
+  flyPositionData(5) = $50
+  flyPositionData(6) = $50
+  flyPositionData(7) = $70
+  flyPositionData(8) = $20
+  flyPositionData(9) = $40
+  flyPositionData(10) = $80
+  flyPositionData(11) = $a0
+  flyPositionData(12) = $70
+  flyPositionData(13) = $40
+  flyPositionData(14) = $90
+  flyPositionData(15) = $68
+  ;; PRandomSubtracter ($f8, $a0, $70, $bd, $00), FlyCCBPriority ($20, $20, $20, $00, $00), then MoveFlyingCheepCheep's own
+  ;; bytes: lda Enemy_State,x ($b5 $1e), and #$20 ($29 $20), beq FlyCC ($f0 $08).
+  flyNudgeHeights(0) = $f8
+  flyNudgeHeights(1) = $a0
+  flyNudgeHeights(2) = $70
+  flyNudgeHeights(3) = $bd
+  flyNudgeHeights(4) = $00
+  flyNudgeHeights(5) = $20
+  flyNudgeHeights(6) = $20
+  flyNudgeHeights(7) = $20
+  flyNudgeHeights(8) = $00
+  flyNudgeHeights(9) = $00
+  flyNudgeHeights(10) = $b5
+  flyNudgeHeights(11) = $1e
+  flyNudgeHeights(12) = $29
+  flyNudgeHeights(13) = $20
+  flyNudgeHeights(14) = $f0
+  flyNudgeHeights(15) = $08
+  If setIndex = #FLY_SET_CARTRIDGE
+    flyLaunchSpeed = -5
+    flyGravity = 13
+    flyFallMax = 5
+    flyNudgeForce = 16
+    ; FlyCCXSpeedData and FlyCCTimerData.
+    flySpeedData(0) = 14
+    flySpeedData(1) = 5
+    flySpeedData(2) = 6
+    flySpeedData(3) = 14
+    flySpeedData(4) = 28
+    flySpeedData(5) = 32
+    flySpeedData(6) = 16
+    flySpeedData(7) = 12
+    flySpeedData(8) = 30
+    flySpeedData(9) = 34
+    flySpeedData(10) = 24
+    flySpeedData(11) = 20
+    flyTimerData(0) = 16
+    flyTimerData(1) = 96
+    flyTimerData(2) = 32
+    flyTimerData(3) = 72
+  Else
+    flyLaunchSpeed = -6
+    flyGravity = 19
+    flyFallMax = 6
+    flyNudgeForce = 23
+    ; The same x1.2 (speeds, rounded) and x5/6 (timers, rounded).
+    flySpeedData(0) = 17
+    flySpeedData(1) = 6
+    flySpeedData(2) = 7
+    flySpeedData(3) = 17
+    flySpeedData(4) = 34
+    flySpeedData(5) = 38
+    flySpeedData(6) = 19
+    flySpeedData(7) = 14
+    flySpeedData(8) = 36
+    flySpeedData(9) = 41
+    flySpeedData(10) = 29
+    flySpeedData(11) = 24
+    flyTimerData(0) = 13
+    flyTimerData(1) = 80
+    flyTimerData(2) = 27
+    flyTimerData(3) = 60
+  EndIf
+End Statement
+
+;; ---------------------------------------------------------------
+;; The flyer
+;; ---------------------------------------------------------------
+
+;; One tick of the cartridge's pseudorandom register (the engine's StepRandomBits{}).
+Statement StepFlyRandom{}
+  SHARED randomRegister()
+  randomCarry.w = 0
+  If (randomRegister(0) AND 2) <> (randomRegister(1) AND 2) Then randomCarry = 128
+  For randomIndex.w = 0 To 6
+    lowBit.w = randomRegister(randomIndex) AND 1
+    randomRegister(randomIndex) = randomRegister(randomIndex)/2 + randomCarry
+    randomCarry = lowBit*128
+  Next
+End Statement
+
+;; A speed in sixteenths onto a position and its carried sixteenths, as the cartridge's 4.4 arithmetic (the whole part rounded
+;; down, so a speed of -14 from nothing is a pixel left and 2 sixteenths carried). Returns the whole pixels.
+Function.w SixteenthsStep{fractionNow.w, speedSixteenths.w}
+  SHARED stepFraction
+  stepTotal.w = fractionNow + speedSixteenths
+  If stepTotal >= 0
+    stepWhole.w = stepTotal/16
+  Else
+    stepWhole = -((15 - stepTotal)/16)
+  EndIf
+  stepFraction = stepTotal - stepWhole*16
+  Function Return(stepWhole)
+End Function
+
+;; An empty slot's chance of a flyer (CheckFrenzyBuffer, then InitFlyingCheepCheep): nothing while the frenzy's timer runs; else the
+;; timer starts again from the register's next byte, and a flyer comes only into slots 0 to 2. Its sideways speed from two random
+;; bits and Mario's speed (none, walking, or past walking: the cartridge compares unsigned, so any speed left counts as past); its x
+;; Mario's plus or minus a distance; standing still, a random bit may send it left instead. It starts below the screen, rising.
+Statement TryLaunchFlyer{slot.w}
+  SHARED flyTimer, randomRegister(), flyTimerData(), flySpeedData(), flyPositionData(), flyRunCutoff, flyLaunchSpeed
+  SHARED flyActive(), flyX(), flyY(), flyFractionX(), flySpeedX(), flySpeedY(), flyForceY(), flyDummyY(), flyDirection()
+  SHARED marioX, marioSpeedX
+  If flyTimer <> 0 Then Statement Return
+  flyTimer = flyTimerData(randomRegister(slot + 1) AND 3)
+  If slot >= #FLY_MAX Then Statement Return
+  lowBits.w = randomRegister(slot) AND 3
+  speedGroup.w = 0
+  If marioSpeedX <> 0
+    speedGroup = 4
+    If marioSpeedX < 0 OR marioSpeedX >= flyRunCutoff Then speedGroup = 8
+  EndIf
+  speedIndex.w = speedGroup + lowBits
+  sideIndex.w = speedIndex
+  If (randomRegister(slot + 1) AND 3) <> 0 Then sideIndex = randomRegister(slot + 2) AND 15
+  flySpeedX(slot) = flySpeedData(speedIndex)
+  flyDirection(slot) = #MARIO_BTN_RIGHT
+  If marioSpeedX = 0
+    If (sideIndex AND 2) <> 0
+      flySpeedX(slot) = -flySpeedX(slot)
+      flyDirection(slot) = #MARIO_BTN_LEFT
+    EndIf
+  Else
+    sideIndex = speedIndex
+  EndIf
+  If (sideIndex AND 2) <> 0
+    flyX(slot) = marioX + flyPositionData(sideIndex)
+  Else
+    flyX(slot) = marioX - flyPositionData(sideIndex)
+  EndIf
+  flyY(slot) = #FLY_SPAWN_Y
+  flySpeedY(slot) = flyLaunchSpeed
+  flyForceY(slot) = 0
+  flyDummyY(slot) = 0
+  flyFractionX(slot) = 0
+  flyActive(slot) = True
+End Statement
+
+;; One tick of a flyer (MoveFlyingCheepCheep): sideways by its speed, then gravity (ImposeGravity: the position moves by the speed
+;; and the carry of its own fraction, then the speed's fraction takes the gravity and carries into the speed, held at the top fall
+;; speed), then the nudge: near one of the heights its force's high nybble picks, its force gains a little (no carry).
+Statement MoveFlyer{slot.w}
+  SHARED flyX(), flyY(), flyFractionX(), flySpeedX(), flySpeedY(), flyForceY(), flyDummyY()
+  SHARED flyGravity, flyFallMax, flyNudgeForce, flyNudgeHeights(), stepFraction
+  flyX(slot) = flyX(slot) + SixteenthsStep{flyFractionX(slot), flySpeedX(slot)}
+  flyFractionX(slot) = stepFraction
+  flyDummyY(slot) = flyDummyY(slot) + flyForceY(slot)
+  dummyCarry.w = 0
+  If flyDummyY(slot) >= 256
+    flyDummyY(slot) = flyDummyY(slot) - 256
+    dummyCarry = 1
+  EndIf
+  flyY(slot) = flyY(slot) + flySpeedY(slot) + dummyCarry
+  flyForceY(slot) = flyForceY(slot) + flyGravity
+  If flyForceY(slot) >= 256
+    flyForceY(slot) = flyForceY(slot) - 256
+    flySpeedY(slot) = flySpeedY(slot) + 1
+  EndIf
+  If flySpeedY(slot) >= flyFallMax AND flyForceY(slot) >= 128
+    flySpeedY(slot) = flyFallMax
+    flyForceY(slot) = 0
+  EndIf
+  nudgeDistance.w = ((flyY(slot) AND 255) - flyNudgeHeights(flyForceY(slot)/16)) AND 255
+  If nudgeDistance >= 128 Then nudgeDistance = (256 - nudgeDistance) AND 255
+  If nudgeDistance < 8 Then flyForceY(slot) = (flyForceY(slot) + flyNudgeForce) AND 255
+End Statement
+
+;; One tick, in the cartridge's order: the register, Mario, the frame timer, then each slot: a flyer below the screen is erased
+;; (EnemyGfxHandler, before it moves), one on it moves; an empty slot may take a new one (which does not move until the next tick).
+Statement FlyTick{}
+  SHARED flyTimer, flyFrenzyOn, flyActive(), flyY(), marioX, marioFractionX, marioSpeedX, stepFraction
+  StepFlyRandom{}
+  marioX = marioX + SixteenthsStep{marioFractionX, marioSpeedX}
+  marioFractionX = stepFraction
+  If flyTimer > 0 Then flyTimer = flyTimer - 1
+  For slotIndex.w = 0 To #FLY_SLOTS - 1
+    If flyActive(slotIndex) = True
+      If flyY(slotIndex) >= #FLY_ERASE_Y
+        flyActive(slotIndex) = False
+      Else
+        MoveFlyer{slotIndex}
+      EndIf
+    Else
+      If flyFrenzyOn = True Then TryLaunchFlyer{slotIndex}
+    EndIf
+  Next
+End Statement
+
+;; A fresh start: no flyers, the timer out, the register at its power-on value stepped preSteps times, Mario at x with a speed.
+Statement ResetFly{preSteps.w, startX.w, speed.w}
+  SHARED flyActive(), randomRegister(), flyTimer, marioX, marioFractionX, marioSpeedX
+  For slotIndex.w = 0 To #FLY_SLOTS - 1
+    flyActive(slotIndex) = False
+  Next
+  randomRegister(0) = $a5
+  For randomIndex.w = 1 To 6
+    randomRegister(randomIndex) = 0
+  Next
+  For stepIndex.w = 1 To preSteps
+    StepFlyRandom{}
+  Next
+  flyTimer = 0
+  marioX = startX
+  marioFractionX = 0
+  marioSpeedX = speed
+End Statement
+
+;; ---------------------------------------------------------------
+;; The traces
+;; ---------------------------------------------------------------
+
+Statement RunFlyTrace{runIndex.w}
+  SHARED flySet, flyActive(), flyX(), flyY(), traceX(), traceY()
+  preSteps.w = 0
+  speed.w = 0
+  If runIndex = 1
+    preSteps = 50
+  EndIf
+  If runIndex = 2
+    preSteps = 11
+    speed = 16
+  EndIf
+  If runIndex = 3
+    preSteps = 23
+    speed = 40
+  EndIf
+  If runIndex = 4
+    preSteps = 7
+    speed = -20
+  EndIf
+  ResetFly{preSteps, #TRACE_MARIO_X, speed}
+  For traceTick.w = 0 To #TRACE_TICKS - 1
+    FlyTick{}
+    For slotIndex.w = 0 To #FLY_MAX - 1
+      traceIndex.w = ((flySet*#TRACE_RUNS + runIndex)*#FLY_MAX + slotIndex)*#TRACE_TICKS + traceTick
+      traceX(traceIndex) = -1
+      traceY(traceIndex) = -1
+      If flyActive(slotIndex) = True
+        traceX(traceIndex) = flyX(slotIndex)
+        traceY(traceIndex) = flyY(slotIndex)
+      EndIf
+    Next
+  Next
+End Statement
+
+;; ---------------------------------------------------------------
+;; The screen
+;; ---------------------------------------------------------------
+
+;; A box in world rows, squeezed to the screen's height and cut to it.
+Statement WorldBox{boxX.w, boxY.w, boxW.w, boxH.w, colour.w}
+  SHARED screenHeight
+  boxLeft.w = boxX
+  boxRight.w = boxX + boxW - 1
+  If boxLeft < 0 Then boxLeft = 0
+  If boxRight > #VIEW_W - 1 Then boxRight = #VIEW_W - 1
+  If boxRight < boxLeft Then Statement Return
+  ; In longs: a y of 300 times 256 lines is past a word.
+  scaledTop.l = boxY
+  scaledTop = (scaledTop*screenHeight)/#WORLD_ROWS
+  scaledBottom.l = boxY + boxH
+  scaledBottom = (scaledBottom*screenHeight)/#WORLD_ROWS - 1
+  boxTop.w = scaledTop
+  boxBottom.w = scaledBottom
+  If boxTop < 0 Then boxTop = 0
+  If boxBottom > screenHeight - 1 Then boxBottom = screenHeight - 1
+  If boxBottom < boxTop Then Statement Return
+  Boxf boxLeft, boxTop, boxRight, boxBottom, colour
+End Statement
+
+Statement DrawFlyFrame{}
+  SHARED drawBitmap, flySet, flyFrenzyOn, flyActive(), flyX(), flyY(), marioX
+  Use BitMap drawBitmap
+  Cls 0
+  cameraLeft.w = marioX - 152
+  WorldBox{0, 0, #VIEW_W, #STATUS_ROWS, 4}
+  WorldBox{0, #GROUND_Y, #VIEW_W, #WORLD_ROWS - #GROUND_Y, 1}
+  WorldBox{marioX - cameraLeft, #GROUND_Y - #FLY_SIZE, #FLY_SIZE, #FLY_SIZE, 2}
+  For slotIndex.w = 0 To #FLY_MAX - 1
+    If flyActive(slotIndex) = True
+      WorldBox{flyX(slotIndex) - cameraLeft, flyY(slotIndex), #FLY_SIZE, #FLY_SIZE, 5 + flySet}
+    EndIf
+  Next
+  WorldBox{4, 4, 12, 12, 5 + flySet}
+  If flyFrenzyOn = True Then WorldBox{20, 4, 12, 12, 3}
+End Statement
+
+;; ---------------------------------------------------------------
+;; Run
+;; ---------------------------------------------------------------
+
+For setRun.w = #FLY_SET_CARTRIDGE To #FLY_SET_SCALED
+  SelectFlySet{setRun}
+  For traceRun.w = 0 To #TRACE_RUNS - 1
+    RunFlyTrace{traceRun}
+  Next
+Next
+
+SelectFlySet{#FLY_SET_CARTRIDGE}
+ResetFly{0, #TRACE_MARIO_X, 0}
+While quitFlag = False
+  marioSpeedX = 0
+  topSpeed.w = #MARIO_MAX_WALK
+  If RawStatus(#RAW_KEY_RUN) Then topSpeed = #MARIO_MAX_RUN
+  If RawStatus(#RAW_KEY_LEFT) Then marioSpeedX = -topSpeed
+  If RawStatus(#RAW_KEY_RIGHT) Then marioSpeedX = topSpeed
+  keyNow.w = RawStatus(#RAW_KEY_F1)
+  If keyNow <> False AND lastF1 = False
+    SelectFlySet{1 - flySet}
+    ResetFly{0, marioX, 0}
+  EndIf
+  lastF1 = keyNow
+  keyNow = RawStatus(#RAW_KEY_F2)
+  If keyNow <> False AND lastF2 = False
+    If flyFrenzyOn = True
+      flyFrenzyOn = False
+    Else
+      flyFrenzyOn = True
+    EndIf
+  EndIf
+  lastF2 = keyNow
+  FlyTick{}
+  DrawFlyFrame{}
+  VWait
+  DisplayBitMap 0, drawBitmap
+  drawBitmap = 1 - drawBitmap
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/fly-cheep-results.txt")
+  FileOutput 0
+  NPrint "Flying Cheep-Cheep proof results"
+  NPrint "Physics variant: ", #SIM_HZ, " ticks a second; running cutoff ", flyRunCutoff
+  For setReport.w = #FLY_SET_CARTRIDGE To #FLY_SET_SCALED
+    SelectFlySet{setReport}
+    NPrint ""
+    NPrint "Set ", setReport
+    NPrint "  launch ", flyLaunchSpeed, " gravity ", flyGravity, " fall max ", flyFallMax, " nudge ", flyNudgeForce
+    Print "  speeds:"
+    For dataReport.w = 0 To 11
+      Print " ", flySpeedData(dataReport)
+    Next
+    NPrint ""
+    Print "  timers:"
+    For dataReport = 0 To 3
+      Print " ", flyTimerData(dataReport)
+    Next
+    NPrint ""
+    For runReport.w = 0 To #TRACE_RUNS - 1
+      For slotReport.w = 0 To #FLY_MAX - 1
+        reportBase.w = ((setReport*#TRACE_RUNS + runReport)*#FLY_MAX + slotReport)*#TRACE_TICKS
+        Print "  run ", runReport, " slot ", slotReport, " x:"
+        For tickReport.w = 0 To #TRACE_TICKS - 1
+          Print " ", traceX(reportBase + tickReport)
+        Next
+        NPrint ""
+        Print "  run ", runReport, " slot ", slotReport, " y:"
+        For tickReport = 0 To #TRACE_TICKS - 1
+          Print " ", traceY(reportBase + tickReport)
+        Next
+        NPrint ""
+      Next
+    Next
+  Next
+  CloseFile 0
+EndIf
+End
+

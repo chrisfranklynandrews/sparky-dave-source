@@ -1,0 +1,11 @@
+;; Syntax proof: AmiBlitz 3.13 calls XOR as Xor(left, right).
+;; The two button bits are 1 and 2; their sum supplies the 3-bit mask.
+
+WBStartup
+
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+
+rightToLeft.w = Xor(#MARIO_BTN_RIGHT, #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+leftToRight.w = Xor(#MARIO_BTN_LEFT, #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)

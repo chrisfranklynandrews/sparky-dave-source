@@ -1,0 +1,38 @@
+;; =======================================================
+;; MAP SETUP (AMIGA MODE)
+;; =======================================================
+
+Dim mapBuffer.w(#MAP_CELLS - 1)
+Dim metatileBuffer.w(#MAP_CELLS - 1)
+Dim mapBufferBackup.w(#MAP_CELLS - 1)
+Dim metatileBufferBackup.w(#MAP_CELLS - 1)
+Dim stampHead.w(#STAMP_GID_MAX)
+Dim stampNext.w(#MAP_CELLS - 1)
+; The back strip's cells grouped by tile for its stamp (StampBackPlayfield{}), as stampHead() and stampNext() group the map's.
+Dim backStampHead.w(#STAMP_GID_MAX)
+Dim backStampNext.w(#BACK_CELLS - 1)
+
+atlasIff$ = dataDir$ + "tiles-all.iff"
+atlasIffUnder$ = dataDir$ + "tiles-allstars-under.iff"
+atlasIffWater$ = dataDir$ + "tiles-allstars-water.iff"
+atlasIffCastle$ = dataDir$ + "tiles-allstars-castle.iff"
+If #LOOK_ALLSTARS = 1 Then atlasIff$ = dataDir$ + "tiles-allstars-over.iff"
+
+BitMap #ATLAS_BM, #LOOK_ATLAS_W, #LOOK_ATLAS_H, #PLAYFIELD_PLANES
+
+Statement LoadAtlas{}
+  SHARED atlasIff$
+  LoadBitMap #ATLAS_BM, atlasIff$, 0
+End Statement
+
+;; The All-Stars look's other tile set, into the atlas bitmap (the same size, the layout the look constants say): no palette is loaded, the
+;; palette tables give the pens (the first atlas load took the display's palette 0).
+Statement LoadAtlasSet{tileSet.w}
+  SHARED atlasIff$, atlasIffUnder$, atlasIffWater$, atlasIffCastle$
+  If tileSet = #TILE_SET_UNDERGROUND Then LoadBitMap #ATLAS_BM, atlasIffUnder$
+  If tileSet = #TILE_SET_WATER Then LoadBitMap #ATLAS_BM, atlasIffWater$
+  If tileSet = #TILE_SET_CASTLE Then LoadBitMap #ATLAS_BM, atlasIffCastle$
+  If tileSet = 0 Then LoadBitMap #ATLAS_BM, atlasIff$
+End Statement
+
+;; END OF MAP SETUP (AMIGA MODE)

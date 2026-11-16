@@ -1,0 +1,689 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "SwimProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 255
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 10
+; Max TagList     = 15
+; Max Database    = 12
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+;; Proof: swimming (the level-2-2 plan, step 5). FOLDED 2026-10-21 into sparkydave.player.blitz.ab3 and
+;; sparkydave.collision.blitz.ab3 with the scaled set as the PAL variant's numbers; kept as the record of the two sets'
+;; comparison, its routines renamed Proof... so that it still compiles beside the engine's. The cartridge's water path, written as the routines it
+;; will become in sparkydave.player.blitz.ab3, run on the live player code (the includes are the harness's,
+;; so the walking, the friction, the vertical move and the collision are the game's own), with two sets of
+;; swim numbers for the PAL build to choose between in play (decision 2):
+;;
+;;   set 0, orange  the PAL listing's: the NTSC numbers, unchanged (JumpMForceData and the rest, entries 5 and 6;
+;;                  the surface force $18; JumpSwimTimer $20; the whirlpool's pull $10)
+;;   set 1, purple  ours, scaled to 50 ticks a second: forces x1.44, speeds x1.2, the timer x5/6
+;;
+;; Compiled with the NTSC variant both sets are shown too, but only set 0 is the cartridge there.
+;;
+;; Keys: LEFT and RIGHT swim or walk, SPACE strokes (a fresh press each time), F1 swaps the set and starts
+;; again, F2 starts again, ESC quits and writes the results.
+;;
+;; The screen is one of 2-2's: the sea floor (rows 13 and 14) with a pit three blocks wide (columns 8 to 10)
+;; and its whirlpool (the darker band, a block left of the pit and four blocks wide, as Hole_Empty makes it),
+;; a pillar (column 4), a ledge to bump the head on (row 6, columns 13 to 17) and a wall on the right. Mario
+;; is the red box; the white line is the water's surface. He starts at the top, as 2-2 starts him, and the
+;; pit puts him back at the start. The bar at the top left is the stroke timer (JumpSwimTimer).
+;;
+;; What to look for:
+;;   - before the first stroke he sinks with the area's start force (#MARIO_GRAV_FALL_INIT: $28 NTSC, $70
+;;     PAL), afterwards with the stroke's fall force, much slower;
+;;   - a stroke lifts him about a block and a half; strokes in quick succession climb, held SPACE does not
+;;     repeat; at the surface a stroke does not lift him and he is pushed back under;
+;;   - on the sea floor he walks, slower than on land (16, PAL 19, against 24 and 28);
+;;   - his head on the ledge stops him (speed 0: the water head-bump fix, both builds) with the bump sound;
+;;   - over the whirlpool he is drawn to its middle and down into the pit, and a stroke there is weaker.
+;;
+;; The results file (proofs/swim-results.txt) has, for each set, seven scripted runs from a standing start,
+;; Mario's y every tick (and x for the whirlpool), to check against the cartridge's arithmetic worked by
+;; hand: 0 sinking from rest, 1 one stroke tapped, 2 one stroke held, 3 a stroke every 8 ticks, 4 the
+;; whirlpool, 5 a stroke every 4 ticks at the surface, 6 a stroke every 8 ticks under the ledge.
+
+OPTIMIZE 1
+
+WBStartup
+
+#PLAYFIELD_PLANES = 4
+#COPPER_FLAGS = $10004
+#COPPER_COLORS = 16
+#SCENE_BM = 2
+
+#SWIM_SET_LISTING = 0
+#SWIM_SET_SCALED = 1
+
+#FLOOR_ROW = 13
+#PIT_FIRST = 8
+#PIT_LAST = 10
+#PILLAR_COLUMN = 4
+#PILLAR_TOP = 10
+#LEDGE_ROW = 6
+#LEDGE_FIRST = 13
+#LEDGE_LAST = 17
+#WALL_COLUMN = 19
+#WATER_TOP_ROW = 2
+#WHIRLPOOL_LEFT = 112
+#WHIRLPOOL_WIDTH = 64
+#START_X = 40
+#START_Y = 16
+#RESTART_Y = 250
+
+#TRACE_RUNS = 7
+#TRACE_TICKS = 64
+
+XINCLUDE "/includes/sparkydave.level.meta.ab3"
+XINCLUDE "/includes/sparkydave.areas.table.ab3"
+XINCLUDE "/includes/sparkydave.palettes.data.ab3"
+XINCLUDE "/includes/sparkydave.mario-allstars.data.ab3"
+XINCLUDE "/includes/sparkydave.allstars-palette.data.ab3"
+XINCLUDE "/includes/sparkydave.jukebox-scenes.data.ab3"
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.globals.ab3"
+Dim metatileBuffer.w(#MAP_CELLS - 1)
+Dim mapBuffer.w(#MAP_CELLS - 1)
+Dim mapBufferBackup.w(#MAP_CELLS - 1)
+Dim stampHead.w(#STAMP_GID_MAX)
+Dim stampNext.w(#MAP_CELLS - 1)
+Dim backStampHead.w(#STAMP_GID_MAX)
+Dim backStampNext.w(#BACK_CELLS - 1)
+Dim metatileBufferBackup.w(#MAP_CELLS - 1)
+XINCLUDE "/includes/sparkydave.metatile.classes.ab3"
+XINCLUDE "/includes/sparkydave.areaload.ab3"
+XINCLUDE "/includes/sparkydave.sound.data.ab3"
+XINCLUDE "/includes/sparkydave.sound.ab3"
+XINCLUDE "/includes/sparkydave.settings.ab3"
+
+Dim traceX.w(2*#TRACE_RUNS*#TRACE_TICKS - 1)
+Dim traceY.w(2*#TRACE_RUNS*#TRACE_TICKS - 1)
+
+mapWidth.w = #MAP_W
+quitFlag.w = False
+screenHeight = DispHeight
+
+;; The swim's own state: the cartridge's JumpSwimTimer and Whirlpool_Flag, and its FrameCounter for the
+;; whirlpool's every-other-frame pull.
+;; (jumpSwimTimer and whirlpoolFlag are the engine's, globals.ab3, since the fold.)
+swimFrame.w = 0
+;; The set in use: a stroke (JumpMForceData, FallMForceData, PlayerYSpdData and InitMForceData, entry 5),
+;; a stroke in a whirlpool (entry 6), the force above the surface, the stroke timer and the whirlpool's pull.
+swimSet.w = #SWIM_SET_LISTING
+swimRiseForce.w = 0
+swimFallForce.w = 0
+swimSpeed.w = 0
+swimInitForce.w = 0
+whirlRiseForce.w = 0
+whirlFallForce.w = 0
+whirlSpeed.w = 0
+whirlInitForce.w = 0
+swimSurfaceForce.w = 0
+swimTimerTicks.w = 0
+whirlPullForce.w = 0
+;; The sea floor's top speed (MaxLeftXSpdData and MaxRightXSpdData, entry 2, only a water area's): the PAL
+;; listing's 19, the NTSC one's 16.
+seaFloorMax.w = 16
+If #SIM_HZ = 50 Then seaFloorMax = 19
+swimDrawBitmap.w = 0
+lastF1.w = False
+lastF2.w = False
+
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 66, 64, 254
+AGAPalRGB 0, 1, 0, 168, 0
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 252, 252, 252
+AGAPalRGB 0, 4, 30, 30, 160
+AGAPalRGB 0, 5, 252, 152, 56
+AGAPalRGB 0, 6, 200, 0, 200
+AGAPalRGB 0, 7, 0, 0, 0
+BitMap 0, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+BitMap 1, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+BitMap #SCENE_BM, #VIEW_W, screenHeight, #PLAYFIELD_PLANES
+
+BLITZ
+InitCopList 0, #COPPER_FLAGS
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "/includes/sparkydave.sound.blitz.ab3"
+XINCLUDE "/includes/sparkydave.timing-marks.blitz.ab3"
+XINCLUDE "/includes/sparkydave.map.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system.blitz.ab3"
+XINCLUDE "/includes/sparkydave.debris.blitz.ab3"
+XINCLUDE "/includes/sparkydave.floaters.blitz.ab3"
+XINCLUDE "/includes/sparkydave.collision.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player-state.blitz.ab3"
+XINCLUDE "/includes/sparkydave.life.blitz.ab3"
+XINCLUDE "/includes/sparkydave.enemies.blitz.ab3"
+XINCLUDE "/includes/sparkydave.fireballs.blitz.ab3"
+XINCLUDE "/includes/sparkydave.levelend.blitz.ab3"
+XINCLUDE "/includes/sparkydave.pipes.blitz.ab3"
+XINCLUDE "/includes/sparkydave.object-system-runtime.blitz.ab3"
+XINCLUDE "/includes/sparkydave.player.blitz.ab3"
+XINCLUDE "/includes/sparkydave.hud.blitz.ab3"
+XINCLUDE "/includes/sparkydave.frametime.blitz.ab3"
+XINCLUDE "/includes/sparkydave.palette.blitz.ab3"
+XINCLUDE "/includes/sparkydave.parallax.blitz.ab3"
+XINCLUDE "/includes/sparkydave.jukebox.blitz.ab3"
+;; The tile sets (sparkydave.tileset.blitz.ab3) are not loaded here: there is no atlas, so there is nothing to change.
+Statement EnsureTileSet{}
+End Statement
+XINCLUDE "/includes/sparkydave.cover.blitz.ab3"
+
+;; ---------------------------------------------------------------
+;; The two sets
+;; ---------------------------------------------------------------
+
+;; Set 1 is set 0 scaled to 50 ticks a second: a force is per tick squared (x1.44), a speed per tick (x1.2),
+;; a timer in ticks (x5/6). A speed is the cartridge's whole pixels and a fraction of 256 carried in the move
+;; force, so -1.5 (-2 and $80) becomes -1.8 (-2 and $33) and -1 (-1 and $00) becomes -1.2 (-2 and $cd). The
+;; whirlpool's top speed (1) and its sideways pixel every other tick stay.
+Statement SelectSwimSet{setIndex.w}
+  SHARED swimSet, swimRiseForce, swimFallForce, swimSpeed, swimInitForce, whirlRiseForce, whirlFallForce
+  SHARED whirlSpeed, whirlInitForce, swimSurfaceForce, swimTimerTicks, whirlPullForce
+  swimSet = setIndex
+  If setIndex = #SWIM_SET_LISTING
+    swimRiseForce = $0d
+    swimFallForce = $0a
+    swimSpeed = -2
+    swimInitForce = $80
+    whirlRiseForce = $04
+    whirlFallForce = $09
+    whirlSpeed = -1
+    whirlInitForce = $00
+    swimSurfaceForce = $18
+    swimTimerTicks = $20
+    whirlPullForce = $10
+  Else
+    swimRiseForce = $13
+    swimFallForce = $0e
+    swimSpeed = -2
+    swimInitForce = $33
+    whirlRiseForce = $06
+    whirlFallForce = $0d
+    whirlSpeed = -2
+    whirlInitForce = $cd
+    swimSurfaceForce = $23
+    swimTimerTicks = 27
+    whirlPullForce = $17
+  EndIf
+End Statement
+
+;; ---------------------------------------------------------------
+;; The swim (to fold into sparkydave.player.blitz.ab3)
+;; ---------------------------------------------------------------
+
+;; A stroke (ProcJumping and InitJS, smbdis 6066 to 6131, with SwimmingFlag set): a fresh press strokes from the sea
+;; floor, and in the water too unless he is still rising from the last one after the stroke timer has run out. In a
+;; whirlpool (last tick's Whirlpool_Flag) the weaker stroke. Above the surface he does not rise from it.
+Statement ProofTryStartSwim{}
+  SHARED playerOnGround, playerButtons, playerButtonsLast, playerY, playerJumpOriginY, playerFractionY
+  SHARED playerMoveForceY, playerSpeedY, playerVerticalForce, playerFallForce, jumpSwimTimer, whirlpoolFlag
+  SHARED swimRiseForce, swimFallForce, swimSpeed, swimInitForce, whirlRiseForce, whirlFallForce
+  SHARED whirlSpeed, whirlInitForce, swimTimerTicks
+  jumpNow.w = playerButtons AND #MARIO_BTN_JUMP
+  previousJump.w = playerButtonsLast AND #MARIO_BTN_JUMP
+  If jumpNow = 0 Then Statement Return
+  If previousJump <> 0 Then Statement Return
+  If playerOnGround = False
+    If jumpSwimTimer = 0 AND playerSpeedY < 0 Then Statement Return
+  EndIf
+  jumpSwimTimer = swimTimerTicks
+  playerFractionY = 0
+  playerJumpOriginY = playerY
+  playerOnGround = False
+  If whirlpoolFlag <> False
+    playerVerticalForce = whirlRiseForce
+    playerFallForce = whirlFallForce
+    playerMoveForceY = whirlInitForce
+    playerSpeedY = whirlSpeed
+  Else
+    playerVerticalForce = swimRiseForce
+    playerFallForce = swimFallForce
+    playerMoveForceY = swimInitForce
+    playerSpeedY = swimSpeed
+  EndIf
+  SoundSquare1{#SFX_ENEMY_STOMP}
+  If playerY < #SWIM_SURFACE_Y Then playerSpeedY = 0
+End Statement
+
+;; The horizontal limits in water (X_Physics, 6132): in the water the land's air rows; on the sea floor the third
+;; row (ProcPRun branches past the run for a water area), which only water uses, and no running timer.
+Statement ProofSetupSwimLimits{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerMaximumLeft, playerMaximumRight
+  SHARED playerFrictionLow, playerFrictionHigh, playerFacingDirection, playerMovingDirection, seaFloorMax
+  If playerOnGround = False
+    SetupHorizontalLimits{}
+    Statement Return
+  EndIf
+  frictionBand.w = 1
+  If playerRunningSpeed <> 0 Then frictionBand = 2
+  If playerSpeedAbsolute >= #MARIO_SPD_FASTFRIC Then frictionBand = 2
+  playerMaximumRight = seaFloorMax
+  playerMaximumLeft = 0 - seaFloorMax
+  playerFrictionLow = #MARIO_FRIC_WALK
+  If frictionBand = 2 Then playerFrictionLow = #MARIO_FRIC_TURN
+  playerFrictionHigh = #MARIO_FRIC_HIGH
+  If playerFacingDirection <> playerMovingDirection
+    playerFrictionLow = playerFrictionLow*2
+    playerFrictionHigh = playerFrictionHigh*2
+    If playerFrictionLow >= 256
+      playerFrictionLow = playerFrictionLow - 256
+      playerFrictionHigh = playerFrictionHigh + 1
+    EndIf
+  EndIf
+End Statement
+
+;; GetPlayerAnimSpeed runs in the water too (ProcSwim, 5938): the frame timing, the running-speed latch and the
+;; turn on the spot under #MARIO_SPD_SKIDSTOP. PrepareGroundMotion{} is it, gated on the ground; this is the same
+;; with no gate.
+Statement ProofSwimAnimSpeed{}
+  SHARED playerOnGround, playerSpeedAbsolute, playerRunningSpeed, playerAnimPeriod
+  SHARED playerButtons, playerMovingDirection, playerFacingDirection, playerSpeedX, playerMoveForceX
+  If playerOnGround = True
+    PrepareGroundMotion{}
+    Statement Return
+  EndIf
+  If playerSpeedAbsolute >= #MARIO_SPD_RUNFLAG
+    playerRunningSpeed = playerSpeedAbsolute
+    playerAnimPeriod = #MARIO_ANIM_FAST
+    Statement Return
+  EndIf
+  playerAnimPeriod = #MARIO_ANIM_SLOW
+  If playerSpeedAbsolute >= #MARIO_SPD_ANIM Then playerAnimPeriod = #MARIO_ANIM_MID
+  heldBits.w = playerButtons AND ($7f - #MARIO_BTN_FIRE)
+  If heldBits = 0 Then Statement Return
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = playerMovingDirection
+    playerRunningSpeed = 0
+    Statement Return
+  EndIf
+  If playerSpeedAbsolute < #MARIO_SPD_SKIDSTOP
+    playerMovingDirection = playerFacingDirection
+    playerSpeedX = 0
+    playerMoveForceX = 0
+    playerSpeedAbsolute = 0
+  EndIf
+End Statement
+
+;; In the water he turns to face the way pressed (ProcSwim's LRWater, 5945); on land only on the ground.
+Statement ProofApplySwimFacing{}
+  SHARED playerButtons, playerFacingDirection, playerFacing
+  directionBits.w = playerButtons AND (#MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  If directionBits = 0 Then Statement Return
+  playerFacingDirection = directionBits
+  If playerFacingDirection = #MARIO_BTN_LEFT Then playerFacing = #MARIO_FACE_LEFT
+  If playerFacingDirection = #MARIO_BTN_RIGHT Then playerFacing = #MARIO_FACE_RIGHT
+End Statement
+
+;; JumpSwimSub (5922): the stroke's rise force while the button is held or he has not yet risen a pixel, else the
+;; fall force; and above the surface the surface force, whatever he is doing (ProcSwim, 5939).
+Statement ProofSelectSwimForce{}
+  SHARED playerOnGround, playerY, playerVerticalForce, swimSurfaceForce
+  If playerOnGround = True Then Statement Return
+  SelectVerticalForce{}
+  If playerY < #SWIM_SURFACE_Y Then playerVerticalForce = swimSurfaceForce
+End Statement
+
+;; The head in water (PlayerBGCollision, 11950 to 11973): no block is bumped or broken; a solid metatile plays the
+;; bump; either way the rise stops. The cartridge's NTSC listing sets the speed to 1, down; the PAL listing's fix
+;; (NYSpd, its 11959) sets 0 in water, which both our builds take (the user, 2026-10-21).
+Statement CheckSwimHead{}
+  SHARED playerX, playerY, playerSpeedY
+  If playerSpeedY >= 0 Then Statement Return
+  If playerY < #MT_HEAD_MIN_Y Then Statement Return
+  If (playerY AND $0f) < #MT_HEAD_MIN_SUBTILE Then Statement Return
+  blockClass.w = MetatileAt{playerX + #PROBE_TOP_X, playerY + #PROBE_TOP_Y}
+  If blockClass = #MT_EMPTY Then Statement Return
+  If blockClass <> #MT_BRICK AND blockClass <> #MT_QUESTION Then SoundSquare1{#SFX_BUMP}
+  playerSpeedY = 0
+End Statement
+
+;; ImposeGravity (7704) for the player with a force and a top speed of its own: MovePlayerVertical{}'s step, which
+;; is the same with the vertical force and #MARIO_FALL_MAX. (Folded in, MovePlayerVertical{} becomes a call to it.)
+Statement ProofImposePlayerGravity{gravityForce.w, maxSpeed.w}
+  SHARED playerY, playerSpeedY, playerMoveForceY, playerFractionY
+  playerFractionY = playerFractionY + playerMoveForceY
+  yCarry.w = 0
+  If playerFractionY >= 256
+    playerFractionY = playerFractionY - 256
+    yCarry = 1
+  EndIf
+  playerY = playerY + playerSpeedY + yCarry
+  playerMoveForceY = playerMoveForceY + gravityForce
+  If playerMoveForceY >= 256
+    playerMoveForceY = playerMoveForceY - 256
+    playerSpeedY = playerSpeedY + 1
+  EndIf
+  If playerSpeedY >= maxSpeed
+    If playerMoveForceY >= #MARIO_FALL_FRAC
+      playerSpeedY = maxSpeed
+      playerMoveForceY = 0
+    EndIf
+  EndIf
+End Statement
+
+;; ProcessWhirlpools and WhirlpoolActivate (6494 to 6567), after the player's own move: inside the span (its left
+;; edge to its right edge, both in) every other tick a pixel toward the middle (toward the right only if nothing
+;; blocks him there), and every tick a second vertical step with the pull's force and a top speed of 1. The flag
+;; it sets is the next stroke's.
+Statement ProcessWhirlpool{}
+  SHARED playerX, playerCollisionBits, whirlpoolFlag, swimFrame, whirlPullForce
+  whirlpoolFlag = False
+  swimFrame = swimFrame + 1
+  If playerX < #WHIRLPOOL_LEFT Then Statement Return
+  If playerX > #WHIRLPOOL_LEFT + #WHIRLPOOL_WIDTH Then Statement Return
+  centreX.w = #WHIRLPOOL_LEFT + #WHIRLPOOL_WIDTH/2
+  If (swimFrame AND 1) <> 0
+    If playerX > centreX
+      playerX = playerX - 1
+    Else
+      If (playerCollisionBits AND 1) <> 0 Then playerX = playerX + 1
+    EndIf
+  EndIf
+  ProofImposePlayerGravity{whirlPullForce, 1}
+  whirlpoolFlag = True
+End Statement
+
+;; One tick in water: the harness's Tick{} (the live UpdatePlayer{}'s order) with the water's routines in the places
+;; the cartridge's are. No jump forgiveness in water (a stroke is a stroke), no crouch, no camera (one screen).
+Statement SwimTick{buttons.w}
+  SHARED playerButtons, playerButtonsLast, playerRunningTimer, sideCollisionTimer, playerOnGround
+  SHARED playerCollisionBits, jumpSwimTimer
+  If jumpSwimTimer > 0 Then jumpSwimTimer = jumpSwimTimer - 1
+  If playerRunningTimer > 0 Then playerRunningTimer = playerRunningTimer - 1
+  If sideCollisionTimer > 0 Then sideCollisionTimer = sideCollisionTimer - 1
+  playerButtons = buttons
+  ApplyCollisionButtonMask{}
+  playerCollisionBits = $ff
+  SetPlayerAbsoluteSpeed{}
+  ProofTryStartSwim{}
+  ProofSetupSwimLimits{}
+  ProofSwimAnimSpeed{}
+  SetPlayerAbsoluteSpeed{}
+  ProofApplySwimFacing{}
+  ApplyHorizontalFriction{}
+  MovePlayerHorizontal{}
+  SetPlayerMovingDirection{}
+  CheckPlayerSides{}
+  SetPlayerAbsoluteSpeed{}
+  ProofSelectSwimForce{}
+  If playerOnGround = False Then MovePlayerVertical{}
+  CheckPlayerFeet{}
+  CheckSwimHead{}
+  ProcessWhirlpool{}
+  playerButtonsLast = playerButtons
+End Statement
+
+;; ---------------------------------------------------------------
+;; The proof's screen, runs and drawing
+;; ---------------------------------------------------------------
+
+Statement SetSwimCell{cellRow.w, cellColumn.w}
+  SHARED metatileBuffer()
+  metatileBuffer(cellRow*#MAP_W + cellColumn) = #MT_GROUND
+End Statement
+
+Statement BuildSwimMap{}
+  SHARED metatileBuffer()
+  For mapCell = 0 To #MAP_CELLS - 1
+    metatileBuffer(mapCell) = #MT_EMPTY
+  Next
+  For mapColumn = 0 To #WALL_COLUMN
+    If mapColumn < #PIT_FIRST OR mapColumn > #PIT_LAST
+      SetSwimCell{#FLOOR_ROW, mapColumn}
+      SetSwimCell{#FLOOR_ROW + 1, mapColumn}
+    EndIf
+  Next
+  For mapRow = #WATER_TOP_ROW To #FLOOR_ROW - 1
+    SetSwimCell{mapRow, #WALL_COLUMN}
+  Next
+  For mapRow = #PILLAR_TOP To #FLOOR_ROW - 1
+    SetSwimCell{mapRow, #PILLAR_COLUMN}
+  Next
+  For mapColumn = #LEDGE_FIRST To #LEDGE_LAST
+    SetSwimCell{#LEDGE_ROW, mapColumn}
+  Next
+End Statement
+
+;; A standing start: still, in the water, sinking with `fallForce` until the first stroke.
+Statement ResetSwimmer{startX.w, startY.w, fallForce.w}
+  SHARED playerX, playerY, playerSpeedX, playerMoveForceX, playerFractionX, playerSpeedY, playerMoveForceY
+  SHARED playerFractionY, playerOnGround, playerFallForce, playerVerticalForce, playerJumpOriginY, jumpSwimTimer
+  SHARED playerButtons, playerButtonsLast, playerRunningSpeed, playerRunningTimer, whirlpoolFlag, swimFrame
+  SHARED playerState, playerFacingDirection, playerMovingDirection, playerCollisionBits, sideCollisionTimer
+  playerX = startX
+  playerY = startY
+  playerSpeedX = 0
+  playerMoveForceX = 0
+  playerFractionX = 0
+  playerSpeedY = 0
+  playerMoveForceY = 0
+  playerFractionY = 0
+  playerOnGround = False
+  playerFallForce = fallForce
+  playerVerticalForce = fallForce
+  playerJumpOriginY = startY
+  jumpSwimTimer = 0
+  playerButtons = 0
+  playerButtonsLast = 0
+  playerRunningSpeed = 0
+  playerRunningTimer = 0
+  whirlpoolFlag = False
+  swimFrame = 0
+  playerState = #PLAYER_ST_FREE
+  playerFacingDirection = #MARIO_BTN_RIGHT
+  playerMovingDirection = #MARIO_BTN_RIGHT
+  playerCollisionBits = $ff
+  sideCollisionTimer = 0
+End Statement
+
+;; One scripted run of #TRACE_TICKS ticks for the set in use, its x and y each tick into the traces.
+Statement RunTrace{traceRun.w}
+  SHARED traceX(), traceY(), swimSet, swimFallForce, playerX, playerY
+  If traceRun = 0 Then ResetSwimmer{#START_X, 64, #MARIO_GRAV_FALL_INIT}
+  If traceRun = 1 OR traceRun = 2 Then ResetSwimmer{#START_X, 128, swimFallForce}
+  If traceRun = 3 Then ResetSwimmer{#START_X, 160, swimFallForce}
+  If traceRun = 4 Then ResetSwimmer{136, 96, swimFallForce}
+  If traceRun = 5 Then ResetSwimmer{#START_X, 48, swimFallForce}
+  If traceRun = 6 Then ResetSwimmer{232, 144, swimFallForce}
+  traceBase.w = (swimSet*#TRACE_RUNS + traceRun)*#TRACE_TICKS
+  For traceTick = 0 To #TRACE_TICKS - 1
+    traceButtons.w = 0
+    If traceRun = 1 AND traceTick = 0 Then traceButtons = #MARIO_BTN_JUMP
+    If traceRun = 2 Then traceButtons = #MARIO_BTN_JUMP
+    If traceRun = 3 OR traceRun = 6
+      If (traceTick AND 7) = 0 Then traceButtons = #MARIO_BTN_JUMP
+    EndIf
+    If traceRun = 5
+      If (traceTick AND 3) = 0 Then traceButtons = #MARIO_BTN_JUMP
+    EndIf
+    SwimTick{traceButtons}
+    traceX(traceBase + traceTick) = playerX
+    traceY(traceBase + traceTick) = playerY
+  Next
+End Statement
+
+;; The scene that does not move, once, into its own bitmap: the water, the whirlpool's band, the surface and the rock.
+Statement DrawSwimScene{}
+  SHARED metatileBuffer()
+  Use BitMap #SCENE_BM
+  Cls 0
+  Boxf #WHIRLPOOL_LEFT, #WATER_TOP_ROW*#TILE, #WHIRLPOOL_LEFT + #WHIRLPOOL_WIDTH - 1, #MAP_H*#TILE - 1, 4
+  Boxf 0, #WATER_TOP_ROW*#TILE + 5, #VIEW_W - 1, #WATER_TOP_ROW*#TILE + 6, 3
+  For sceneRow = 0 To #MAP_H - 1
+    For sceneColumn = 0 To #VIEW_TILES_W - 1
+      If metatileBuffer(sceneRow*#MAP_W + sceneColumn) <> #MT_EMPTY
+        Boxf sceneColumn*#TILE, sceneRow*#TILE, sceneColumn*#TILE + #TILE - 1, sceneRow*#TILE + #TILE - 1, 1
+      EndIf
+    Next
+  Next
+End Statement
+
+;; A frame: the scene copied in, Mario's box, the set's colour and the stroke timer's bar.
+Statement DrawSwimFrame{}
+  SHARED swimDrawBitmap, playerX, playerY, swimSet, jumpSwimTimer
+  Use BitMap swimDrawBitmap
+  Scroll 0, 0, #VIEW_W, #MAP_H*#TILE, 0, 0, #SCENE_BM
+  If playerY > -16 AND playerY < #MAP_H*#TILE
+    boxTop.w = playerY + 1
+    If boxTop < 0 Then boxTop = 0
+    boxBottom.w = playerY + #TILE - 1
+    If boxBottom > #MAP_H*#TILE - 1 Then boxBottom = #MAP_H*#TILE - 1
+    Boxf playerX + 2, boxTop, playerX + 13, boxBottom, 2
+  EndIf
+  Boxf 4, 4, 15, 15, 5 + swimSet
+  If jumpSwimTimer > 0 Then Boxf 20, 8, 20 + jumpSwimTimer*2, 11, 3
+End Statement
+
+;; ---------------------------------------------------------------
+;; Run
+;; ---------------------------------------------------------------
+
+BuildSwimMap{}
+For setRun = #SWIM_SET_LISTING To #SWIM_SET_SCALED
+  SelectSwimSet{setRun}
+  For traceRun = 0 To #TRACE_RUNS - 1
+    RunTrace{traceRun}
+  Next
+Next
+
+DrawSwimScene{}
+SelectSwimSet{#SWIM_SET_LISTING}
+ResetSwimmer{#START_X, #START_Y, #MARIO_GRAV_FALL_INIT}
+While quitFlag = False
+  buttons.w = 0
+  If RawStatus(#RAW_KEY_LEFT) Then buttons = #MARIO_BTN_LEFT
+  If RawStatus(#RAW_KEY_RIGHT) Then buttons = buttons OR #MARIO_BTN_RIGHT
+  If RawStatus(#RAW_KEY_JUMP) Then buttons = buttons OR #MARIO_BTN_JUMP
+  restartNow.w = False
+  keyNow.w = RawStatus(#RAW_KEY_F1)
+  If keyNow <> False AND lastF1 = False
+    SelectSwimSet{1 - swimSet}
+    restartNow = True
+  EndIf
+  lastF1 = keyNow
+  keyNow = RawStatus(#RAW_KEY_F2)
+  If keyNow <> False AND lastF2 = False Then restartNow = True
+  lastF2 = keyNow
+  If restartNow = True Then ResetSwimmer{#START_X, #START_Y, #MARIO_GRAV_FALL_INIT}
+  SwimTick{buttons}
+  If playerY > #RESTART_Y Then ResetSwimmer{#START_X, #START_Y, #MARIO_GRAV_FALL_INIT}
+  DrawSwimFrame{}
+  VWait
+  DisplayBitMap 0, swimDrawBitmap
+  swimDrawBitmap = 1 - swimDrawBitmap
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/swim-results.txt")
+  FileOutput 0
+  NPrint "Swim proof results"
+  NPrint "Physics variant: ", #SIM_HZ, " ticks a second; sea floor top speed ", seaFloorMax, "; start fall force ", #MARIO_GRAV_FALL_INIT
+  For setReport = #SWIM_SET_LISTING To #SWIM_SET_SCALED
+    SelectSwimSet{setReport}
+    NPrint ""
+    If setReport = #SWIM_SET_LISTING
+      NPrint "Set 0, the PAL listing's (the NTSC numbers):"
+    Else
+      NPrint "Set 1, scaled to 50 ticks a second:"
+    EndIf
+    NPrint "  stroke rise ", swimRiseForce, " fall ", swimFallForce, " speed ", swimSpeed, " start force ", swimInitForce
+    NPrint "  whirlpool stroke rise ", whirlRiseForce, " fall ", whirlFallForce, " speed ", whirlSpeed, " start force ", whirlInitForce
+    NPrint "  surface force ", swimSurfaceForce, " stroke timer ", swimTimerTicks, " whirlpool pull ", whirlPullForce
+    For runReport = 0 To #TRACE_RUNS - 1
+      reportBase.w = (setReport*#TRACE_RUNS + runReport)*#TRACE_TICKS
+      Print "  run ", runReport, " y:"
+      For tickReport = 0 To #TRACE_TICKS - 1
+        Print " ", traceY(reportBase + tickReport)
+      Next
+      NPrint ""
+      If runReport = 4
+        Print "  run 4 x:"
+        For tickReport = 0 To #TRACE_TICKS - 1
+          Print " ", traceX(reportBase + tickReport)
+        Next
+        NPrint ""
+      EndIf
+    Next
+  Next
+  CloseFile 0
+EndIf
+End

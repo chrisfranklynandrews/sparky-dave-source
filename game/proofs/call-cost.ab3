@@ -1,0 +1,252 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; call-cost.ab3 -- what does calling a Statement or a Function cost in compiled AmiBlitz?
+;; Compile in UAE. Not part of the game. Proof for the main project's OPTIMISATION note.
+;;
+;; The sim split (2026-10-14) put the sound's heavy frames in the APU clocks and Paula, code
+;; made of many small Statements (ApuEnvelopeStep{} three times a channel a tick, and so on),
+;; and five calls a tick of the debug-only SoundTimeMark{} raised the sound's average by about
+;; 18 lines a frame: about 3 lines a call for a near-empty body. If a call costs that much,
+;; inlining the APU's small helpers is the fix. This proves it before the engine is touched.
+;;
+;; Each variant runs #CALLS times in a frame, timed by the raster beam, for #FRAMES frames
+;; (the first #SETTLE not counted). The baseline is the empty loop; each variant's cost is
+;; its lines less the baseline's, per #CALLS (100) calls:
+;;   0  the empty loop (baseline)
+;;   1  an empty Statement, no parameters
+;;   2  an empty Statement with two word parameters
+;;   3  a Statement like ApuEnvelopeStep{}: two parameters, a SHARED array, a local, a branch
+;;   4  the same body inline
+;;   5  a Function returning its parameter plus 1
+;;   6  the same inline
+;;   7  a Statement like SoundTimeMark{}: a SHARED flag test, a Peek of the beam, a SHARED
+;;      array update
+;;   8  the same body inline
+;; It runs on its own in Blitz mode (no display; the screen may be blank) for about 18
+;; seconds, then writes call-cost-results.txt.
+
+WBStartup
+
+#CALLS    = 100
+#FRAMES   = 100
+#SETTLE   = 5
+#VARIANTS = 9
+#LINES_PAL = 312
+
+Dim testState.l(63)
+Dim variantSum.l(#VARIANTS - 1)
+Dim variantMax.l(#VARIANTS - 1)
+Dim variantFrames.l(#VARIANTS - 1)
+timingOn.w = True
+markLine.l = 0
+resultValue.l = 0
+
+BLITZ
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+Statement EmptyCall{}
+End Statement
+
+Statement TwoParams{firstValue.w, secondValue.w}
+End Statement
+
+;; Like ApuEnvelopeStep{}: reads and writes a SHARED array at a base, with a local and a branch.
+Statement EnvelopeLike{channelBase.w, controlValue.w}
+  SHARED testState()
+  levelNow.w = testState(channelBase + 1)
+  If levelNow > 0
+    testState(channelBase + 1) = levelNow - 1
+  Else
+    If (controlValue AND 32) <> 0 Then testState(channelBase + 1) = 15
+  EndIf
+End Statement
+
+Function.l AddOne{inputValue.l}
+  Function Return inputValue + 1
+End Function
+
+;; Like SoundTimeMark{}.
+Statement MarkLike{markPart.w}
+  SHARED timingOn, markLine, testState()
+  If timingOn = False Then Statement Return
+  lineNow.l = (Peek.l($dff004) AND $1ff00)/256
+  If markPart >= 0
+    partLines.l = lineNow - markLine
+    If partLines < 0 Then partLines = partLines + #LINES_PAL
+    testState(markPart) = testState(markPart) + partLines
+  EndIf
+  markLine = lineNow
+End Statement
+
+For variant.w = 0 To #VARIANTS - 1
+  For frameIndex.w = 0 To #FRAMES - 1
+    VWait
+    startLine.l = RasterLine{}
+    If variant = 0
+      For callIndex.w = 1 To #CALLS
+      Next
+    EndIf
+    If variant = 1
+      For callIndex.w = 1 To #CALLS
+        EmptyCall{}
+      Next
+    EndIf
+    If variant = 2
+      For callIndex.w = 1 To #CALLS
+        TwoParams{callIndex, 3}
+      Next
+    EndIf
+    If variant = 3
+      For callIndex.w = 1 To #CALLS
+        EnvelopeLike{16, 5}
+      Next
+    EndIf
+    If variant = 4
+      For callIndex.w = 1 To #CALLS
+        levelNow.w = testState(16 + 1)
+        If levelNow > 0
+          testState(16 + 1) = levelNow - 1
+        Else
+          If (5 AND 32) <> 0 Then testState(16 + 1) = 15
+        EndIf
+      Next
+    EndIf
+    If variant = 5
+      For callIndex.w = 1 To #CALLS
+        resultValue = AddOne{callIndex}
+      Next
+    EndIf
+    If variant = 6
+      For callIndex.w = 1 To #CALLS
+        resultValue = callIndex + 1
+      Next
+    EndIf
+    If variant = 7
+      For callIndex.w = 1 To #CALLS
+        MarkLike{1}
+      Next
+    EndIf
+    If variant = 8
+      For callIndex.w = 1 To #CALLS
+        If timingOn <> False
+          lineNow.l = (Peek.l($dff004) AND $1ff00)/256
+          partLines.l = lineNow - markLine
+          If partLines < 0 Then partLines = partLines + #LINES_PAL
+          testState(1) = testState(1) + partLines
+          markLine = lineNow
+        EndIf
+      Next
+    EndIf
+    endLine.l = RasterLine{}
+    frameLines.l = endLine - startLine
+    If frameLines < 0 Then frameLines = frameLines + #LINES_PAL
+    If frameIndex >= #SETTLE
+      variantFrames(variant) = variantFrames(variant) + 1
+      variantSum(variant) = variantSum(variant) + frameLines
+      If frameLines > variantMax(variant) Then variantMax(variant) = frameLines
+    EndIf
+  Next
+Next
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/call-cost-results.txt")
+  FileOutput 0
+  NPrint "call-cost: ", #CALLS, " calls a frame, ", #FRAMES - #SETTLE, " frames a variant"
+  NPrint "A raster line is about 63.5 microseconds. Lines are for all ", #CALLS, " calls together."
+  NPrint ""
+  NPrint "variant  average lines  worst lines  less the empty loop (lines per 100 calls)"
+  baseAverage.l = 0
+  If variantFrames(0) > 0 Then baseAverage = variantSum(0)/variantFrames(0)
+  For variant.w = 0 To #VARIANTS - 1
+    If variantFrames(variant) > 0
+      averageLines.l = variantSum(variant)/variantFrames(variant)
+      NPrint variant, "  ", averageLines, "  ", variantMax(variant), "  ", averageLines - baseAverage
+    EndIf
+  Next
+  NPrint ""
+  NPrint "0 empty loop, 1 empty Statement, 2 Statement with two parameters, 3 envelope-like Statement,"
+  NPrint "4 the same inline, 5 Function plus 1, 6 the same inline, 7 mark-like Statement, 8 the same inline"
+  CloseFile 0
+EndIf
+End

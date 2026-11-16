@@ -1,0 +1,220 @@
+; XTRA
+; Embedded .xtra Header
+; 
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "GoombaSpriteProof"
+; CreateIcon      = 0
+; Residents       = ""
+; 
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+; 
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+; 
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+; 
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 4
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 256
+; Max Stencil     = 0
+; Max XBSound     = 0
+; Max Page        = 0
+; /XTRA
+
+;; Goomba sprite proof -- loads enemies.iff, extracts 16x16 frames via GetaShape,
+;; draws with BBlit/UnBuffer on both buffers, tests box overlap.
+;; Compile in UAE: Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/proofs/goomba-sprite-proof.ab3 -e RAM:GoombaSpriteProof -v 2
+
+WBStartup
+
+;; Include constants and globals from main project
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.palettes.data.ab3"
+XINCLUDE "/includes/sparkydave.globals.ab3"
+
+;; Screen setup
+#PLAYFIELD_PLANES   = 4
+#COPPER_FLAGS   = $10004
+#COPPER_COLORS  = 16
+#COPPER_YPOS    = 44
+#VIEW_H      = 256
+
+;; Test Goomba position
+goombaX.w = 100
+goombaY.w = 100
+goombaFrame.w = 0
+goombaAnimTimer.w = 0
+
+;; Player box (for overlap test)
+playerBoxLeft.w = 0
+playerBoxTop.w = 0
+playerBoxRight.w = 0
+playerBoxBottom.w = 0
+
+;; Goomba box
+goombaBoxLeft.w = 0
+goombaBoxTop.w = 0
+goombaBoxRight.w = 0
+goombaBoxBottom.w = 0
+
+;; Overlap result
+overlap.w = False
+
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 168, 168, 168
+AGAPalRGB 0, 2, 220, 0, 0
+AGAPalRGB 0, 3, 0, 200, 0
+
+;; Allocate bitmaps and shapes (using constants from includes)
+BitMap #ENEMIES_BM, #ENEMIES_SHEET_W, #ENEMIES_SHEET_H, #PLAYFIELD_PLANES
+BitMap #PLAY_BM_A, #VIEW_W, #VIEW_H, #PLAYFIELD_PLANES
+BitMap #PLAY_BM_B, #VIEW_W, #VIEW_H, #PLAYFIELD_PLANES
+
+InitShape #ENEMIES_SHAPE, #GOOMBA_W, #GOOMBA_H, #PLAYFIELD_PLANES
+
+Buffer #BOB_BUF_A, #BOB_BYTES
+Buffer #BOB_BUF_B, #BOB_BYTES
+
+;; Load enemy sheet
+enemiesIff$ = "sparky-dave:game/assets/enemies.iff"
+LoadBitMap #ENEMIES_BM, enemiesIff$
+
+;; Display setup
+InitCopList 0, #COPPER_YPOS, #VIEW_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+CreateDisplay 0
+DisplayBitMap 0, #PLAY_BM_A, 0, 0
+DisplayPalette 0, 0
+BlitzKeys On
+
+drawBitmap.w = #PLAY_BM_A
+drawBuffer.w = #BOB_BUF_A
+
+Cls 0
+
+;; Main loop
+While RawKey <> #RAW_KEY_ESC
+  ;; Toggle frame for animation test
+  goombaAnimTimer = goombaAnimTimer + 1
+  If goombaAnimTimer >= #GOOMBA_ANIM_SPEED
+    goombaAnimTimer = 0
+    goombaFrame = 1 - goombaFrame  ;; Toggle between 0 and 1
+  EndIf
+
+  ;; Update Goomba box
+  goombaBoxLeft = goombaX
+  goombaBoxTop = goombaY
+  goombaBoxRight = goombaX + #GOOMBA_W - 1
+  goombaBoxBottom = goombaY + #GOOMBA_H - 1
+
+  ;; Simulate player box near Goomba (for overlap test)
+  playerBoxLeft = goombaX - 8
+  playerBoxTop = goombaY - 4
+  playerBoxRight = goombaX + 8
+  playerBoxBottom = goombaY + 12
+
+  ;; Test box overlap (inclusive bounds)
+  overlap = False
+  If playerBoxRight >= goombaBoxLeft AND playerBoxLeft <= goombaBoxRight
+    If playerBoxBottom >= goombaBoxTop AND playerBoxTop <= goombaBoxBottom
+      overlap = True
+    EndIf
+  EndIf
+
+  ;; Draw frame
+  Use BitMap drawBitmap
+  UnBuffer drawBuffer
+
+  ;; Clear with sky color
+  Cls 0
+
+  ;; Draw Goomba via GetaShape + BBlit
+  BBlitMode CookieMode
+  Use BitMap #ENEMIES_BM
+  ;; Frame 0 at x=0, y=16 (bottom of 32px cell)
+  ;; Frame 1 at x=16, y=16
+  ;; Frame 2 at x=32, y=16
+  frameSrcX.w = goombaFrame * #GOOMBA_W
+  frameSrcY.w = 16
+  GetaShape #ENEMIES_SHAPE, frameSrcX, frameSrcY, #GOOMBA_W, #GOOMBA_H
+  Use BitMap drawBitmap
+  BBlit drawBuffer, #ENEMIES_SHAPE, goombaX, goombaY
+
+  ;; Draw player box outline (red)
+  Boxf playerBoxLeft, playerBoxTop, playerBoxRight, playerBoxBottom, 2
+
+  ;; Draw overlap indicator
+  If overlap = True
+    Text 10, 10, "OVERLAP!"
+  Else
+    Text 10, 10, "no overlap"
+  EndIf
+
+  ;; Swap buffers
+  displayBitmap = drawBitmap
+  VWait
+  DisplayBitMap 0, displayBitmap, 0, 0
+
+  drawBitmap = #PLAY_BM_A + #PLAY_BM_B - displayBitmap
+  drawBuffer = #BOB_BUF_A + #BOB_BUF_B - displayBitmap
+
+Wend
+
+AMIGA
+End

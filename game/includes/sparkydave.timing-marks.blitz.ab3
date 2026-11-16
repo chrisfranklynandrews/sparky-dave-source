@@ -1,0 +1,65 @@
+;; =======================================================
+;; TRANSITION TIMING MARKS (BLITZ MODE)
+;; =======================================================
+;; A log of when each step of a reload happened, to see where the time of a transition goes
+;; (the main project's OPTIMISATION note). A mark is a label and the CIA-A
+;; time-of-day counter, which counts the display frames (the main project's TIMING note), so a step
+;; shorter than a frame reads 0. A label that starts with ">" begins a transition. The report
+;; is written at exit with the frame time report (sparkydave.reports.ab3). Only in debug mode (the parameter debug).
+
+; CIA-A's time of day, in frames. The high byte is read first, which latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+;; Display frames since startFrame (a ReadTimeOfDay{}), the counter's wrap at 24 bits allowed for. Used outside debug mode too
+;; (the covers' hold, CoverTicksLeft{}).
+Function.l FramesSince{startFrame.l}
+  elapsedFrames.l = ReadTimeOfDay{} - startFrame
+  If elapsedFrames < 0 Then elapsedFrames = elapsedFrames + $1000000
+  Function Return elapsedFrames
+End Function
+
+Statement MarkTransition{markLabel$}
+  SHARED transitionCount, transitionLabel$(), transitionTime(), transitionDropped
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  If transitionCount >= #TRANSITION_LOG_MAX
+    transitionDropped = transitionDropped + 1
+    Statement Return
+  EndIf
+  transitionLabel$(transitionCount) = markLabel$
+  transitionTime(transitionCount) = ReadTimeOfDay{}
+  transitionCount = transitionCount + 1
+End Statement
+
+;; How many raster lines a frame has on this machine: PAL 312, NTSC 262 (videoIsNtsc), for
+;; SegmentLines{} (sparkydave.beam.blitz.ab3). The frame time report's marks use it.
+Function.l FrameLines{}
+  SHARED videoIsNtsc
+  If videoIsNtsc = True Then Function Return #PERF_LINES_NTSC
+  Function Return #PERF_LINES_PAL
+End Function
+
+;; The objects' and enemies' share of the sim, for the frame time report (sparkydave.frametime.blitz.ab3,
+;; which is included after the player code that calls these, so they are here). Around the
+;; activation and UpdateObjects{} in UpdatePlayer{}; the lines are added up over the frame's
+;; ticks and FrameTimeStart{} sets the total back to 0. Only in debug mode.
+Statement ObjectsTimeBegin{}
+  SHARED objectsBeginLine
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  objectsBeginLine = RasterLine{}
+End Statement
+
+Statement ObjectsTimeEnd{}
+  SHARED objectsBeginLine, frameTimeObjectsLines
+  SHARED debugMode
+  If debugMode = False Then Statement Return
+  frameTimeObjectsLines = frameTimeObjectsLines + SegmentLines{objectsBeginLine, RasterLine{}, FrameLines{}}
+End Statement
+
+;; END OF TRANSITION TIMING MARKS (BLITZ MODE)

@@ -1,0 +1,203 @@
+;; =======================================================
+;; AREAS (BLITZ MODE)
+;; =======================================================
+;; Switching between the main level and the bonus room (see
+;; sparkydave.pipes.blitz.ab3 for the pipe moves that ask for it, and
+;; the main project's AREAS note). The sim only sets areaEvent; the main loop calls
+;; HandleAreaEvent{} each frame, outside the sim, because a reload re-stamps both
+;; playfields and takes several frames, as a restart does.
+;;
+;; The bonus room is copied from its slot (sparkydave.areaload.ab3, read from its area file at start-up) straight into
+;; mapBuffer and metatileBuffer (EnterSlotMaps{}), never into the backups, so ResetLevel{} always
+;; restores the MAIN level: a death in the bonus room, F1 and the return from it all
+;; end up in the main level, with its blocks and bricks as new (the cartridge
+;; re-decodes the level on the way back, so the bricks Mario broke are back).
+;; Score, coins, lives, the timer, his size and the Starman all carry across.
+
+;; The way into a room: the world goes, the room comes, and Mario drops in from the top of the screen at the room's
+;; BonusStart with no control until he is below #BONUS_DROP_READY_Y (PlayerEntrance, smbdis 5500). roomSlot is the room's
+;; slot, from the pipe's link.
+Statement SwitchToBonus{roomSlot.w}
+  SHARED currentAreaType, tableAreaType(), slotAreaIndex(), currentAreaScenery, tableAreaScenery()
+  SHARED areaBonusStartX, areaBonusStartY
+  SHARED currentArea, areaEvent, cameraX, cameraFractionX, playerX, playerY, playerScreenX
+  SHARED playerState, pipeOccludeCols, drawBitmap, drawBuffer
+  NoteReload{}
+  keepBitmap.w = drawBitmap
+  keepBuffer.w = drawBuffer
+  ResetLevel{}
+  EnterSlotMaps{roomSlot}
+  ApplyRoomBoxes{roomSlot}
+  currentAreaType = tableAreaType(slotAreaIndex(roomSlot))
+  currentAreaScenery = tableAreaScenery(slotAreaIndex(roomSlot))
+  MarkTransition{"SwitchToBonus: bonus room loaded"}
+  EnsureTileSet{}
+  StampBothPlayfields{}
+  currentArea = #AREA_BONUS
+  areaEvent = 0
+  pipeOccludeCols = 0
+  cameraX = 0
+  cameraFractionX = 0
+  playerX = areaBonusStartX
+  playerY = areaBonusStartY
+  playerScreenX = playerX
+  StopPlayer{}
+  playerState = #PLAYER_ST_DROP
+  RefreshBobBuffers{keepBitmap, keepBuffer}
+  MarkTransition{"SwitchToBonus: done"}
+End Statement
+
+;; The way out of a pipe into a level area: the area that is the world at the page the pipe leads to, with Mario below the
+;; bottom of the screen at the return pipe on that page and rising out of it. A room returns to the level area it came
+;; from (a restore of it, the cartridge's re-decode: its broken bricks and hit blocks are back); a pipe at the end of one
+;; level area can lead to another (1-2's exit to 1-1 at page 11), which becomes the world, with its own tables. The
+;; Goombas and Koopas are built again from the left edge of the view on (those in view appear, as the cartridge's do after a pipe),
+;; those behind it not at all; the timer is not reloaded.
+Statement SwitchToLevelArea{targetSlot.w, targetPage.w, arrivalMode.w}
+  SHARED areaReturnX, currentLevelSlot, areaMarioStartX, areaMarioStartY, playerOnGround
+  SHARED areaIntroWalk, levelRestartSlot
+  SHARED currentArea, areaEvent, cameraX, cameraFractionX, playerX, playerY, playerScreenX
+  SHARED drawBitmap, drawBuffer, currentAreaType, startAreaType, currentAreaScenery, startAreaScenery, playerState
+  SHARED playerFacing, playerFacingDirection, playerFallForce, jumpSwimTimer, whirlpoolFlag
+  NoteReload{}
+  keepBitmap.w = drawBitmap
+  keepBuffer.w = drawBuffer
+  wasIntro.w = areaIntroWalk
+  If targetSlot <> currentLevelSlot Then EnterLevelAreaSlot{targetSlot}
+  ; Out of the pipe intro the level begins: a death from here on restarts in this area, not the intro.
+  If wasIntro <> False Then levelRestartSlot = targetSlot
+  ResetLevel{}
+  ; ResetLevel{} restored the world's maps and its type; the boxes of a room it came from are the level area's again.
+  ApplyPipeExitBox{targetSlot}
+  ; The flag goes with the area it is in: the pole of the area he arrives in, or none.
+  PlaceFlag{}
+  ; The pipe modes (1 and 2) look for the return pipe on the page; the vine and the fall (modes 3 and 4) have none.
+  returnFound.w = False
+  If arrivalMode < #ARRIVE_DROP Then returnFound = SelectAreaReturn{targetSlot, targetPage}
+  EnsureTileSet{}
+  StampBothPlayfields{}
+  currentArea = #AREA_MAIN
+  currentAreaType = startAreaType
+  currentAreaScenery = startAreaScenery
+  areaEvent = 0
+  cameraX = areaReturnX - #RETURN_SCREEN_X
+  cameraFractionX = 0
+  playerX = areaReturnX
+  playerY = #RETURN_START_Y
+  playerScreenX = #RETURN_SCREEN_X
+  ;; Every arrival in an area starts the fall force afresh (Entrance_GameTimerSetup, smbdis 2837: what he sinks or falls with
+  ;; before his first stroke or jump there), and no stroke timer or whirlpool is carried in.
+  playerFallForce = #MARIO_GRAV_FALL_INIT
+  jumpSwimTimer = 0
+  whirlpoolFlag = False
+  If returnFound <> False
+    StartPipe{#PLAYER_ST_PIPE_UP}
+  Else
+    ;; No return pipe on that page (the cartridge's entrance mode 0): he comes in at the start of the page, dropping from
+    ;; the top when the area starts him there (1-2's entrance control 1, as a restart does), else standing.
+    cameraX = targetPage*256
+    playerX = cameraX + areaMarioStartX
+    playerScreenX = areaMarioStartX
+    StopPlayer{}
+    If areaMarioStartY = 0
+      playerY = 0
+      playerState = #PLAYER_ST_DROP
+    Else
+      ;; A water area starts him at its own height (2-2's entrance control 0: the top of the screen), in the water and with
+      ;; control, sinking until he strokes.
+      If currentAreaType = #AREA_TYPE_WATER
+        playerY = areaMarioStartY
+        playerState = #PLAYER_ST_FREE
+      Else
+        playerY = #HALFWAY_START_Y
+        playerState = #PLAYER_ST_FREE
+        playerOnGround = True
+      EndIf
+    EndIf
+  EndIf
+  ; Dropped in from the top of the screen at the page (the way out of the sky bonus, mode 3).
+  If arrivalMode = #ARRIVE_DROP
+    cameraX = targetPage*256
+    playerX = cameraX + #FALL_ENTRY_X
+    playerScreenX = #FALL_ENTRY_X
+    playerY = 0
+    StopPlayer{}
+    playerState = #PLAYER_ST_DROP
+  EndIf
+  ; The way into the sky bonus (mode 4): below the screen on a vine that grows up from there, climbing by himself (UpdateVineEntry{}).
+  If arrivalMode = #ARRIVE_VINE
+    cameraX = 0
+    cameraFractionX = 0
+    playerX = #VINE_ENTRY_X
+    playerY = #VINE_ENTRY_Y
+    playerScreenX = playerX
+    StopPlayer{}
+    playerFacing = #MARIO_FACE_RIGHT
+    playerFacingDirection = #MARIO_BTN_RIGHT
+    playerState = #PLAYER_ST_VINE_ENTRY
+    StartVine{#VINE_ENTRY_COLUMN_X, #VINE_ENTRY_Y, #VINE_HEIGHT_FULL}
+  EndIf
+  ;; The level's start passes nothing, as a new game does. Any other arrival builds what the cartridge would: its enemy list is read
+  ;; from the top and an entry left of its screen's right edge is skipped (ArmGoombas{}), so the walkers and the other enemies passed
+  ;; are those on the first 256 px of the arrival's screen or behind it (a group judged by its entry: 1-1's pair after the bonus pipe
+  ;; is built), the lifts too; the frenzy markers, plants and springs (the area parser's) those behind the view.
+  edgeX.w = cameraX + #VIEW_W
+  walkerEdgeX.w = cameraX + #NES_VIEW_W
+  markerEdgeX.w = cameraX
+  If wasIntro <> False
+    edgeX = 0
+    walkerEdgeX = 0
+    markerEdgeX = 0
+  EndIf
+  ArmGoombas{walkerEdgeX}
+  ArmSwimmers{walkerEdgeX, markerEdgeX}
+  ArmKoopas{walkerEdgeX}
+  ArmPlants{edgeX}
+  ArmLifts{walkerEdgeX}
+  ArmSprings{edgeX}
+  RefreshBobBuffers{keepBitmap, keepBuffer}
+End Statement
+
+;; Once per frame, from the main loop, before the sim. A pipe move ended: down a pipe or into a side pipe. Where it leads
+;; is the pipe's link word (sparkydave.areaload.ab3: the target area, the entrance mode, the page), which names an area
+;; of the running level; a room is entered by dropping in, any other area by rising out of its return pipe.
+Statement HandleAreaEvent{}
+  SHARED areaEvent, areaPipeEntryLink, areaPipeExitLink, tableAreaRoom(), slotAreaIndex()
+  SHARED playerState, pipeOccludeCols, tableAreaVineLink(), tableAreaFallLink(), currentLevelSlot
+  isPipeEvent.w = False
+  If areaEvent = #AREA_EVENT_ENTER OR areaEvent = #AREA_EVENT_RETURN Then isPipeEvent = True
+  If isPipeEvent = False AND areaEvent <> #AREA_EVENT_VINE AND areaEvent <> #AREA_EVENT_FALL Then Statement Return
+  linkWord.w = areaPipeEntryLink
+  If areaEvent = #AREA_EVENT_RETURN Then linkWord = areaPipeExitLink
+  ;; Out of the top on a vine, or out of the bottom of a cloud area: the area's own link (-1 for none: a debug vine, in an area with no
+  ;; sky bonus, only puts him back where it began).
+  If areaEvent = #AREA_EVENT_VINE Then linkWord = tableAreaVineLink(slotAreaIndex(currentLevelSlot))
+  If areaEvent = #AREA_EVENT_FALL Then linkWord = tableAreaFallLink(slotAreaIndex(currentLevelSlot))
+  ; (Not for a pipe: a warp pipe's link word is $8000 + its world, negative as a word, and goes on to the no-such-area release below.)
+  If linkWord < 0 AND isPipeEvent = False
+    areaEvent = 0
+    VineTopReached{}
+    Statement Return
+  EndIf
+  linkPage.w = linkWord AND 31
+  linkMode.w = (linkWord AND $e0)/32
+  targetSlot.w = LevelSlotOfArea{(linkWord AND $ff00)/256}
+  ; A pipe that leads to an area this level did not load (1-1's own pipe, seen from 1-2): nowhere to go, so he is let go.
+  If targetSlot < 0
+    areaEvent = 0
+    playerState = #PLAYER_ST_FREE
+    pipeOccludeCols = 0
+    Statement Return
+  EndIf
+  ;; Behind a blank cover, as the cartridge turns the screen off for the load: the area is never seen being built, or in
+  ;; the wrong colours.
+  MarkTransition{"> area: through a pipe"}
+  ShowCover{#COVER_BLANK}
+  If tableAreaRoom(slotAreaIndex(targetSlot)) <> 0
+    SwitchToBonus{targetSlot}
+  Else
+    SwitchToLevelArea{targetSlot, linkPage, linkMode}
+  EndIf
+End Statement
+
+;; END OF AREAS (BLITZ MODE)

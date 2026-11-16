@@ -1,0 +1,716 @@
+;; =======================================================
+;; OBJECT SYSTEM RUNTIME (BLITZ MODE)
+;; =======================================================
+
+;; A power-up rising out of its block, one real second to clear it (the mushroom's
+;; rise, shared with the flower).
+Statement RiseItem{slot.w}
+  SHARED objY(), objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY(), objVelY()
+  objFractionY(slot) = objFractionY(slot) + objRiseStep(slot)
+  If objFractionY(slot) >= 256
+    objY(slot) = objY(slot) - 1
+    objFractionY(slot) = objFractionY(slot) - 256
+  EndIf
+  objRiseRemaining(slot) = objRiseRemaining(slot) - 1
+  If objRiseRemaining(slot) = 0
+    objY(slot) = objRiseTarget(slot)
+    objFractionY(slot) = 0
+    objVelY(slot) = 0
+  EndIf
+End Statement
+
+;; The Starman after it has risen: along at a pixel a tick, hopping for good, turning
+;; at walls, picked up by touch.
+Statement UpdateStar{slot.w}
+  SHARED objX(), objY(), objDir(), objVelY(), cameraX, playerStarIntervals, playerState
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  ApplyEnemyGravity{slot, #STAR_GRAVITY, #STAR_FALL_MAX}
+  If objVelY(slot) >= 0
+    If EnemyLand{slot, #ITEM_H} = True Then objVelY(slot) = #STAR_BOUNCE_VY
+  EndIf
+  starSpeed.w = #STAR_SPEED
+  If objDir(slot) = #MARIO_BTN_LEFT Then starSpeed = -#STAR_SPEED
+  MoveEnemyX{slot, starSpeed}
+  If objDir(slot) = #MARIO_BTN_RIGHT
+    wallX.w = objX(slot) + #ITEM_W
+  Else
+    wallX = objX(slot) - 1
+  EndIf
+  If EnemyMetatileAt{wallX, objY(slot) + #ITEM_H/2} <> #MT_EMPTY
+    objDir(slot) = Xor(objDir(slot), #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+  EndIf
+  ;; Not while he is frozen growing or in any state but the normal one: the cartridge's
+  ;; PlayerEnemyCollision leaves unless the player routine is the normal one (smbdis 11301).
+  If playerState = #PLAYER_ST_FREE AND boundBoxRight >= objX(slot) AND boundBoxLeft <= objX(slot) + #ITEM_W - 1
+    If boundBoxBottom >= objY(slot) AND boundBoxTop <= objY(slot) + #ITEM_H - 1
+      PoolFree{slot}
+      SpawnFloater{objX(slot), objY(slot), #FLOATER_POWER_UP_INDEX}
+      SoundSquare2{#SFX_POWER_UP_GRAB}
+      SoundAreaMusic{#MUSIC_STAR_POWER}
+      playerStarIntervals = #STAR_INTERVALS
+      Statement Return
+    EndIf
+  EndIf
+  If objY(slot) > #MAP_H*#TILE OR objX(slot) < cameraX - 64 Then PoolFree{slot}
+End Statement
+
+Statement UpdateObjects{}
+  SHARED objType(), objActive(), objX(), objY(), objVelX(), objVelY(), objDir(), objSprite()
+  SHARED objState(), objAnimTimer(), objAnimFrame(), objRiseRemaining(), objRiseStep(), objRiseTarget()
+  SHARED objFractionY(), objPopTimer(), objStartY(), objAux()
+  SHARED playerIsBig, boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerSpeedY, playerOnGround, playerX, playerState, playerInjuryIntervals
+  SHARED simTickCounter, stompChain, playerStarIntervals
+  SHARED metatileBuffer(), mapWidth, cameraX, bumpObjectCell, worldFreezeTicks
+  ; The master timer is running (a grow, a hit, a flower): the enemies and items stand still.
+  If worldFreezeTicks > 0 Then Statement Return
+  ; A block hit this tick bumps what stands on it; enemies that meet turn round.
+  If bumpObjectCell >= 0
+    BumpObjectsOn{bumpObjectCell}
+    bumpObjectCell = -1
+  EndIf
+  EnemiesTurnAround{}
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = True
+      Select objType(i)
+        Case #OBJ_MUSHROOM
+        If objRiseRemaining(i) > 0
+          RiseItem{i}
+        Else
+          objVelY(i) = objVelY(i) + #MUSHROOM_GRAVITY
+          If objVelY(i) > #MUSHROOM_FALL_MAX Then objVelY(i) = #MUSHROOM_FALL_MAX
+          wholePx.w = objVelY(i)/256
+          objFractionY(i) = objFractionY(i) + (objVelY(i) - wholePx*256)
+          objY(i) = objY(i) + wholePx
+          If objFractionY(i) >= 256
+            objY(i) = objY(i) + 1
+            objFractionY(i) = objFractionY(i) - 256
+          EndIf
+        EndIf
+        footRow.w = (objY(i) + #ITEM_H)/#TILE
+        If footRow < #MAP_H
+          If objRiseRemaining(i) = 0 AND objVelY(i) >= 0 AND EnemyMetatileAt{objX(i) + #ITEM_W/2, objY(i) + #ITEM_H} <> #MT_EMPTY
+            objY(i) = footRow*#TILE - #ITEM_H
+            objVelY(i) = 0
+            objFractionY(i) = 0
+          EndIf
+          ;; Sideways whether it is rising or falling: the cartridge moves a power-up
+          ;; horizontally in every state (MoveNormalEnemy, SteadM), which a bumped
+          ;; mushroom's jump needs.
+          If objRiseRemaining(i) = 0
+            If objDir(i) = #MARIO_BTN_RIGHT
+              If EnemyMetatileAt{objX(i) + #ITEM_W, objY(i) + #ITEM_H/2} <> #MT_EMPTY
+                objDir(i) = #MARIO_BTN_LEFT
+              Else
+                objX(i) = objX(i) + #MUSHROOM_SPEED
+              EndIf
+            Else
+              If EnemyMetatileAt{objX(i) - 1, objY(i) + #ITEM_H/2} <> #MT_EMPTY
+                objDir(i) = #MARIO_BTN_RIGHT
+              Else
+                objX(i) = objX(i) - #MUSHROOM_SPEED
+              EndIf
+            EndIf
+          EndIf
+          If objActive(i) = True AND objRiseRemaining(i) = 0 AND playerState = #PLAYER_ST_FREE
+            If boundBoxRight >= objX(i) AND boundBoxLeft <= objX(i) + #ITEM_W - 1
+              If boundBoxBottom >= objY(i) AND boundBoxTop <= objY(i) + #ITEM_H - 1
+                PoolFree{i}
+                SoundSquare2{#SFX_POWER_UP_GRAB}
+                If objSprite(i) = #ONEUP_SPRITE
+                  ; A 1-UP: the floating "1UP" gives the life and Mario does not grow.
+                  SpawnFloater{objX(i), objY(i), #FLOATER_ONEUP_INDEX}
+                Else
+                  SpawnFloater{objX(i), objY(i), #FLOATER_POWER_UP_INDEX}
+                  If playerIsBig = False Then StartResize{True}
+                EndIf
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+        ;; Despawn a mushroom that falls below the level or goes behind the camera (left side), where Mario can
+        ;; no longer reach it. A mushroom still ahead of the camera stays live.
+        If objY(i) > #MAP_H*#TILE OR objX(i) < cameraX - 64
+          PoolFree{i}
+        EndIf
+        Case #OBJ_STAR
+          If objRiseRemaining(i) > 0
+            RiseItem{i}
+          Else
+            UpdateStar{i}
+          EndIf
+        Case #OBJ_FLOWER
+          If objRiseRemaining(i) > 0
+            RiseItem{i}
+          Else
+            If playerState = #PLAYER_ST_FREE AND boundBoxRight >= objX(i) AND boundBoxLeft <= objX(i) + #ITEM_W - 1
+              If boundBoxBottom >= objY(i) AND boundBoxTop <= objY(i) + #ITEM_H - 1
+                PoolFree{i}
+                SoundSquare2{#SFX_POWER_UP_GRAB}
+                SpawnFloater{objX(i), objY(i), #FLOATER_POWER_UP_INDEX}
+                GrabFlower{}
+              EndIf
+            EndIf
+          EndIf
+          If objActive(i) = True
+            If objX(i) < cameraX - 64 Then PoolFree{i}
+          EndIf
+        Case #OBJ_COIN
+          If objPopTimer(i) > 0
+            objPopTimer(i) = objPopTimer(i) - 1
+            objAnimTimer(i) = objAnimTimer(i) + 1
+            If objAnimTimer(i) >= #COIN_ANIM_SPEED
+              objAnimTimer(i) = 0
+              objAnimFrame(i) = objAnimFrame(i) + 1
+              If objAnimFrame(i) > 3 Then objAnimFrame(i) = 0
+              objSprite(i) = #COIN_SPRITE_TURN_BASE + objAnimFrame(i)
+            EndIf
+            objFractionY(i) = objFractionY(i) + 704
+            If objPopTimer(i) >= #COIN_POP_FRAMES/2
+              objY(i) = objY(i) - (objFractionY(i)/256)
+            Else
+              objY(i) = objY(i) + (objFractionY(i)/256)
+            EndIf
+            objFractionY(i) = objFractionY(i)&$ff
+            If objPopTimer(i) = 0
+              objY(i) = objStartY(i)
+              PoolFree{i}
+            EndIf
+          Else
+            PoolFree{i}
+          EndIf
+        Case #OBJ_GOOMBA
+          ; Goomba state: 0 = walking, 1 = squashed (awaiting removal)
+          If objState(i) = 0
+            objVelX(i) = #ENEMY_WALK_SPEED
+            If objDir(i) = #MARIO_BTN_LEFT
+              objVelX(i) = -#ENEMY_WALK_SPEED
+            EndIf
+            MoveEnemyX{i, objVelX(i)}
+            
+            ; Wall collision - reverse direction at solid metatiles
+            sideProbeX.w = 0
+            If objDir(i) = #MARIO_BTN_RIGHT
+              sideProbeX = objX(i) + #GOOMBA_W
+            Else
+              sideProbeX = objX(i) - 1
+            EndIf
+            ; Probe at mid-height for wall collision, matching mushroom behaviour
+            If EnemyMetatileAt{sideProbeX, objY(i) + #GOOMBA_H/2} <> #MT_EMPTY
+              objDir(i) = Xor(objDir(i), #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+            EndIf
+            
+            ; Floor collision
+            footRow.w = (objY(i) + #GOOMBA_H)/#TILE
+            goombaOnGround.w = False
+            If footRow < #MAP_H
+              If EnemyMetatileAt{objX(i) + #GOOMBA_W/2, objY(i) + #GOOMBA_H} <> #MT_EMPTY
+                objY(i) = footRow*#TILE - #GOOMBA_H
+                objVelY(i) = 0
+                objFractionY(i) = 0
+                goombaOnGround = True
+              EndIf
+            EndIf
+            
+            If goombaOnGround = False
+              objVelY(i) = objVelY(i) + #GOOMBA_GRAVITY
+              If objVelY(i) > #GOOMBA_FALL_MAX Then objVelY(i) = #GOOMBA_FALL_MAX
+              wholePx.w = objVelY(i)/256
+              objFractionY(i) = objFractionY(i) + (objVelY(i) - wholePx*256)
+              objY(i) = objY(i) + wholePx
+              If objFractionY(i) >= 256
+                objY(i) = objY(i) + 1
+                objFractionY(i) = objFractionY(i) - 256
+              EndIf
+            EndIf
+            
+            ;; Despawn a Goomba that falls off the level or goes behind the camera (left side). Goombas ahead of the
+            ;; camera wait to be encountered.
+            If objX(i) < cameraX - 64 OR objY(i) > #MAP_H*#TILE
+              PoolFree{i}
+            EndIf
+            
+            objAnimTimer(i) = objAnimTimer(i) + 1
+            If objAnimTimer(i) >= #GOOMBA_ANIM_SPEED
+              objAnimTimer(i) = 0
+              objAnimFrame(i) = objAnimFrame(i) + 1
+              If objAnimFrame(i) > 1 Then objAnimFrame(i) = 0
+              objSprite(i) = #GOOMBA_F_WALK1 + objAnimFrame(i)
+            EndIf
+            
+;; Player contact, PlayerEnemyCollision (smbdis 11293): only in the normal player
+;; state, only on the ticks #CONTACT_EVERY_OTHER_TICK allows, and only for a
+;; Goomba that is on screen. Moving down onto it is a stomp; any other contact
+;; hurts Mario unless he is already invulnerable, and turns the Goomba to face
+;; him (ChkEnemyFaceRight / EnemyTurnAround).
+            If objActive(i) = True
+              contactNow.w = True
+              If playerState <> #PLAYER_ST_FREE Then contactNow = False
+              If #CONTACT_EVERY_OTHER_TICK = 1
+                If (simTickCounter AND 1) <> 0 Then contactNow = False
+              EndIf
+              ;; On screen by cameraX, the sim's own camera. viewLeft and viewRight are
+              ;; the render view, rebuilt after the sim, so they lag a frame and still
+              ;; hold the pre-death camera on the first tick after a restart.
+              If objX(i) + #GOOMBA_W <= cameraX Then contactNow = False
+              If objX(i) >= cameraX + #VIEW_W Then contactNow = False
+              If contactNow = True
+                If boundBoxRight >= objX(i) AND boundBoxLeft <= objX(i) + #GOOMBA_W - 1
+                  If boundBoxBottom >= objY(i) AND boundBoxTop <= objY(i) + #GOOMBA_H - 1
+                    If playerStarIntervals > 0
+                      ; Starman: it is knocked off, as by a shell, with its 100.
+                      KnockEnemy{i}
+                      SpawnFloater{objX(i), objY(i), 1}
+                    Else
+                      If playerSpeedY > 0
+                        ;; Stomp from above. Clear ground state so the bounce executes
+                        ;; on the next frame, then pop the Goomba.
+                        playerOnGround = False
+                        objState(i) = #GOOMBA_ST_SQUASHED
+                        objSprite(i) = #GOOMBA_F_SQUASH
+                        ;; Removed after #GOOMBA_SQUASH_INTERVALS intervals: a stomp sets the enemy's interval timer from
+                        ;; RevivalRateData ($10, smbdis 11499 and 11483) and ChkKillGoomba (9360) removes a Goomba when
+                        ;; it reaches $0e, two intervals on (read from the listing; not measured against a cartridge).
+                        objAux(i) = #GOOMBA_SQUASH_INTERVALS
+                        objVelX(i) = 0
+                        objVelY(i) = 0
+                        ;; The chain: each stomp before Mario next lands is worth more, and
+                        ;; the number adds the points when it is five ticks old.
+                        stompChain = stompChain + 1
+                        SoundSquare1{#SFX_ENEMY_STOMP}
+                        SpawnFloater{objX(i), objY(i), stompChain}
+                        playerSpeedY = #STOMP_BOUNCE_SPEED_Y
+                      Else
+                        If playerInjuryIntervals = 0
+                          If playerX < objX(i)
+                            objDir(i) = #MARIO_BTN_LEFT
+                          Else
+                            objDir(i) = #MARIO_BTN_RIGHT
+                          EndIf
+                          InjurePlayer{}
+                        EndIf
+                      EndIf
+                    EndIf
+                  EndIf
+                EndIf
+              EndIf
+            EndIf
+          Else
+            If objState(i) = #GOOMBA_ST_KNOCKED
+              ; Thrown off by a sliding shell: falls out of the level.
+              UpdateKnocked{i}
+            Else
+              ; Squashed: waits its intervals (UpdateIntervalTimers{} counts them down), then goes.
+              If objAux(i) <= 0 Then PoolFree{i}
+            EndIf
+          EndIf
+        Case #OBJ_KOOPA
+          UpdateKoopa{i}
+        Case #OBJ_PIRANHA
+          UpdatePiranha{i}
+        Case #OBJ_BLOOBER
+          UpdateBloober{i}
+        Case #OBJ_CHEEP
+          UpdateCheep{i}
+        Case #OBJ_FLY_CHEEP
+          UpdateFlyCheep{i}
+        Case #OBJ_FIREBAR
+          UpdateFirebar{i}
+        Case #OBJ_PODOBOO
+          UpdatePodoboo{i}
+        Case #OBJ_BOWSER
+          UpdateBowser{i}
+        Case #OBJ_FLAME
+          UpdateFlame{i}
+        Case #OBJ_LIFT
+          UpdateLift{i}
+        Case #OBJ_SPRING
+          UpdateSpring{i}
+      End Select
+    EndIf
+  Next
+End Statement
+
+;; Bowser's two halves (BowserGfxHandler, DrawBowser): his front at his x and y, his rear #BOWSER_HALF_W behind and #BOWSER_REAR_DROP
+;; lower; facing right both flipped and the rear on the left. The front's mouth open or shut (bowserBodyControls bit 7), the rear's feet
+;; (bit 0). Knocked, both upside down, each flipped in its own 32 px cell at the same y, so the whole of him is turned over and the
+;; halves stay joined (the rear's drop is in its cell's picture). None past the bitmap's top or bottom.
+Statement DrawBowser{slot.w}
+  SHARED objX(), objY(), objDir(), objState(), drawBuffer, bowserBodyControls
+  facingRight.w = 0
+  If objDir(slot) = #MARIO_BTN_RIGHT Then facingRight = 1
+  frontShape.w = #PRE_BOWSER + 3
+  If (bowserBodyControls AND 128) <> 0 Then frontShape = #PRE_BOWSER
+  rearShape.w = #PRE_BOWSER + 1 + (bowserBodyControls AND 1)
+  frontShape = frontShape + facingRight*4
+  rearShape = rearShape + facingRight*4
+  rearX.w = objX(slot) + #BOWSER_HALF_W
+  If facingRight = 1 Then rearX = objX(slot) - #BOWSER_HALF_W
+  rearY.w = objY(slot)
+  If objState(slot) = #KOOPA_ST_KNOCKED
+    frontShape = #PRE_BOWSER + 8 + facingRight*2
+    rearShape = #PRE_BOWSER + 9 + facingRight*2
+  EndIf
+  If objY(slot) >= 0 AND objY(slot) + 32 <= #SURFACE_H Then BBlit drawBuffer, frontShape, objX(slot), objY(slot)
+  If rearY >= 0 AND rearY + 32 <= #SURFACE_H Then BBlit drawBuffer, rearShape, rearX, rearY
+End Statement
+
+;; A firebar's balls (DrawFirebar, smbdis 14236): the centre's and each part's, as the player's fireball turning (#PRE_FIREBALL, a new
+;; picture every #FIREBALL_SPIN_TICKS ticks, as the cartridge's every four frames), each an 8x8 bob; none past the bitmap's top or bottom
+;; or outside the view and its guard.
+Statement DrawFirebarBalls{slot.w}
+  SHARED objX(), objY(), objAux(), objVelY(), drawBuffer, viewLeft, viewRight, simTickCounter, firebarOffsetX(), firebarOffsetY()
+  SHARED firebarFlickerOn, firebarFlickerPhase
+  partCount.w = #FIREBAR_SHORT_PARTS
+  If objAux(slot) = #FIREBAR_LONG Then partCount = #FIREBAR_LONG_PARTS
+  spinFrame.w = (simTickCounter/#FIREBALL_SPIN_TICKS) AND 3
+  offsetBase.w = (objVelY(slot) AND 31)*#FIREBAR_LONG_PARTS
+  For partIndex.w = -1 To partCount - 1
+    ballLeft.w = objX(slot)
+    ballTop.w = objY(slot)
+    If partIndex >= 0
+      ballLeft = ballLeft + firebarOffsetX(offsetBase + partIndex)
+      ballTop = ballTop + firebarOffsetY(offsetBase + partIndex)
+    EndIf
+    If ballTop >= 0 AND ballTop + #FIREBALL_SIZE <= #SURFACE_H
+      ;; Only a ball the view shows, with no guard: the view is rebuilt from the sim before the draw and shown with the same scroll, so a
+      ;; ball wholly outside it is never seen, and each one blitted costs about 5 lines (2-4 on NTSC, the main project's OPTIMISATION note, entry 16).
+      ;; With the flicker on, only this frame's half (the centre, part -1, with the odd parts on one bitmap; the even on the other).
+      drawBall.w = True
+      If firebarFlickerOn = True
+        If ((partIndex + 1 + firebarFlickerPhase) AND 1) <> 0 Then drawBall = False
+      EndIf
+      If drawBall = True AND ballLeft + #FIREBALL_SIZE > viewLeft AND ballLeft < viewRight
+        BBlit drawBuffer, #PRE_FIREBALL + spinFrame, ballLeft, ballTop
+      EndIf
+    EndIf
+  Next
+End Statement
+
+Statement DrawObjects{}
+  SHARED objType(), objActive(), objX(), objY(), objSprite(), drawBitmap, drawBuffer
+  SHARED viewLeft, viewRight, objState(), objDir(), objAnimFrame(), simTickCounter, objFlipped(), objStartY(), objRed(), objWinged(), objAux()
+  SHARED currentAreaCloud, objPopTimer(), objVelY(), currentAreaType, areaRetainerX, areaRetainerY, tableLevelWorld(), currentLevel
+  SHARED firebarFlickerOn, firebarFlickerPhase
+  ;; The firebars' flicker (#FIREBAR_FLICKER_BARS, NTSC only): on while that many bars reach into the view; each bitmap of the pair
+  ;; always draws the same half, so a ball shows on every other frame.
+  firebarFlickerOn = False
+  If #FIREBAR_FLICKER_BARS > 0
+    barsInView.w = 0
+    For barSlot.w = 0 To #MAX_OBJECTS - 1
+      If objActive(barSlot) = True AND objType(barSlot) = #OBJ_FIREBAR
+        If objX(barSlot) + #FIREBAR_REACH > viewLeft AND objX(barSlot) - #FIREBAR_REACH < viewRight Then barsInView = barsInView + 1
+      EndIf
+    Next
+    If barsInView >= #FIREBAR_FLICKER_BARS Then firebarFlickerOn = True
+  EndIf
+  firebarFlickerPhase = 0
+  If drawBitmap = #PLAY_BM_A Then firebarFlickerPhase = 1
+  ; The retainer (not a pool object, InitRetainerObj): wherever the view shows him. Robocod in world 1, Zool in world 2.
+  If areaRetainerX <> #AREA_BOX_NONE
+    If areaRetainerX + #TILE > viewLeft - #VIEW_GUARD AND areaRetainerX < viewRight + #VIEW_GUARD
+      retainerShape.w = #PRE_RETAINER
+      If tableLevelWorld(currentLevel) <> 1 Then retainerShape = #PRE_RETAINER_ZOOL
+      BBlitMode CookieMode
+      Use BitMap drawBitmap
+      BBlit drawBuffer, retainerShape, areaRetainerX, areaRetainerY + #RETAINER_DRAW_DY
+    EndIf
+  EndIf
+  For i = 0 To #MAX_OBJECTS - 1
+    ;; Render only: an object outside the view plus a guard is not cut or blitted.
+    ;; UnBuffer already removed last frame's blit, so a skipped object leaves no
+    ;; trail. Its simulation is unaffected.
+    visible.w = False
+    ; A firebar draws its own balls: while its reach (its long bar's 88 px and a ball) overlaps the view and its guard.
+    If objActive(i) = True AND objType(i) = #OBJ_FIREBAR
+      If objX(i) + #FIREBAR_REACH > viewLeft - #VIEW_GUARD
+        If objX(i) - #FIREBAR_REACH < viewRight + #VIEW_GUARD
+          BBlitMode CookieMode
+          Use BitMap drawBitmap
+          DrawFirebarBalls{i}
+        EndIf
+      EndIf
+    EndIf
+    ; Bowser draws his own two halves.
+    If objActive(i) = True AND objType(i) = #OBJ_BOWSER
+      If objX(i) + 32 > viewLeft - #VIEW_GUARD AND objX(i) - 32 < viewRight + #VIEW_GUARD
+        BBlitMode CookieMode
+        Use BitMap drawBitmap
+        DrawBowser{i}
+      EndIf
+    EndIf
+    ;; Bowser's flame, 24 across: its two pictures in turn (the cartridge turns its one over every 2 frames); not once the Starman has hit
+    ;; it, nor past the bitmap's top or bottom.
+    If objActive(i) = True AND objType(i) = #OBJ_FLAME
+      If objState(i) = 0 AND objX(i) + #FLAME_W > viewLeft - #VIEW_GUARD AND objX(i) < viewRight + #VIEW_GUARD
+        If objY(i) >= 0 AND objY(i) + #FLAME_H <= #SURFACE_H
+          flamePicture.w = ((simTickCounter*#FLAME_PICTURE_RATE)/64) AND 1
+          BBlitMode CookieMode
+          Use BitMap drawBitmap
+          BBlit drawBuffer, #PRE_FLAME + flamePicture, objX(i), objY(i)
+        EndIf
+      EndIf
+    EndIf
+    If objActive(i) = True AND objType(i) <> #OBJ_FIREBAR AND objType(i) <> #OBJ_BOWSER AND objType(i) <> #OBJ_FLAME
+      If objX(i) + #TILE > viewLeft - #VIEW_GUARD
+        If objX(i) < viewRight + #VIEW_GUARD Then visible = True
+      EndIf
+    EndIf
+    If visible = True
+      BBlitMode CookieMode
+      Use BitMap drawBitmap
+      ;; Each frame was cut once at start (sparkydave.shapes.blitz.ab3). The shape
+      ;; is the slot base plus the frame, and an out-of-range frame is not drawn.
+      objectShape.w = -1
+      If objType(i) = #OBJ_MUSHROOM
+        objectFrame.w = objSprite(i) - #PRE_MUSHROOM_CELL
+        If objectFrame >= 0
+          If objectFrame < #PRE_MUSHROOM_FRAMES Then objectShape = #PRE_MUSHROOM + objectFrame
+        EndIf
+      EndIf
+      If objType(i) = #OBJ_STAR
+        objectShape = #PRE_STAR + ((simTickCounter/#STAR_FRAME_TICKS) MOD #STAR_FRAMES)
+      EndIf
+      If objType(i) = #OBJ_FLOWER
+        objectShape = #PRE_FLOWER + ((simTickCounter/#FLOWER_FRAME_TICKS) MOD #FLOWER_FRAMES)
+      EndIf
+      If objType(i) = #OBJ_COIN
+        objectFrame = objSprite(i) - #COIN_SPRITE_BASE
+        If objectFrame >= 0
+          If objectFrame < #PRE_COIN_FRAMES Then objectShape = #PRE_COIN + objectFrame
+        EndIf
+      EndIf
+      objectY.w = objY(i)
+      If objType(i) = #OBJ_GOOMBA
+        objectFrame = objSprite(i)
+        If objectFrame >= 0
+          If objectFrame < #PRE_GOOMBA_FRAMES Then objectShape = #PRE_GOOMBA + objectFrame
+        EndIf
+        If objState(i) = #GOOMBA_ST_KNOCKED Then objectShape = #PRE_GOOMBA_FLIP
+      EndIf
+      If objType(i) = #OBJ_KOOPA
+        If objState(i) = #KOOPA_ST_WALK
+          objectShape = #PRE_KOOPA + objAnimFrame(i)
+          If objRed(i) <> 0 Then objectShape = #PRE_RED_KOOPA + objAnimFrame(i)
+          If objWinged(i) = #WINGS_HOP Then objectShape = #PRE_PARATROOPA + objAnimFrame(i)
+          If objWinged(i) = #WINGS_FLY Then objectShape = #PRE_RED_PARATROOPA + objAnimFrame(i)
+          If objDir(i) = #MARIO_BTN_RIGHT Then objectShape = objectShape + 2
+        Else
+          ; A shell is the bottom 16 of the Koopa's 24.
+          objectShape = #PRE_SHELL
+          If objState(i) = #KOOPA_ST_KNOCKED OR objFlipped(i) = True Then objectShape = #PRE_SHELL_FLIP
+          If objRed(i) <> 0
+            objectShape = #PRE_RED_SHELL
+            If objState(i) = #KOOPA_ST_KNOCKED OR objFlipped(i) = True Then objectShape = #PRE_RED_SHELL_FLIP
+          EndIf
+          objectY = objY(i) + #KOOPA_SHELL_DROP
+        EndIf
+      EndIf
+      If objType(i) = #OBJ_SPRING
+        ; Its two halves, the top first (none in the fully squashed frame), the bottom a tile lower; the pictures carry the lowering.
+        springTopShape.w = #PRE_SPRING
+        objectShape = #PRE_SPRING + 2
+        If objAux(i) = 1 OR objAux(i) = 3
+          springTopShape = #PRE_SPRING + 1
+          objectShape = #PRE_SPRING + 3
+        EndIf
+        If objAux(i) = 2
+          springTopShape = -1
+          objectShape = #PRE_SPRING + 4
+        EndIf
+        If springTopShape >= 0 AND objectY >= 0 Then BBlit drawBuffer, springTopShape, objX(i), objectY
+        objectY = objY(i) + #TILE
+      EndIf
+      If objType(i) = #OBJ_LIFT
+        ;; A one-byte y: 240 and over is below the screen, not drawn (the bitmap ends at 256). A small lift is its own picture and a
+        ;; large one in a castle the shorter one.
+        liftShape.w = #PRE_LIFT
+        If currentAreaType = #AREA_TYPE_CASTLE Then liftShape = #PRE_CASTLE_LIFT
+        If objAux(i) = #LIFT_KIND_SMALL Then liftShape = #PRE_SMALL_LIFT
+        If objY(i) < 240 Then objectShape = liftShape
+        ; In a cloud area the lift is the cloud platform.
+        If objY(i) < 240 AND currentAreaCloud <> False Then objectShape = #PRE_CLOUD_LIFT
+        ; A small lift's pair, #LIFT_TWIN_GAP below, wrapping.
+        If objAux(i) = #LIFT_KIND_SMALL
+          twinY.w = objY(i) + #LIFT_TWIN_GAP
+          If twinY >= #LIFT_WRAP Then twinY = twinY - #LIFT_WRAP
+          If twinY < 240 Then BBlit drawBuffer, #PRE_SMALL_LIFT, objX(i), twinY
+        EndIf
+      EndIf
+      If objType(i) = #OBJ_PIRANHA
+        ;; Not at all while it is wholly inside its pipe; a knocked one is upside down. The part that is down in the pipe is
+        ;; covered by the pipe's own tiles afterwards (DrawPlantOcclusion{}).
+        If objState(i) = #KOOPA_ST_KNOCKED
+          objectShape = #PRE_PIRANHA + 2
+        Else
+          If objY(i) < objStartY(i) Then objectShape = #PRE_PIRANHA + ((simTickCounter/#PLANT_FRAME_TICKS) AND 1)
+        EndIf
+      EndIf
+      ;; A Bloober (CheckForBloober, smbdis 13816): stretched and #BLOOBER_DRAW_DROP lower, squeezed at its own y while its
+      ;; interval timer is 1 (the end of its float down), and beaten squeezed upside down, lower.
+      If objType(i) = #OBJ_BLOOBER
+        objectShape = #PRE_BLOOBER + 1
+        objectY = objY(i) + #BLOOBER_DRAW_DROP
+        If objPopTimer(i) = 1
+          objectShape = #PRE_BLOOBER
+          objectY = objY(i)
+        EndIf
+        If objState(i) = #KOOPA_ST_KNOCKED
+          objectShape = #PRE_BLOOBER + 2
+          objectY = objY(i) + #BLOOBER_DRAW_DROP
+        EndIf
+      EndIf
+      ;; A Cheep-Cheep: its two pictures turn about every #CHEEP_FRAME_TICKS ticks (the second while simTickCounter's eights are even, the
+      ;; cartridge's FrameCounter AND 8 clear), red's after grey's; beaten, the first upside down.
+      If objType(i) = #OBJ_CHEEP
+        objectShape = #PRE_CHEEP + 1 - ((simTickCounter/#CHEEP_FRAME_TICKS) AND 1) + objRed(i)*2
+        If objState(i) = #KOOPA_ST_KNOCKED Then objectShape = #PRE_CHEEP + 4 + objRed(i)
+      EndIf
+      ; A Podoboo: upright while it rises, flipped while it falls or is knocked (CheckForPodoboo, CheckDefeatedState).
+      If objType(i) = #OBJ_PODOBOO
+        objectShape = #PRE_PODOBOO
+        If objVelY(i) >= 0 OR objState(i) = #KOOPA_ST_KNOCKED Then objectShape = #PRE_PODOBOO + 1
+      EndIf
+      ;; A flying Cheep-Cheep: red's two pictures turning as a swimmer's, facing its way (the sheet's face left; #PRE_FLY_CHEEP's are
+      ;; flipped to face right); beaten, the first upside down.
+      If objType(i) = #OBJ_FLY_CHEEP
+        flyFrame.w = 1 - ((simTickCounter/#CHEEP_FRAME_TICKS) AND 1)
+        If objDir(i) = #MARIO_BTN_RIGHT
+          objectShape = #PRE_FLY_CHEEP + flyFrame
+          If objState(i) = #KOOPA_ST_KNOCKED Then objectShape = #PRE_FLY_CHEEP + 2
+        Else
+          objectShape = #PRE_CHEEP + 2 + flyFrame
+          If objState(i) = #KOOPA_ST_KNOCKED Then objectShape = #PRE_CHEEP + 5
+        EndIf
+      EndIf
+      ; Not above the bitmap's top: a blit at a negative row writes before each plane (DrawPlayer{}).
+      If objectY < 0 Then objectShape = -1
+      ;; Nor past its bottom (#SURFACE_H: the map and one tile row of guard), where a blit writes past the bitmap's memory, which shows
+      ;; much later as a crash when the memory is freed. The 24 px enemies falling out of the world reach it: a
+      ;; knocked Koopa or plant, a beaten Bloober or Cheep-Cheep (drawn 3 px lower still, and freed only once below the map).
+      drawnHeight.w = #TILE
+      If objType(i) = #OBJ_KOOPA OR objType(i) = #OBJ_PIRANHA OR objType(i) = #OBJ_BLOOBER OR objType(i) = #OBJ_CHEEP Then drawnHeight = #KOOPA_H
+      If objType(i) = #OBJ_FLY_CHEEP OR objType(i) = #OBJ_PODOBOO Then drawnHeight = #KOOPA_H
+      If objectY + drawnHeight > #SURFACE_H Then objectShape = -1
+      If objectShape >= 0 Then BBlit drawBuffer, objectShape, objX(i), objectY
+    EndIf
+  Next
+End Statement
+
+;; The vine (DrawVine, smbdis 13103): a column of the curled top and the body above the block it grew from. Anchored to the block, so no
+;; piece is ever over it: the body from the block up while a whole tile fits under the top, the top at the vine's own top. Not drawn
+;; until it is a tile high, nor above the bitmap's top (a blit at a negative row writes before each plane).
+Statement DrawVine{}
+  SHARED vineColumnX, vineBaseY, vineHeight, drawBitmap, drawBuffer, viewLeft, viewRight
+  If vineColumnX < 0 Then Statement Return
+  If vineHeight < #TILE Then Statement Return
+  If vineColumnX + #TILE <= viewLeft - #VIEW_GUARD Then Statement Return
+  If vineColumnX >= viewRight + #VIEW_GUARD Then Statement Return
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  vineTopY.w = vineBaseY - vineHeight
+  bodyY.w = vineBaseY - #TILE
+  While bodyY >= vineTopY + #TILE
+    If bodyY >= 0 Then BBlit drawBuffer, #PRE_VINE + 1, vineColumnX, bodyY
+    bodyY = bodyY - #TILE
+  Wend
+  ;; The gap between the top piece and the highest body piece (the body is anchored to the block, the top to the vine's top, and they only
+  ;; meet when the height is a whole number of tiles): one more body piece just under the top, never lower than a tile above the block.
+  fillY.w = vineTopY + #TILE
+  If fillY > vineBaseY - #TILE Then fillY = vineBaseY - #TILE
+  If fillY < bodyY + #TILE
+    If fillY >= 0 Then BBlit drawBuffer, #PRE_VINE + 1, vineColumnX, fillY
+  EndIf
+  If vineTopY >= 0 Then BBlit drawBuffer, #PRE_VINE, vineColumnX, vineTopY
+End Statement
+
+Statement DrawItemOcclusion{}
+  SHARED objActive(), objType(), objX(), objY(), objSourceCell(), mapBuffer(), drawBitmap
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = True AND (objType(i) = #OBJ_MUSHROOM OR objType(i) = #OBJ_FLOWER OR objType(i) = #OBJ_STAR)
+      occludeCellX.w = (objSourceCell(i) MOD #MAP_W)*#TILE
+      occludeCellY.w = (objSourceCell(i)/#MAP_W)*#TILE
+      If objX(i) < occludeCellX + #TILE
+        If objX(i) + #ITEM_W > occludeCellX
+          If objY(i) < occludeCellY + #TILE
+            If objY(i) + #ITEM_H > occludeCellY
+              occludeGid.w = mapBuffer(objSourceCell(i))
+              If occludeGid <> 0
+                occludeTileId.w = occludeGid - 1
+                occludeSrcX.w = (occludeTileId MOD #LOOK_ATLAS_COLS)*#TILE
+                occludeSrcY.w = (occludeTileId/#LOOK_ATLAS_COLS)*#TILE
+                AutoCookie Off
+                Use BitMap #ATLAS_BM
+                ; The last item's Block may still be reading #OCCLUDE_SHAPE (CutAtlasTile{} says why).
+                WaitBlitter
+                GetaShape #OCCLUDE_SHAPE, occludeSrcX, occludeSrcY, #TILE, #TILE
+                Use BitMap drawBitmap
+                Block #OCCLUDE_SHAPE, occludeCellX, occludeCellY
+                AutoCookie On
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The shape of the atlas tile occludeGid, cut the first time it is wanted and kept (a GetaShape a cell a frame was most of a
+;; frame's time with three plants up). Leaves the atlas as the bitmap in use.
+Function.w PlantCellShape{occludeGid.w}
+  SHARED plantCellGid(), plantCellNext
+  For cacheIndex.w = 0 To #PLANT_CELL_CACHE - 1
+    If plantCellGid(cacheIndex) = occludeGid Then Function Return(#PLANT_CELL_SHAPE + cacheIndex)
+  Next
+  cacheIndex = plantCellNext
+  plantCellNext = (plantCellNext + 1) MOD #PLANT_CELL_CACHE
+  occludeTileId.w = occludeGid - 1
+  AutoCookie Off
+  Use BitMap #ATLAS_BM
+  ; A cached shape's slot taken again may still be a Block's source (CutAtlasTile{} says why).
+  WaitBlitter
+  GetaShape #PLANT_CELL_SHAPE + cacheIndex, (occludeTileId MOD #LOOK_ATLAS_COLS)*#TILE, (occludeTileId/#LOOK_ATLAS_COLS)*#TILE, #TILE, #TILE
+  AutoCookie On
+  plantCellGid(cacheIndex) = occludeGid
+  Function Return(#PLANT_CELL_SHAPE + cacheIndex)
+End Function
+
+;; A plant is drawn behind its pipe: after the objects, the pipe's own tiles over it, the two columns and the two rows from the
+;; pipe's top that its 24 px can reach (it is never lower than its down position). Raw blocks of the atlas cells, as
+;; DrawItemOcclusion{} does, only the cells its picture overlaps, and only while it is drawn at all.
+Statement DrawPlantOcclusion{}
+  SHARED objActive(), objType(), objX(), objY(), objStartY(), objState(), mapBuffer(), drawBitmap, viewLeft, viewRight
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = True AND objType(i) = #OBJ_PIRANHA
+      ;; As DrawObjects{} draws it: in the view, and either knocked off or any of it above its down position (a plant wholly in
+      ;; its pipe is not drawn, so there is nothing to cover).
+      plantDrawn.w = False
+      If objX(i) + #TILE > viewLeft - #VIEW_GUARD AND objX(i) < viewRight + #VIEW_GUARD
+        If objState(i) = #KOOPA_ST_KNOCKED OR objY(i) < objStartY(i) Then plantDrawn = True
+      EndIf
+      If plantDrawn <> False AND objY(i) + #PLANT_H > objStartY(i)
+        pipeLeftCol.w = (objX(i) - #PLANT_W/2)/#TILE
+        pipeTopRow.w = objStartY(i)/#TILE
+        For occludeRow.w = pipeTopRow To pipeTopRow + 1
+          For occludeCol.w = pipeLeftCol To pipeLeftCol + 1
+            occludeCellX.w = occludeCol*#TILE
+            occludeCellY.w = occludeRow*#TILE
+            If objX(i) < occludeCellX + #TILE AND objX(i) + #PLANT_W > occludeCellX
+              If objY(i) < occludeCellY + #TILE AND objY(i) + #PLANT_H > occludeCellY
+                occludeGid.w = mapBuffer(occludeRow*#MAP_W + occludeCol)
+                If occludeGid <> 0
+                  cellShape.w = PlantCellShape{occludeGid}
+                  Use BitMap drawBitmap
+                  Block cellShape, occludeCellX, occludeCellY
+                EndIf
+              EndIf
+            EndIf
+          Next
+        Next
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; END OF OBJECT SYSTEM RUNTIME (BLITZ MODE)

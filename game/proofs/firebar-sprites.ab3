@@ -1,0 +1,673 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; firebar-sprites.ab3 -- can the firebars' balls be hardware sprites instead of bobs?
+;; Compile in UAE (S/run-proof). Not part of the game. 2-4 on NTSC runs over budget where three short firebars (18 balls, each a
+;; BBlit: its background saved, cut in, restored) meet the lifts and the fire frenzy (the main project's OPTIMISATION note, entry 16). A
+;; hardware sprite costs no blit at all: the chip set draws it over the playfields from a few words in Chip RAM.
+;;
+;; The idea. A ball is 8x8 in three pens (11 red, 4 orange, 8 white): one 16 px sprite channel, 3 colours, no attaching, so all
+;; eight channels are free for balls. Eight is not enough for 18, so each channel is multiplexed down the screen: when a sprite
+;; ends, the hardware reads the next two words of its data as new control words, so a channel's data can be ball, control
+;; words, ball, ... and two zero words to end. A ball may follow another in the same channel only from one line below the
+;; other's end (the line the control words are read). Each frame the visible balls are sorted by y and dealt to the first
+;; channel that is free at their line; any ball no channel can take (a level bar puts six on the same lines) is drawn as a bob.
+;;
+;; How the sprites are driven. Not with DisplaySprite: the copper list's sprite block (the CopList object's long at offset 12,
+;; displaylib.ab3's NEWTYPE .mycop) holds, for each channel, MOVEs to SPRxPOS, SPRxCTL, SPRxPTH and SPRxPTL; InitCopList writes the
+;; registers and this proof pokes the data words: the first ball's position and the channel's data in Chip RAM. The data is
+;; double buffered (written for the next frame while the hardware reads this frame's) and the block is poked after VWait, before
+;; the world list's first line. The colours: sprite bank 2 (entries 32 to 47; DisplayControls ..., $33 as sprite-over-hud.ab3,
+;; whose sprite x matched the bitmap with no bias), the same three colours for each channel pair.
+;;
+;; The display is the game's (the first run, PAL's lines on an NTSC machine, ran the world list past the frame): a 16 line HUD list over a 208 line world list, 3 lines apart, the world dual playfield at fetch mode
+;; 3, DisplayAdjust -1 and -1, the lores sprite flag ($400) on both type words. The world list has 7 sprites. The fireball's
+;; pictures are the game's (game/assets/items-16x16.iff, cell 28), cut as the game cuts them.
+;;
+;; It runs by itself (sixth run on: Esc quits early). Six runs, one after the other, from the same start each time (the camera at
+;; the left, every bar at angle 0): fetch mode 3 (the game's), 1 and 0, each as bobs and then as sprites, each 4 sweeps of the
+;; camera there and back at 2 px a frame (about 3.5 minutes on PAL in all). A sprite run deals the balls to the channels its fetch
+;; mode leaves (the fifth run: 1 at fetch mode 3, 5 at 1, all 7 at 0; the world list has 7) and draws the rest as bobs. Found on
+;; the way: a channel's chain of balls works (the third run); fetch mode 3's early fetch for the scroll takes the DMA slots of
+;; every channel but 0 (the fourth and fifth runs, with 8 and with 7 channels).
+;;
+;; What to look at and report: nothing to press; watch for anything wrong in any run (a missing or misplaced ball in the second,
+;; fourth or sixth run, the sprite ones; stray lines or specks; flicker), then the results file: each run's draw time (lines
+;; from the start of the work until the blitter is idle), how many frames ran late, and how many balls fell back to bobs.
+
+;; The 68020 optimizer, as the game (the main project's OPTIMISATION note, entry 8): without it a division is a library call of about 2
+;; lines, and the first run's sprite build (four or so a ball) cost 165 lines a frame.
+OPTIMIZE 1
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE = $40
+#RAW_KEY_ESC   = $45
+#RAW_KEY_M     = $37
+#RAW_KEY_T     = $14
+#RAW_KEY_F     = $23
+#RAW_KEY_S     = $21
+
+#HUD_YPOS_PAL  = 44
+#HUD_YPOS_NTSC = 32
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 48
+
+;; The game's type words ($13014 and $13038) with the lores sprite flag.
+#HUD_FLAGS   = $13414
+#WORLD_FLAGS = $13438
+;; The same at fetch mode 0; F adds $1000 a step (the game's is 3).
+#WORLD_FLAGS_FMODE0 = $10438
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+#PLAYFIELD2_OFFSET_16 = $1c00
+#BANK_XOR      = $33
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the items sheet.
+#BM_A     = 0
+#BM_B     = 1
+#BM_BACK  = 2
+#BM_HUD   = 3
+#BM_ITEMS = 4
+#FRONT_W  = 1024
+#BACK_W   = 1152
+#WORLD_H  = 256
+#HUD_W    = 384
+#ITEMS_W  = 992
+#ITEMS_H  = 16
+
+#TILE                = 16
+#BALL                = 8
+#BALL_CELL           = 28
+#PRE_BALL            = 0
+#BOB_BYTES           = 16384
+#BARS                = 3
+#PARTS               = 6
+#ANGLES              = 32
+#MAX_BALLS           = 48
+#CHANNELS            = 8
+#CHANNEL_BALLS       = 16
+#CHANNEL_BYTES       = 640
+#MYCOP_SPRITES       = 12
+#MYCOP_YPOS          = 48
+#SPRITE_H_OFFSET     = 128
+#WORK_LINE           = 70
+#CAMERA_MIN          = 160
+#CAMERA_MAX          = 560
+#CAMERA_STEP         = 2
+#RUNS                = 6
+#RUN_TRIPS           = 4
+#RUN_SETTLE          = 10
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+Dim ballWord.l(4*#BALL - 1)
+Dim partOffsetX.w(#ANGLES*#PARTS - 1)
+Dim partOffsetY.w(#ANGLES*#PARTS - 1)
+Dim barCentreX.w(#BARS - 1)
+Dim barCentreY.w(#BARS - 1)
+Dim barAngle.w(#BARS - 1)
+Dim barSpeed.w(#BARS - 1)
+Dim ballScreenX.w(#MAX_BALLS - 1)
+Dim ballScreenY.w(#MAX_BALLS - 1)
+Dim ballOrder.w(#MAX_BALLS - 1)
+Dim channelBuffer.l(2*#CHANNELS - 1)
+Dim channelNextY.w(#CHANNELS - 1)
+Dim channelFill.w(#CHANNELS - 1)
+Dim channelCount.w(#CHANNELS - 1)
+Dim channelPos.l(#CHANNELS - 1)
+Dim channelCtl.l(#CHANNELS - 1)
+
+quitFlag.w = False
+;; The lists' first line, as the game's: the top of the standard PAL window, or line 32 on an NTSC machine.
+hudYpos.w = #HUD_YPOS_PAL
+If NTSC = True Then hudYpos = #HUD_YPOS_NTSC
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+spriteMode.w = True
+cameraMoving.w = True
+mWasDown.w = False
+testColumn.w = False
+fWasDown.w = False
+worldFetch.w = 3
+listSprites.w = 7
+;; The runs: fetch mode 3 (the game's), 1 and 0, each as bobs then as sprites, and how far each has got.
+Dim runFetch.w(#RUNS - 1)
+Dim runSprites.w(#RUNS - 1)
+runFetch(0) = 3
+runFetch(1) = 3
+runFetch(2) = 1
+runFetch(3) = 1
+runFetch(4) = 0
+runFetch(5) = 0
+For runNumber.w = 0 To #RUNS - 1
+  runSprites(runNumber) = False
+  If (runNumber AND 1) = 1 Then runSprites(runNumber) = True
+Next
+Dim runFrames.l(#RUNS - 1)
+Dim runSum.l(#RUNS - 1)
+Dim runWorst.l(#RUNS - 1)
+Dim runLate.l(#RUNS - 1)
+Dim runFellBack.l(#RUNS - 1)
+runIndex.w = 0
+runFrame.l = 0
+tripsDone.w = 0
+usableChannels.w = 7
+;; The lines in a frame, by the machine's standard.
+frameLines.w = 312
+If NTSC = True Then frameLines = 262
+sWasDown.w = False
+Dim fetchSeen.w(3)
+tWasDown.w = False
+Dim dumpWord.l(39)
+dumpFrame.l = 0
+spaceWasDown.w = False
+cameraX.w = #CAMERA_MIN
+cameraStep.w = 1
+ballCount.w = 0
+bufferSet.w = 0
+spriteBlock.l = 0
+listTop.w = 0
+nullBlock.l = 0
+spinFrame.w = 0
+startLine.l = 0
+endLine.l = 0
+workLines.l = 0
+Dim modeFrames.l(7)
+Dim modeSum.l(7)
+Dim modeWorst.l(7)
+overflowFrames.l = 0
+overflowWorst.w = 0
+overflowSum.l = 0
+channelsWorst.w = 0
+ballsWorst.w = 0
+chipBefore.l = 0
+chipAfter.l = 0
+itemsLoaded.w = False
+
+;; =======================================================
+;; ALLOC AND FILES (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_ITEMS, #ITEMS_W, #ITEMS_H, 4
+If Exists("sparky-dave:game/assets/items-16x16.iff") > 0
+  LoadBitMap #BM_ITEMS, "sparky-dave:game/assets/items-16x16.iff"
+  itemsLoaded = True
+EndIf
+
+;; The channels' data, two sets (this frame's and the next's), and 16 zero bytes for a channel with nothing to show.
+chipBefore = AvailMem_(2)
+For bufferIndex.w = 0 To 2*#CHANNELS - 1
+  channelBuffer(bufferIndex) = AllocMem_(#CHANNEL_BYTES, $10002)
+Next
+nullBlock = AllocMem_(16, $10002)
+chipAfter = AvailMem_(2)
+
+;; 0 black (the castle); 1 grey (the blocks and floor); 4 orange, 8 white, 11 red (the fireball's pens, the game's colours);
+;; 7 white (the HUD's marks); 16 to 31 the back, all black; 33 to 35, 37 to 39, 41 to 43, 45 to 47 each channel pair's colours
+;; 1 to 3: red, orange, white (pens 11, 4 and 8).
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 170, 170, 170
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 7, 255, 255, 255
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 11, 181, 50, 32
+For pairIndex.w = 0 To 3
+  AGAPalRGB 0, 33 + pairIndex*4, 181, 50, 32
+  AGAPalRGB 0, 34 + pairIndex*4, 230, 156, 33
+  AGAPalRGB 0, 35 + pairIndex*4, 255, 255, 255
+Next
+
+;; The bars: their centres (each on a grey block), their speeds in 256ths of a turn a frame (two one way, one the other), and
+;; every part's offset at every one of 32 angles (part 0 the centre, then 8 px apart), clockwise from straight up.
+barCentreX(0) = 408
+barCentreY(0) = 120
+barCentreX(1) = 520
+barCentreY(1) = 104
+barCentreX(2) = 632
+barCentreY(2) = 136
+barSpeed(0) = 3
+barSpeed(1) = -4
+barSpeed(2) = 2
+;; A float step: the literal in a word expression overflowed the compiler (it types the sum by its first term).
+angleStep.f = 6.2831853
+angleStep = angleStep/#ANGLES
+For angleIndex.w = 0 To #ANGLES - 1
+  angleRadians.f = angleStep
+  angleRadians = angleRadians*angleIndex
+  For partIndex.w = 0 To #PARTS - 1
+    partOffsetX(angleIndex*#PARTS + partIndex) = Int(Sin(angleRadians)*partIndex*8 + 0.5)
+    partOffsetY(angleIndex*#PARTS + partIndex) = -Int(Cos(angleRadians)*partIndex*8 + 0.5)
+  Next
+Next
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; The castle: black, a grey floor, a grey block under each bar's centre, grey pillars.
+Statement DrawFront{bitmapIndex.w}
+  SHARED barCentreX(), barCentreY()
+  Use BitMap bitmapIndex
+  Cls 0
+  Boxf 0, 208, #FRONT_W - 1, 239, 1
+  For pillarX.w = 64 To #FRONT_W - 64 Step 192
+    Boxf pillarX, 160, pillarX + 15, 207, 1
+  Next
+  For barIndex.w = 0 To #BARS - 1
+    Boxf barCentreX(barIndex) - 8, barCentreY(barIndex) - 8, barCentreX(barIndex) + 7, barCentreY(barIndex) + 7, 1
+  Next
+End Statement
+
+;; The fireball's four pictures (the game's cut: cell 28's four 8x8 quarters, small to large) as shapes for the bobs, and as
+;; sprite rows: each row a long, plane 0's word then plane 1's, the 8 px in the word's top byte; pen 11 is colour 1, pen 4
+;; colour 2, pen 8 colour 3. Without the sheet, a plain ball in the same three colours.
+Statement MakeBall{}
+  SHARED ballWord(), itemsLoaded
+  Use BitMap #BM_ITEMS
+  If itemsLoaded = False
+    Cls 0
+    For frameIndex.w = 0 To 3
+      cellLeft.w = #BALL_CELL*#TILE + (frameIndex AND 1)*#BALL
+      cellTop.w = (frameIndex/2)*#BALL
+      Boxf cellLeft + 1, cellTop + 1, cellLeft + 6, cellTop + 6, 11
+      Boxf cellLeft + 2, cellTop + 2, cellLeft + 5, cellTop + 5, 4
+      Boxf cellLeft + 3, cellTop + 3, cellLeft + 3 + (frameIndex AND 1), cellTop + 4, 8
+    Next
+  EndIf
+  For frameIndex.w = 0 To 3
+    cellLeft.w = #BALL_CELL*#TILE + (frameIndex AND 1)*#BALL
+    cellTop.w = (frameIndex/2)*#BALL
+    GetaShape #PRE_BALL + frameIndex, cellLeft, cellTop, #BALL, #BALL
+    For rowIndex.w = 0 To #BALL - 1
+      planeZero.l = 0
+      planeOne.l = 0
+      For columnIndex.w = 0 To #BALL - 1
+        pixelPen.w = Point(cellLeft + columnIndex, cellTop + rowIndex)
+        bitValue.l = 1
+        For shiftIndex.w = 1 To 15 - columnIndex
+          bitValue = bitValue*2
+        Next
+        If pixelPen = 11 OR pixelPen = 8 Then planeZero = planeZero + bitValue
+        If pixelPen = 4 OR pixelPen = 8 Then planeOne = planeOne + bitValue
+      Next
+      ballWord(frameIndex*#BALL + rowIndex) = planeZero*65536 + planeOne
+    Next
+  Next
+End Statement
+
+;; The balls the screen shows this frame, in screen coordinates (x from the view's left, y from the world list's first line).
+Statement GatherBalls{}
+  SHARED barCentreX(), barCentreY(), barAngle(), partOffsetX(), partOffsetY(), ballScreenX(), ballScreenY(), ballCount, cameraX
+  ballCount = 0
+  For barIndex.w = 0 To #BARS - 1
+    offsetBase.w = ((barAngle(barIndex)/8) AND (#ANGLES - 1))*#PARTS
+    For partIndex.w = 0 To #PARTS - 1
+      screenX.w = barCentreX(barIndex) - #BALL/2 + partOffsetX(offsetBase + partIndex) - cameraX
+      screenY.w = barCentreY(barIndex) - #BALL/2 + partOffsetY(offsetBase + partIndex) - #VIEW_TOP
+      If screenX > -#BALL AND screenX < #VIEW_W AND screenY >= 1 AND screenY + #BALL <= #VIEW_H - 1
+        If ballCount < #MAX_BALLS
+          ballScreenX(ballCount) = screenX
+          ballScreenY(ballCount) = screenY
+          ballCount = ballCount + 1
+        EndIf
+      EndIf
+    Next
+  Next
+End Statement
+
+;; The game's way: every ball a bob.
+Statement DrawBallBobs{}
+  SHARED ballScreenX(), ballScreenY(), ballCount, cameraX, spinFrame, drawBuf
+  For ballIndex.w = 0 To ballCount - 1
+    BBlit drawBuf, #PRE_BALL + spinFrame, ballScreenX(ballIndex) + cameraX, ballScreenY(ballIndex) + #VIEW_TOP
+  Next
+End Statement
+
+;; Sprites: the balls by y, each to the first channel free at its line, its control words and rows into that channel's data
+;; for the next frame; a ball none can take is a bob. Returns how many fell back.
+Function.w BuildSprites{}
+  SHARED ballScreenX(), ballScreenY(), ballOrder(), ballCount, cameraX, spinFrame, drawBuf, ballWord(), listTop, bufferSet
+  SHARED channelBuffer(), channelNextY(), channelFill(), channelCount(), channelPos(), channelCtl(), usableChannels
+  For ballIndex.w = 0 To ballCount - 1
+    ballOrder(ballIndex) = ballIndex
+  Next
+  For ballIndex = 1 To ballCount - 1
+    movingBall.w = ballOrder(ballIndex)
+    placeIndex.w = ballIndex
+    keepMoving.w = True
+    While placeIndex > 0 AND keepMoving = True
+      If ballScreenY(ballOrder(placeIndex - 1)) > ballScreenY(movingBall)
+        ballOrder(placeIndex) = ballOrder(placeIndex - 1)
+        placeIndex = placeIndex - 1
+      Else
+        keepMoving = False
+      EndIf
+    Wend
+    ballOrder(placeIndex) = movingBall
+  Next
+  For channelIndex.w = 0 To #CHANNELS - 1
+    channelNextY(channelIndex) = -100
+    channelFill(channelIndex) = 0
+    channelCount(channelIndex) = 0
+  Next
+  fellBack.w = 0
+  For orderIndex.w = 0 To ballCount - 1
+    ballIndex = ballOrder(orderIndex)
+    screenY.w = ballScreenY(ballIndex)
+    takenBy.w = -1
+    channelIndex = 0
+    While takenBy = -1 AND channelIndex < usableChannels
+      If screenY >= channelNextY(channelIndex) AND channelCount(channelIndex) < #CHANNEL_BALLS Then takenBy = channelIndex
+      channelIndex = channelIndex + 1
+    Wend
+    If takenBy = -1
+      BBlit drawBuf, #PRE_BALL + spinFrame, ballScreenX(ballIndex) + cameraX, screenY + #VIEW_TOP
+      fellBack = fellBack + 1
+    Else
+      vStart.w = listTop + screenY
+      vStop.w = vStart + #BALL
+      hStart.w = ballScreenX(ballIndex) + #SPRITE_H_OFFSET
+      posWord.l = (vStart AND 255)*256 + ((hStart/2) AND 255)
+      ctlWord.l = (vStop AND 255)*256 + (vStart AND 256)/64 + (vStop AND 256)/128 + (hStart AND 1)
+      dataAddress.l = channelBuffer(bufferSet*#CHANNELS + takenBy) + channelFill(takenBy)
+      If channelCount(takenBy) = 0
+        channelPos(takenBy) = posWord
+        channelCtl(takenBy) = ctlWord
+      Else
+        Poke.w dataAddress, posWord
+        Poke.w dataAddress + 2, ctlWord
+        dataAddress = dataAddress + 4
+        channelFill(takenBy) = channelFill(takenBy) + 4
+      EndIf
+      wordBase.w = spinFrame*#BALL
+      For rowIndex.w = 0 To #BALL - 1
+        Poke.l dataAddress + rowIndex*4, ballWord(wordBase + rowIndex)
+      Next
+      channelFill(takenBy) = channelFill(takenBy) + #BALL*4
+      channelCount(takenBy) = channelCount(takenBy) + 1
+      channelNextY(takenBy) = screenY + #BALL + 1
+    EndIf
+  Next
+  For channelIndex = 0 To #CHANNELS - 1
+    If channelCount(channelIndex) > 0
+      Poke.l channelBuffer(bufferSet*#CHANNELS + channelIndex) + channelFill(channelIndex), 0
+    EndIf
+  Next
+  Function Return fellBack
+End Function
+
+;; After VWait, before the world list's first line: each channel's first ball's position and its data (this frame's set), or off.
+Statement PokeSpriteBlock{}
+  SHARED spriteBlock, channelBuffer(), channelCount(), channelPos(), channelCtl(), bufferSet, nullBlock, spriteMode, listSprites
+  For channelIndex.w = 0 To listSprites - 1
+    entryAddress.l = spriteBlock + channelIndex*16
+    dataAddress.l = nullBlock
+    If spriteMode = True AND channelCount(channelIndex) > 0
+      Poke.w entryAddress + 2, channelPos(channelIndex)
+      Poke.w entryAddress + 6, channelCtl(channelIndex)
+      dataAddress = channelBuffer(bufferSet*#CHANNELS + channelIndex)
+    Else
+      Poke.w entryAddress + 2, 0
+      Poke.w entryAddress + 6, 0
+    EndIf
+    Poke.w entryAddress + 10, (dataAddress/65536) AND $FFFF
+    Poke.w entryAddress + 14, dataAddress AND $FFFF
+  Next
+End Statement
+
+;; The two lists, made again when F changes the world list's fetch mode (#WORLD_FLAGS_FMODE0 plus worldFetch*$1000): sprite bank
+;; 2 (entries 32 to 47) on both, the back's colours at 16 to 31 as in the game, every channel off before the display starts.
+Statement SetupDisplay{}
+  SHARED hudYpos, worldFetch, spriteBlock, listTop, channelCount(), drawBm, cameraX, listSprites
+  InitCopList 0, hudYpos, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+  InitCopList 1, hudYpos + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS_FMODE0 + worldFetch*$1000, listSprites, 0, 0
+  DisplayControls 0, 0, 0, #BANK_XOR
+  DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, #BANK_XOR
+  DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+  DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+  spriteBlock = Peek.l(Addr CopList(1) + #MYCOP_SPRITES)
+  listTop = Peek.w(Addr CopList(1) + #MYCOP_YPOS)
+  For channelIndex.w = 0 To #CHANNELS - 1
+    channelCount(channelIndex) = 0
+  Next
+  If spriteBlock <> 0 Then PokeSpriteBlock{}
+  CreateDisplay 0, 1
+  DisplayPalette 0, 0
+  DisplayBitMap 0, #BM_HUD, 0, 0
+  DisplayBitMap 1, drawBm, cameraX, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+End Statement
+
+BBlitMode CookieMode
+SpriteMode 0
+MakeBall{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+Use BitMap #BM_BACK
+Cls 0
+Use BitMap #BM_HUD
+Cls 0
+For tickX.w = 20 To #HUD_W - 20 Step 20
+  Boxf tickX, 0, tickX, 1, 7
+  Boxf tickX, 14, tickX, 15, 7
+Next
+
+SetupDisplay{}
+BlitzKeys On
+
+;; The runs, one after the other with nothing to press: each a fetch mode and bobs or sprites, from the same start (the camera at
+;; #CAMERA_MIN, every bar at angle 0, the spin's count at 0), for #RUN_TRIPS sweeps of the camera there and back, 2 px a frame.
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If runFrame = 0
+    If runFetch(runIndex) <> worldFetch
+      worldFetch = runFetch(runIndex)
+      VWait
+      SetupDisplay{}
+    EndIf
+    spriteMode = runSprites(runIndex)
+    usableChannels = 7
+    If worldFetch = 1 OR worldFetch = 2 Then usableChannels = 5
+    If worldFetch = 3 Then usableChannels = 1
+    cameraX = #CAMERA_MIN
+    cameraStep = #CAMERA_STEP
+    tripsDone = 0
+    For barIndex.w = 0 To #BARS - 1
+      barAngle(barIndex) = 0
+    Next
+  EndIf
+
+  cameraX = cameraX + cameraStep
+  If cameraX >= #CAMERA_MAX Then cameraStep = -#CAMERA_STEP
+  If cameraX <= #CAMERA_MIN
+    cameraStep = #CAMERA_STEP
+    tripsDone = tripsDone + 1
+  EndIf
+  For barIndex.w = 0 To #BARS - 1
+    barAngle(barIndex) = (barAngle(barIndex) + barSpeed(barIndex)) AND 255
+  Next
+  spinFrame = (runFrame/4) AND 3
+  bufferSet = frameCount AND 1
+
+  ;; The work, timed from a fixed line until the blitter is idle: the bobs' restore, then the balls one way or the other.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  GatherBalls{}
+  fellBack.w = 0
+  If spriteMode = True
+    fellBack = BuildSprites{}
+  Else
+    DrawBallBobs{}
+    For channelIndex = 0 To #CHANNELS - 1
+      channelCount(channelIndex) = 0
+    Next
+  EndIf
+  While (Peek.w($dff002) AND $4000) <> 0
+  Wend
+  endLine = RasterLine{}
+  workLines = endLine - startLine
+  If workLines < 0 Then workLines = workLines + frameLines
+  If runFrame >= #RUN_SETTLE
+    runFrames(runIndex) = runFrames(runIndex) + 1
+    runSum(runIndex) = runSum(runIndex) + workLines
+    If workLines > runWorst(runIndex) Then runWorst(runIndex) = workLines
+    If #WORK_LINE + workLines >= frameLines Then runLate(runIndex) = runLate(runIndex) + 1
+    runFellBack(runIndex) = runFellBack(runIndex) + fellBack
+    If ballCount > ballsWorst Then ballsWorst = ballCount
+  EndIf
+
+  VWait
+  DisplayBitMap 1, drawBm, cameraX, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+  If spriteBlock <> 0 Then PokeSpriteBlock{}
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+  runFrame = runFrame + 1
+  If tripsDone >= #RUN_TRIPS
+    runIndex = runIndex + 1
+    runFrame = 0
+    If runIndex >= #RUNS Then quitFlag = True
+  EndIf
+Wend
+
+AMIGA
+For bufferIndex = 0 To 2*#CHANNELS - 1
+  FreeMem_ channelBuffer(bufferIndex), #CHANNEL_BYTES
+Next
+FreeMem_ nullBlock, 16
+If WriteFile(0, "sparky-dave:game/proofs/results/firebar-sprites-results.txt")
+  FileOutput 0
+  NPrint "firebar-sprites: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", ", frameCount, " frames"
+  NPrint "items sheet loaded (the game's fireball): ", itemsLoaded, "; sprite block found: ", spriteBlock <> 0, "; world list top line: ", listTop
+  NPrint "lines a frame (the latest beam line seen): ", frameLines + 1
+  NPrint "runs finished: ", runIndex, " of ", #RUNS, " (each ", #RUN_TRIPS, " sweeps of the camera there and back; the first ", #RUN_SETTLE, " frames of a run left out)"
+  NPrint "the work (from line ", #WORK_LINE, ": the bobs' restore and the balls, until the blitter is idle), in lines; late is a frame"
+  NPrint "whose work reached the end of the frame; fell back is balls drawn as bobs in a sprite run (no channel free at their line):"
+  For runNumber.w = 0 To #RUNS - 1
+    If runFrames(runNumber) > 0
+      kindName$ = "bobs   "
+      If runSprites(runNumber) = True Then kindName$ = "sprites"
+      averageLines.l = runSum(runNumber)/runFrames(runNumber)
+      NPrint "  fetch mode ", runFetch(runNumber), ", ", kindName$, ": ", runFrames(runNumber), " frames, average ", averageLines, ", worst ", runWorst(runNumber), ", late ", runLate(runNumber), ", fell back ", runFellBack(runNumber)
+    EndIf
+  Next
+  NPrint "most balls on screen: ", ballsWorst, "; channels a sprite run may use: fetch mode 3 one, 2 and 1 five, 0 seven (the fifth run)"
+  NPrint "the channels' data, two sets of 8: Chip RAM ", chipBefore - chipAfter, " bytes"
+  NPrint ""
+  NPrint "Compare fetch mode 3 bobs (the game today) with fetch mode 1 and 0 sprites."
+  CloseFile 0
+EndIf
+End

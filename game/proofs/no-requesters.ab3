@@ -1,0 +1,96 @@
+;; =======================================================
+;; PROOF: NO SYSTEM REQUESTERS ON A FAILED WRITE
+;; =======================================================
+;; The settings file (and since 2026-11-07 the top score at a game's end) is written with WriteFile. On a write-protected volume
+;; AmigaDOS does not fail the open at once: it asks first ("Volume ... is write protected", Retry / Cancel), on the Workbench screen,
+;; which is behind the game's display, so the game would wait on a requester nobody can see. A process whose pr_WindowPtr is -1 gets
+;; no requesters: the call fails with the error instead. This proves that from AmiBlitz: FindTask_(0) for our own process, its
+;; pr_WindowPtr at offset 184 (struct Process: the Task 92, the MsgPort 34, pr_Pad 2, then eleven longs and two more before it,
+;; dos/dosextens.h), set to -1, a write to a protected volume failing without a requester, and the old value put back.
+;;
+;; Before running: a write-protected volume where protectedPath$ points. Either a floppy (an ADF marked write-protected in the
+;; emulator) in DF0:, or change the path to a volume locked with the Lock command (lock NAME: on; lock NAME: off after).
+;;
+;; Expected:
+;;   1  requesters off, a write to RAM: works (turning them off breaks nothing that works)
+;;   2  requesters off, the write to the protected volume fails at once, with no requester, IoErr 214 (disk write-protected)
+;;   3  requesters back on, the same write: the requester appears (press Cancel), then it fails
+;;   4  the old pr_WindowPtr is back
+;; Results: game/proofs/results/no-requesters-results.txt
+
+WBStartup
+
+#PR_WINDOWPTR = 184
+
+protectedPath$ = "DF0:sparky-protect-test.txt"
+ramPath$ = "RAM:sparky-protect-test.txt"
+
+processAddress.l = FindTask_(0)
+oldWindowPtr.l = Peek.l(processAddress + #PR_WINDOWPTR)
+
+;; 1 and 2: requesters off.
+Poke.l processAddress + #PR_WINDOWPTR, -1
+offNow.l = Peek.l(processAddress + #PR_WINDOWPTR)
+
+ramWritten.w = False
+If WriteFile(0, ramPath$)
+  FileOutput 0
+  NPrint "test"
+  CloseFile 0
+  DefaultOutput
+  ramWritten = True
+EndIf
+
+NPrint "Step 2: writing to " + protectedPath$ + " with requesters off (no requester should appear)"
+protectedOffOpened.w = False
+If WriteFile(1, protectedPath$)
+  protectedOffOpened = True
+  CloseFile 1
+EndIf
+protectedOffError.l = IoErr_()
+
+;; 3: requesters back on (the old value): the same write.
+Poke.l processAddress + #PR_WINDOWPTR, oldWindowPtr
+NPrint "Step 3: the same write with requesters on: a requester should appear; press Cancel"
+protectedOnOpened.w = False
+If WriteFile(1, protectedPath$)
+  protectedOnOpened = True
+  CloseFile 1
+EndIf
+protectedOnError.l = IoErr_()
+
+;; 4: the old value is back.
+restoredNow.l = Peek.l(processAddress + #PR_WINDOWPTR)
+
+If ramWritten <> False Then KillFile ramPath$
+
+If WriteFile(2, "sparky-dave:game/proofs/results/no-requesters-results.txt")
+  FileOutput 2
+  NPrint "No requesters proof"
+  NPrint "process address: " + Str$(processAddress)
+  NPrint "old pr_WindowPtr: " + Str$(oldWindowPtr)
+  NPrint "pr_WindowPtr after setting -1: " + Str$(offNow)
+  If ramWritten <> False
+    NPrint "1 PASS: requesters off, the write to RAM: worked"
+  Else
+    NPrint "1 FAIL: requesters off, the write to RAM: failed"
+  EndIf
+  If protectedOffOpened = False
+    NPrint "2 PASS (if no requester was seen): requesters off, the protected write failed, IoErr " + Str$(protectedOffError) + " (214 is write-protected)"
+  Else
+    NPrint "2 FAIL: the protected write opened (is the volume really write-protected?)"
+  EndIf
+  If protectedOnOpened = False
+    NPrint "3 requesters on, the protected write failed, IoErr " + Str$(protectedOnError) + " (was a requester seen?)"
+  Else
+    NPrint "3 FAIL: the protected write opened"
+  EndIf
+  If restoredNow = oldWindowPtr
+    NPrint "4 PASS: pr_WindowPtr restored to " + Str$(restoredNow)
+  Else
+    NPrint "4 FAIL: pr_WindowPtr is " + Str$(restoredNow)
+  EndIf
+  CloseFile 2
+EndIf
+
+End

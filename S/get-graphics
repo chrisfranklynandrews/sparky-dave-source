@@ -1,0 +1,54 @@
+.KEY archive/A
+.BRA {
+.KET }
+; Unpack the released Sparky Dave lha into RAM:SparkyGraphics and say where its graphics and level
+; files go. It copies nothing into the source tree: you do that, so you can see where they land.
+;
+;   execute sparky-dave:S/get-graphics Work:Downloads/SparkyDave-0.94.lha
+;
+; The lha is on https://chrisfranklyn.itch.io/sparky-dave . It must be the release SOURCE-REV names:
+; the file formats change between releases. The lha holds a drawer SparkyDave/ with the programs and
+; SparkyDave/data/ (the IFFs, the .bin files, and the areas and areas-allstars drawers). Only data/ is
+; needed. Needs the lha command (C:lha).
+
+FAILAT 21
+
+IF NOT EXISTS {archive}
+  ECHO "No such file: {archive}"
+  QUIT 20
+ENDIF
+
+DELETE RAM:SparkyGraphics ALL QUIET
+MAKEDIR RAM:SparkyGraphics
+
+ECHO "Unpacking {archive}"
+lha x {archive} RAM:SparkyGraphics/
+IF WARN
+  ECHO "lha could not unpack the archive."
+  DELETE RAM:SparkyGraphics ALL QUIET
+  QUIT 20
+ENDIF
+
+IF NOT EXISTS RAM:SparkyGraphics/SparkyDave/data/tiles-all.iff
+  ECHO "There is no SparkyDave/data drawer in that archive: is it the Sparky Dave lha?"
+  DELETE RAM:SparkyGraphics ALL QUIET
+  QUIT 20
+ENDIF
+
+ECHO "The archive is:"
+IF EXISTS RAM:SparkyGraphics/SparkyDave/VERSION
+  TYPE RAM:SparkyGraphics/SparkyDave/VERSION
+ENDIF
+ECHO "This source is (SOURCE-REV):"
+IF EXISTS sparky-dave:SOURCE-REV
+  TYPE sparky-dave:SOURCE-REV
+ENDIF
+
+ECHO ""
+ECHO "Unpacked into RAM:SparkyGraphics/SparkyDave/data"
+ECHO "Now copy its contents, the files and the areas and areas-allstars drawers, into the game/assets"
+ECHO "drawer of this source (git ignores it), for example:"
+ECHO "  COPY RAM:SparkyGraphics/SparkyDave/data/#? TO sparky-dave:game/assets ALL CLONE"
+ECHO "Check that the sparky-dave: assign is this source and not another copy. When you have copied them:"
+ECHO "  DELETE RAM:SparkyGraphics ALL"
+ECHO "Then compile: execute sparky-dave:S/run-sparky"

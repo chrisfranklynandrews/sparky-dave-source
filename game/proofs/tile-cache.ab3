@@ -1,0 +1,224 @@
+;; tile-cache.ab3 -- proof for keeping the All-Stars look's tile sets in Fast RAM, so a change of set (a pipe into an underground
+;; room and back) copies memory instead of reading 55 KB from disk each way. Compile in UAE (execute sparky-dave:S/run-proof).
+;; Not part of the game.
+;;
+;; A set is the atlas (320x224) and the enemies' (720x32) and items' (992x16) sheets, 4 planes each: 55,296 bytes. EnsureTileSet{}
+;; loads the three IFFs again at every change of set (sparkydave.tileset.blitz.ab3); from a floppy that is seconds, twice for one
+;; visit to a bonus room. No level uses more than two sets (over and under, over and water, or castle), so two blocks would do.
+;; This answers:
+;;   1. Do exec's AllocMem_, CopyMem_ and FreeMem_ work from Blitz (the game already calls AvailMem_ and OpenLibrary_), and is the
+;;      block in Fast RAM (TypeOfMem_)?
+;;   2. Are the bitmaps laid out as the copy assumes: Addr BitMap's bytes per row and rows as width/8 and height, the planes through
+;;      the pointers at +8 (as map.blitz.ab3 reads them)?
+;;   3. Does a set copied out and back, in Blitz mode, come back word for word (a checksum of every plane word of the three
+;;      bitmaps, against the one taken just after the set was loaded from its files)?
+;;   4. What does it cost: loading a set from its files, against copying it back?
+;;
+;; The files are the game's own, from game/assets. Results: game/proofs/results/tile-cache-results.txt.
+
+WBStartup
+
+#ATLAS_W        = 320
+#ATLAS_H        = 224
+#ENEMIES_W      = 720
+#ENEMIES_H      = 32
+#ITEMS_W        = 992
+#ITEMS_H        = 16
+#PLANES         = 4
+#SET_BYTES      = 55296
+#MEMF_FAST      = 4
+#MEMF_FAST_CLEAR = $10004
+#RESTORES       = 10
+
+#ATLAS_BITMAP   = 0
+#ENEMIES_BITMAP = 1
+#ITEMS_BITMAP   = 2
+
+Dim atlasPath$(1)
+Dim enemiesPath$(1)
+Dim itemsPath$(1)
+Dim setName$(1)
+Dim cacheBlock.l(1)
+Dim loadedChecksum.l(1)
+Dim restoredChecksum.l(1)
+Dim loadFrames.l(1)
+Dim saveFrames.l(1)
+Dim restoreFrames.l(1)
+Dim checkLog$(40)
+checkCount.w = 0
+checkFailed.w = 0
+repeatFrames.l = 0
+
+setName$(0) = "over"
+atlasPath$(0) = "sparky-dave:game/assets/tiles-allstars-over.iff"
+enemiesPath$(0) = "sparky-dave:game/assets/enemies-allstars.iff"
+itemsPath$(0) = "sparky-dave:game/assets/items-16x16-allstars.iff"
+setName$(1) = "under"
+atlasPath$(1) = "sparky-dave:game/assets/tiles-allstars-under.iff"
+enemiesPath$(1) = "sparky-dave:game/assets/enemies-allstars-under.iff"
+itemsPath$(1) = "sparky-dave:game/assets/items16-allstars-under.iff"
+
+; Record one named self-check for the results file.
+Statement Check{label$, conditionNow.w}
+  SHARED checkCount, checkFailed, checkLog$()
+  checkCount = checkCount + 1
+  If conditionNow <> False
+    checkLog$(checkCount) = "PASS  " + label$
+  Else
+    checkLog$(checkCount) = "FAIL  " + label$
+    checkFailed = checkFailed + 1
+  EndIf
+End Statement
+
+; CIA-A's time of day, in frames. The high byte is read first, which latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+; The bytes of one plane of a bitmap (Addr BitMap: bytes per row, then rows).
+Function.l PlaneBytes{bitmapStruct.l}
+  Function Return (Peek.w(bitmapStruct) AND $ffff)*(Peek.w(bitmapStruct + 2) AND $ffff)
+End Function
+
+;; One bitmap's planes to the block at blockAddress (toBlock True) or from it, plane after plane, with exec's CopyMem. Returns the
+;; address after them in the block.
+Function.l CopyPlanes{bitmapStruct.l, blockAddress.l, toBlock.w}
+  planeBytes.l = PlaneBytes{bitmapStruct}
+  For planeIndex.w = 0 To #PLANES - 1
+    planeAddress.l = Peek.l(bitmapStruct + 8 + planeIndex*4)
+    If toBlock <> False
+      CopyMem_ planeAddress, blockAddress, planeBytes
+    Else
+      CopyMem_ blockAddress, planeAddress, planeBytes
+    EndIf
+    blockAddress = blockAddress + planeBytes
+  Next
+  Function Return blockAddress
+End Function
+
+; The three bitmaps to or from a block: the atlas, then the enemies' sheet, then the items'.
+Statement CopySet{blockAddress.l, toBlock.w}
+  blockAddress = CopyPlanes{Addr BitMap(#ATLAS_BITMAP), blockAddress, toBlock}
+  blockAddress = CopyPlanes{Addr BitMap(#ENEMIES_BITMAP), blockAddress, toBlock}
+  blockAddress = CopyPlanes{Addr BitMap(#ITEMS_BITMAP), blockAddress, toBlock}
+End Statement
+
+; acc = (acc*31 + word) mod 2^24 over every word of one bitmap's planes (the area files' checksum).
+Function.l ChecksumPlanes{bitmapStruct.l, accumulator.l}
+  planeBytes.l = PlaneBytes{bitmapStruct}
+  For planeIndex.w = 0 To #PLANES - 1
+    planeAddress.l = Peek.l(bitmapStruct + 8 + planeIndex*4)
+    For byteOffset.l = 0 To planeBytes - 2 Step 2
+      accumulator = (accumulator*31 + (Peek.w(planeAddress + byteOffset) AND $ffff)) AND $ffffff
+    Next
+  Next
+  Function Return accumulator
+End Function
+
+Function.l ChecksumSet{}
+  accumulator.l = ChecksumPlanes{Addr BitMap(#ATLAS_BITMAP), 0}
+  accumulator = ChecksumPlanes{Addr BitMap(#ENEMIES_BITMAP), accumulator}
+  Function Return ChecksumPlanes{Addr BitMap(#ITEMS_BITMAP), accumulator}
+End Function
+
+; Every plane word of one bitmap to 0, so a set copied back cannot pass by being what was there.
+Statement ClearPlanes{bitmapStruct.l}
+  planeBytes.l = PlaneBytes{bitmapStruct}
+  For planeIndex.w = 0 To #PLANES - 1
+    planeAddress.l = Peek.l(bitmapStruct + 8 + planeIndex*4)
+    For byteOffset.l = 0 To planeBytes - 4 Step 4
+      Poke.l planeAddress + byteOffset, 0
+    Next
+  Next
+End Statement
+
+Statement ClearSet{}
+  ClearPlanes{Addr BitMap(#ATLAS_BITMAP)}
+  ClearPlanes{Addr BitMap(#ENEMIES_BITMAP)}
+  ClearPlanes{Addr BitMap(#ITEMS_BITMAP)}
+End Statement
+
+;; ---- the bitmaps, as the game makes them ----
+BitMap #ATLAS_BITMAP, #ATLAS_W, #ATLAS_H, #PLANES
+BitMap #ENEMIES_BITMAP, #ENEMIES_W, #ENEMIES_H, #PLANES
+BitMap #ITEMS_BITMAP, #ITEMS_W, #ITEMS_H, #PLANES
+atlasStruct.l = Addr BitMap(#ATLAS_BITMAP)
+enemiesStruct.l = Addr BitMap(#ENEMIES_BITMAP)
+itemsStruct.l = Addr BitMap(#ITEMS_BITMAP)
+Check{"the atlas is " + Str$(Peek.w(atlasStruct)) + " bytes a row and " + Str$(Peek.w(atlasStruct + 2)) + " rows (40, 224)", Peek.w(atlasStruct) = #ATLAS_W/8 AND Peek.w(atlasStruct + 2) = #ATLAS_H}
+Check{"the enemies' sheet is " + Str$(Peek.w(enemiesStruct)) + " bytes a row and " + Str$(Peek.w(enemiesStruct + 2)) + " rows (90, 32)", Peek.w(enemiesStruct) = #ENEMIES_W/8 AND Peek.w(enemiesStruct + 2) = #ENEMIES_H}
+Check{"the items' sheet is " + Str$(Peek.w(itemsStruct)) + " bytes a row and " + Str$(Peek.w(itemsStruct + 2)) + " rows (124, 16)", Peek.w(itemsStruct) = #ITEMS_W/8 AND Peek.w(itemsStruct + 2) = #ITEMS_H}
+setBytes.l = #PLANES*(PlaneBytes{atlasStruct} + PlaneBytes{enemiesStruct} + PlaneBytes{itemsStruct})
+Check{"a set is " + Str$(setBytes) + " bytes (55296)", setBytes = #SET_BYTES}
+
+;; ---- two blocks of Fast RAM ----
+For slotIndex.w = 0 To 1
+  cacheBlock(slotIndex) = AllocMem_(#SET_BYTES, #MEMF_FAST_CLEAR)
+  Check{"block " + Str$(slotIndex) + " allocated ($" + Hex$(cacheBlock(slotIndex)) + ")", cacheBlock(slotIndex) <> 0}
+  If cacheBlock(slotIndex) <> 0 Then Check{"block " + Str$(slotIndex) + " is Fast RAM (TypeOfMem_)", (TypeOfMem_(cacheBlock(slotIndex)) AND #MEMF_FAST) <> 0}
+Next
+
+;; ---- each set loaded from its files (Amiga mode), its checksum taken, and copied to its block ----
+If cacheBlock(0) <> 0 AND cacheBlock(1) <> 0
+  For setIndex.w = 0 To 1
+    startTime.l = ReadTimeOfDay{}
+    LoadBitMap #ATLAS_BITMAP, atlasPath$(setIndex)
+    LoadBitMap #ENEMIES_BITMAP, enemiesPath$(setIndex)
+    LoadBitMap #ITEMS_BITMAP, itemsPath$(setIndex)
+    loadFrames(setIndex) = ReadTimeOfDay{} - startTime
+    loadedChecksum(setIndex) = ChecksumSet{}
+    startTime = ReadTimeOfDay{}
+    CopySet{cacheBlock(setIndex), True}
+    saveFrames(setIndex) = ReadTimeOfDay{} - startTime
+  Next
+  Check{"the two sets differ (checksums $" + Hex$(loadedChecksum(0)) + " and $" + Hex$(loadedChecksum(1)) + ")", loadedChecksum(0) <> loadedChecksum(1)}
+
+  ;; ---- back from the blocks, in Blitz mode, as the game would behind its cover ----
+  BLITZ
+  For setIndex.w = 0 To 1
+    ClearSet{}
+    startTime = ReadTimeOfDay{}
+    CopySet{cacheBlock(setIndex), False}
+    restoreFrames(setIndex) = ReadTimeOfDay{} - startTime
+    restoredChecksum(setIndex) = ChecksumSet{}
+  Next
+  startTime = ReadTimeOfDay{}
+  For repeatIndex.w = 1 To #RESTORES
+    CopySet{cacheBlock(repeatIndex AND 1), False}
+  Next
+  repeatFrames = ReadTimeOfDay{} - startTime
+  restoredLast.l = ChecksumSet{}
+  AMIGA
+
+  For setIndex.w = 0 To 1
+    Check{setName$(setIndex) + ": copied back from its block in Blitz mode, every word the files' (checksum $" + Hex$(restoredChecksum(setIndex)) + ")", restoredChecksum(setIndex) = loadedChecksum(setIndex)}
+  Next
+  Check{"after the repeated copies the last set copied (over) is on the bitmaps", restoredLast = loadedChecksum(0)}
+EndIf
+
+For slotIndex.w = 0 To 1
+  If cacheBlock(slotIndex) <> 0 Then FreeMem_ cacheBlock(slotIndex), #SET_BYTES
+Next
+
+If WriteFile(0, "sparky-dave:game/proofs/results/tile-cache-results.txt")
+  FileOutput 0
+  NPrint "tile-cache"
+  NPrint ""
+  NPrint "SELF-CHECKS (", checkCount, ", failed ", checkFailed, ")"
+  For index.w = 1 To checkCount
+    NPrint checkLog$(index)
+  Next
+  NPrint ""
+  NPrint "COST, in frames (CIA-A time of day: 1 frame is 20 ms on PAL, 16.7 ms on NTSC; 0 means under a frame)"
+  For setIndex.w = 0 To 1
+    NPrint "  ", setName$(setIndex), ": loaded from its three files in ", loadFrames(setIndex), ", copied to its block in ", saveFrames(setIndex), ", copied back in ", restoreFrames(setIndex)
+  Next
+  NPrint "  ", #RESTORES, " copies back, the sets in turn: ", repeatFrames, " frames"
+  NPrint ""
+  NPrint "A host folder under UAE is not a floppy: from one, a set's 55 KB is seconds."
+  CloseFile 0
+EndIf
+End

@@ -1,0 +1,93 @@
+;; =======================================================
+;; LEVELS (BLITZ MODE)
+;; =======================================================
+;; The level table in play: beginning a level from the table
+;; (sparkydave.areas.table.ab3, built from manifest.LEVEL_ORDER). Every area of the level is read into its slot
+;; (sparkydave.areaload.ab3), the first is entered as the level's start area: its maps into the world and into
+;; the backups that ResetLevel{} restores, its objects into the level's boxes and tables, and the level's own
+;; numbers (the HUD's world and level, the halfway page, the timer, the width of the area, the area's type and
+;; scenery) taken from the table. The caller puts the lives cover up first, named with NameLevel{}, then calls this and
+;; resets the level's state and stamps it behind the cover (ReloadBehindLivesCover{}, RestartLevel{}).
+;;
+;; The disk read is made from the running display (QAMIGA, as the settings are saved: sparkydave.cover.blitz.ab3), with the lives
+;; cover already up: the four areas of 1-2 take about 0.3 s in UAE but seconds from a floppy, and with the cover up first the press
+;; that ends the course clear is answered at once. The ticks spent on the read come off the cover's hold (CoverTicksLeft{}).
+
+;; A slot's area becomes the world, the area the level is played in (not a room): its maps into the world and into the
+;; backups ResetLevel{} restores, its objects into the level's boxes and tables, and its width, type and scenery taken
+;; from the table. The caller stamps the playfields (behind a cover) and puts Mario where he comes in. A room is entered
+;; by SwitchToBonus{} instead, which leaves the world and its tables as they are.
+;; The game stops, saying so as it leaves, when a level cannot be begun: its area files are not whole (the start-up check
+;; saw them present, so this is a bad or short file). The slots are part overwritten by then, so there is no going back.
+Statement NoteLevelLoadFailure{failCode.w}
+  SHARED levelLoadFailCode, quitFlag
+  levelLoadFailCode = failCode
+  quitFlag = True
+End Statement
+
+Statement EnterLevelAreaSlot{slot.w}
+  SHARED currentLevelSlot, areaColumns, mapWidth, areaIntroWalk
+  SHARED tableAreaIntro(), tableAreaCloud(), currentAreaCloud
+  SHARED mapBuffer(), mapBufferBackup(), metatileBuffer(), metatileBufferBackup()
+  SHARED tableAreaColumns(), tableAreaType(), tableAreaScenery(), slotAreaIndex()
+  SHARED startAreaType, startAreaScenery, currentAreaType, currentAreaScenery
+  EnterSlotMaps{slot}
+  For copyCell = 0 To #MAP_CELLS - 1
+    mapBufferBackup(copyCell) = mapBuffer(copyCell)
+    metatileBufferBackup(copyCell) = metatileBuffer(copyCell)
+  Next
+  objectResult.w = ApplyAreaObjects{slot}
+  If objectResult < 0 Then NoteLevelLoadFailure{-5}
+  areaOfSlot.w = slotAreaIndex(slot)
+  currentLevelSlot = slot
+  areaIntroWalk = tableAreaIntro(areaOfSlot)
+  currentAreaCloud = tableAreaCloud(areaOfSlot)
+  mapWidth = #MAP_W
+  areaColumns = tableAreaColumns(areaOfSlot)
+  startAreaType = tableAreaType(areaOfSlot)
+  startAreaScenery = tableAreaScenery(areaOfSlot)
+  currentAreaType = startAreaType
+  currentAreaScenery = startAreaScenery
+End Statement
+
+;; The HUD's world and level for level levelIndex, from the table: set before the lives cover goes up, so the cover names
+;; the level then read behind it (BeginLevel{} sets them again).
+Statement NameLevel{levelIndex.w}
+  SHARED hudWorld, hudLevel, tableLevelWorld(), tableLevelNumber()
+  hudWorld = tableLevelWorld(levelIndex)
+  hudLevel = tableLevelNumber(levelIndex)
+End Statement
+
+;; Begin level levelIndex (an index into the level table). 0 if good, else LoadAreaIntoSlot{}'s code (-1 to -4); nothing of
+;; the running level has changed then, except the slots. The first area of the level is entered as its start area.
+Function.w BeginLevel{levelIndex.w}
+  SHARED currentLevel, levelRestartSlot, levelHalfwayX, hudTimeStart, debugMode, levelReached, settingsDirty
+  SHARED allLevelsOpen
+  SHARED tableLevelHalfwayPage(), tableLevelTimer()
+  MarkTransition{"BeginLevel: begin"}
+  QAMIGA
+  loadResult.w = LoadLevelAreas{levelIndex}
+  BLITZ
+  If loadResult <> 0
+    MarkTransition{"BeginLevel: the areas could not be read"}
+    NoteLevelLoadFailure{loadResult}
+    Function Return(loadResult)
+  EndIf
+  MarkTransition{"BeginLevel: areas read from disk"}
+  ; The level is named before its first area is entered: which plants an area grows depends on it.
+  currentLevel = levelIndex
+  EnterLevelAreaSlot{0}
+  levelRestartSlot = 0
+  ;; The furthest level got to is what the title's LEVEL offers next time (not in debug mode, where every level is offered and a
+  ;; jump with F2 is not progress, nor with the parameter levels, where a level picked is not one reached).
+  If debugMode = False AND allLevelsOpen = False AND levelIndex > levelReached
+    levelReached = levelIndex
+    settingsDirty = True
+  EndIf
+  NameLevel{levelIndex}
+  levelHalfwayX = tableLevelHalfwayPage(levelIndex)*256
+  hudTimeStart = tableLevelTimer(levelIndex)
+  Function Return(0)
+End Function
+
+;; END OF LEVELS (BLITZ MODE)

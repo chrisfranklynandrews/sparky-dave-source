@@ -1,0 +1,496 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; sprite-over-hud.ab3 -- can Mario show over the HUD band as a hardware sprite?
+;; Compile in UAE. Not part of the game. Answers the open item in the main project's candidates notes ("Mario above
+;; the top of the screen is behind the HUD"): the game's HUD is a fixed band over the world list,
+;; so a Mario above world y 32 is not on screen. Option 2 of that item: while he is up there, a
+;; hardware sprite shows him over the band.
+;;
+;; The idea. The world's own bob shows every row of him at world y 32 and below (the world list
+;; starts at world row 32). DisplaySprite clips a sprite to the list it is given, so a sprite in
+;; the HUD list (list 0) shows only the rows that are over the band, and the two halves fit with
+;; nothing to swap. The 3 line gap between the lists cuts 3 rows out of him as he passes it. The
+;; sprite is one channel (channel 0), 16 wide, 4 colours (pen 0 transparent): Mario's pens 13, 14
+;; and 15 are 1, 2 and 3 in their low two bits, so a 2 plane copy of his shape is his sprite. The
+;; other seven channels stay free. The sprite's colours are entries 33 to 35, which is BPLCON4's
+;; sprite bank moved from 1 (entries 16 to 31, the back playfield's) to 2 (DisplayControls ..., $33
+;; XORs the default $11 to $22), so the palette is 36 entries and the HUD list loads 36.
+;;
+;; The display is the game's: a 16 line HUD list over a 208 line world list, 3 lines apart, the
+;; world dual playfield at fetch mode 3, DisplayAdjust -1 and -1, fractional scroll. PAL only
+;; (the lists start at line 44). The type words have the lores sprite flag ($400) added.
+;;
+;; The risk this proof is mostly about. Blitz's sprites are driven by the copper: it writes
+;; SPR0POS, SPR0CTL and the data pointer at the top of the list, and the data has no header. When a
+;; sprite is clipped at the bottom of the list, its VSTOP falls inside its own data, and after
+;; VSTOP the hardware reads the next two words of data as new control words. Those words are
+;; Mario's pixels, which can arm a junk sprite lower down the screen, over the world. The guard
+;; stops that: a WAIT and three MOVEs in list 0's custom area, after the last HUD line: SPR0CTL = 0
+;; (stops the sprite; found in the first run, without it the sprite's last row repeated down the
+;; whole world, because the list's DMA-off keeps the hardware from reaching its stop line), then
+;; SPR0PT at 16 zero bytes, so the words read are zeros. Space turns it off and on.
+;;
+;; Keys: arrows move the test figure (until you touch one it moves itself: up and down once in
+;; about 7 seconds, and sideways); Space guard on / off; Return sprite on / off (off is what the
+;; game shows today); Z and X move the sprite's x by a quarter pixel left and right; Esc quits and
+;; writes sprite-over-hud-results.txt.
+;;
+;; What to look at and report
+;; 1. The figure (16x32, a red outline, brown and skin stripes of 2 rows) rises into the HUD band.
+;;    Is it shown in the band, in the right colours (the same as in the world)?
+;; 2. The join: with the sprite on, does the figure look like one figure across the band and the
+;;    world? Expect the 3 line gap to cut 3 rows out of it as it passes. With Return (sprite off)
+;;    compare: the figure should just stop at the band.
+;; 3. Horizontal alignment: is the sprite's red outline in line with the outline of the world's
+;;    half? If not, how many quarter pixels (Z / X) put it right? The results file records the
+;;    bias at exit. Is there any shear while the camera scrolls (the world's scroll is a fraction
+;;    of a pixel; the sprite takes the same fraction)?
+;; 4. Junk: any stray coloured lines or specks in the world, the gap or the HUD, with the guard
+;;    on, and with it off (Space)? Say which.
+;; 5. The HUD band itself (white tick marks and boxes), the 3 line gap and the world: no flicker
+;;    line, no garbage, no change to the colours of the world or the clouds and hills.
+;; The results file has the bob load time (as dual-playfield.ab3's: average 72, worst 74 lines
+;; there) and the frames the sprite was showing.
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_SPACE  = $40
+#RAW_KEY_RETURN = $44
+#RAW_KEY_ESC    = $45
+#RAW_KEY_UP     = $4C
+#RAW_KEY_DOWN   = $4D
+#RAW_KEY_RIGHT  = $4E
+#RAW_KEY_LEFT   = $4F
+#RAW_KEY_Z      = $31
+#RAW_KEY_X      = $32
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 36
+
+;; The game's type words ($13014 and $13038) with the lores sprite flag.
+#HUD_FLAGS   = $13414
+#WORLD_FLAGS = $13438
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+#PLAYFIELD2_OFFSET_16 = $1c00
+#BANK_XOR      = $33
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the 4 plane figure, 5 its 2 plane copy.
+#BM_A      = 0
+#BM_B      = 1
+#BM_BACK   = 2
+#BM_HUD    = 3
+#BM_ACTOR4 = 4
+#BM_ACTOR2 = 5
+#FRONT_W   = 1024
+#BACK_W    = 1152
+#WORLD_H   = 256
+#HUD_W     = 384
+
+#ACTOR_SHAPE  = 0
+#SPRITE_SHAPE = 1
+#SPRITE_OBJ   = 0
+#ACTOR_W      = 16
+#ACTOR_H      = 32
+#TILE         = 16
+#BOB_BYTES    = 16384
+
+;; The custom area of list 0: a WAIT and three MOVEs (the guard), and the CopList object's custom
+;; area pointer, its eighth long (displaylib.ab3, NEWTYPE .mycop).
+#GUARD_COUNT   = 4
+#MYCOP_CUSTOMS = 28
+#NOP_LONG      = $01FE0000
+
+#WORK_LINE     = 80
+#LINES_PAL     = 312
+#SCROLL_MAX    = 640
+#ACTOR_TOP_MAX = 176
+#WORLD_X_MIN   = 24
+#WORLD_X_MAX   = 980
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+guardOn.w = True
+spriteOn.w = True
+autoPlay.w = True
+spaceWasDown.w = False
+returnWasDown.w = False
+worldX.w = #WORLD_X_MIN
+actorTop.w = #ACTOR_TOP_MAX
+autoDirX.w = 1
+autoDirY.w = -1
+scrollX.q = 0
+backX.q = 0
+spriteScreenX.q = 0
+spriteBias.q = 0
+spriteRelY.w = 200
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+bobFrames.l = 0
+bobSum.l = 0
+bobMax.l = 0
+spriteFrames.l = 0
+guardCustoms.l = 0
+nullBlock.l = 0
+chipBeforeSprite.l = 0
+chipAfterSprite.l = 0
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_ACTOR4, #ACTOR_W, #ACTOR_H, 4
+BitMap #BM_ACTOR2, #ACTOR_W, #ACTOR_H, 2
+;; 16 zero bytes in Chip RAM: what the guard points the sprite at.
+nullBlock = AllocMem_(16, $10002)
+
+;; 0 the sky; 1 black (the HUD); 2 and 3 the ground; 4 the pillars; 7 white; 13 skin, 14 brown, 15 red
+;; (Mario's pens and colours); 16 + the back's pens (5 clouds, 6 hills, 7 white); 33 to 35 the sprite's
+;; colours 1 to 3, the same three colours as pens 13, 14 and 15.
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 0, 0, 0
+AGAPalRGB 0, 2, 200, 76, 12
+AGAPalRGB 0, 3, 252, 152, 56
+AGAPalRGB 0, 4, 0, 168, 0
+AGAPalRGB 0, 7, 255, 255, 255
+AGAPalRGB 0, 13, 254, 205, 198
+AGAPalRGB 0, 14, 108, 110, 0
+AGAPalRGB 0, 15, 181, 50, 32
+AGAPalRGB 0, 16, 92, 148, 252
+AGAPalRGB 0, 21, 255, 255, 255
+AGAPalRGB 0, 22, 80, 170, 40
+AGAPalRGB 0, 23, 255, 255, 255
+AGAPalRGB 0, 33, 254, 205, 198
+AGAPalRGB 0, 34, 108, 110, 0
+AGAPalRGB 0, 35, 181, 50, 32
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; The front: ground in pens 2 and 3, a pillar in pen 4 every 128 px, a white line in pen 7 every
+;; 64 px.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 2
+    If columnIndex MOD 2 = 1 Then pen = 3
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 120, pillarX + 23, 207, 4
+  Next
+  For lineX.w = 0 To #FRONT_W - 1 Step 64
+    Boxf lineX, #VIEW_TOP, lineX, 119, 7
+  Next
+End Statement
+
+;; Clouds and hills in the back's pens 5 and 6, one of each per 192 px.
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+    Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+    Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+    Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+  Next
+End Statement
+
+;; The figure, in Mario's pens: a red outline (pen 15), skin (13) and brown (14) stripes of 2 rows.
+;; Then the 2 plane copy for the sprite: each pixel's pen AND 3 (13, 14, 15 become 1, 2, 3).
+Statement MakeActor{}
+  Use BitMap #BM_ACTOR4
+  Cls 0
+  Boxf 0, 0, 15, 31, 15
+  Boxf 1, 1, 14, 30, 14
+  For stripeY.w = 1 To 29 Step 4
+    Boxf 1, stripeY, 14, stripeY + 1, 13
+  Next
+  GetaShape #ACTOR_SHAPE, 0, 0, #ACTOR_W, #ACTOR_H
+  For pixelY.w = 0 To #ACTOR_H - 1
+    For pixelX.w = 0 To #ACTOR_W - 1
+      Use BitMap #BM_ACTOR4
+      pixelPen.w = Point(pixelX, pixelY)
+      Use BitMap #BM_ACTOR2
+      Plot pixelX, pixelY, pixelPen AND 3
+    Next
+  Next
+  Use BitMap #BM_ACTOR2
+  GetaShape #SPRITE_SHAPE, 0, 0, #ACTOR_W, #ACTOR_H
+  GetaSprite #SPRITE_OBJ, #SPRITE_SHAPE
+End Statement
+
+;; The guard, in list 0's custom area: wait for the end of the last HUD line, write SPR0CTL = 0 (stops
+;; the sprite: the list's DMA-off leaves the hardware unable to reach the sprite's own stop line, and
+;; the first run showed its last row repeated down the whole world), then point SPR0PT at the zero
+;; block. Off, the four longs are no-ops.
+Statement SetGuard{enabled.w}
+  SHARED guardCustoms, nullBlock
+  waitLine.l = #HUD_YPOS + #HUD_H - 1
+  If enabled = True
+    Poke.l guardCustoms, (waitLine*256 + $E1)*65536 + $FFFE
+    Poke.l guardCustoms + 4, $01420000
+    Poke.l guardCustoms + 8, $01200000 + nullBlock/65536
+    Poke.l guardCustoms + 12, $01220000 + (nullBlock AND $FFFF)
+  Else
+    Poke.l guardCustoms, #NOP_LONG
+    Poke.l guardCustoms + 4, #NOP_LONG
+    Poke.l guardCustoms + 8, #NOP_LONG
+    Poke.l guardCustoms + 12, #NOP_LONG
+  EndIf
+End Statement
+
+BBlitMode CookieMode
+SpriteMode 0
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+Use BitMap #BM_HUD
+Cls 1
+Boxf 8, 4, 15, 11, 7
+Boxf 40, 4, 79, 11, 7
+Boxf 120, 4, 135, 11, 7
+For tickX.w = 20 To #HUD_W - 20 Step 20
+  Boxf tickX, 0, tickX, 1, 7
+  Boxf tickX, 14, tickX, 15, 7
+Next
+chipBeforeSprite = AvailMem_(2)
+MakeActor{}
+chipAfterSprite = AvailMem_(2)
+
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 1, #COPPER_COLORS, #GUARD_COUNT
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, 0
+;; Sprite bank 2 (entries 32 to 47) on both lists, and the back's colours at 16 to 31 as in the game.
+DisplayControls 0, 0, 0, #BANK_XOR
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, #BANK_XOR
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+guardCustoms = Peek.l(Addr CopList(0) + #MYCOP_CUSTOMS)
+If guardCustoms <> 0 Then SetGuard{guardOn}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If spaceWasDown = False
+      guardOn = NOT guardOn
+      If guardCustoms <> 0 Then SetGuard{guardOn}
+    EndIf
+    spaceWasDown = True
+  Else
+    spaceWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_RETURN)
+    If returnWasDown = False Then spriteOn = NOT spriteOn
+    returnWasDown = True
+  Else
+    returnWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_Z) Then spriteBias = spriteBias - 0.25
+  If RawStatus(#RAW_KEY_X) Then spriteBias = spriteBias + 0.25
+
+  ;; The figure: moving itself, or by the arrows from the first touch.
+  If RawStatus(#RAW_KEY_UP) OR RawStatus(#RAW_KEY_DOWN) OR RawStatus(#RAW_KEY_LEFT) OR RawStatus(#RAW_KEY_RIGHT)
+    autoPlay = False
+  EndIf
+  If autoPlay = True
+    worldX = worldX + autoDirX
+    If worldX >= #WORLD_X_MAX Then autoDirX = -1
+    If worldX <= #WORLD_X_MIN Then autoDirX = 1
+    actorTop = actorTop + autoDirY
+    If actorTop <= 0 Then autoDirY = 1
+    If actorTop >= #ACTOR_TOP_MAX Then autoDirY = -1
+  Else
+    If RawStatus(#RAW_KEY_UP) Then actorTop = actorTop - 1
+    If RawStatus(#RAW_KEY_DOWN) Then actorTop = actorTop + 1
+    If RawStatus(#RAW_KEY_LEFT) Then worldX = worldX - 1
+    If RawStatus(#RAW_KEY_RIGHT) Then worldX = worldX + 1
+    If actorTop < 0 Then actorTop = 0
+    If actorTop > #ACTOR_TOP_MAX Then actorTop = #ACTOR_TOP_MAX
+    If worldX < #WORLD_X_MIN Then worldX = #WORLD_X_MIN
+    If worldX > #WORLD_X_MAX Then worldX = #WORLD_X_MAX
+  EndIf
+
+  ;; The camera follows him to a fraction of a pixel, so the figure's place on the screen is a
+  ;; fraction too; the back at half the front.
+  scrollX = worldX - 160 + 0.5*Sin(frameCount/20.0)
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+  backX = scrollX/2
+  viewX = Int(scrollX)
+  spriteScreenX = worldX - scrollX + spriteBias
+  ;; List 0's first line is 19 lines (the band and the gap) above the world list's, which shows
+  ;; world row 32 at its top.
+  spriteRelY = actorTop - #VIEW_TOP + #HUD_H + #LIST_GAP
+
+  ;; The bob, timed as in dual-playfield.ab3.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  BBlit drawBuf, #ACTOR_SHAPE, worldX, actorTop
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+  If frameCount >= 10
+    bobFrames = bobFrames + 1
+    bobSum = bobSum + bobLines
+    If bobLines > bobMax Then bobMax = bobLines
+  EndIf
+
+  VWait
+  DisplayBitMap 1, drawBm, scrollX, #VIEW_TOP, #BM_BACK, backX, #VIEW_TOP
+  If spriteOn = True
+    DisplaySprite 0, #SPRITE_OBJ, spriteScreenX, spriteRelY, 0
+    If spriteRelY < #HUD_H AND spriteRelY + #ACTOR_H > 0 Then spriteFrames = spriteFrames + 1
+  Else
+    DisplaySprite 0, #SPRITE_OBJ, 0, 200, 0
+  EndIf
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+FreeMem_ nullBlock, 16
+If WriteFile(0, "sparky-dave:game/proofs/results/sprite-over-hud-results.txt")
+  FileOutput 0
+  NPrint "sprite-over-hud: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", ", frameCount, " frames"
+  NPrint "custom area of list 0 found: ", guardCustoms <> 0, " (guard is on at exit: ", guardOn, ", sprite on: ", spriteOn, ")"
+  NPrint "sprite x bias at exit: ", spriteBias, " px (Z and X move it by a quarter)"
+  NPrint "frames with the sprite showing in the band: ", spriteFrames
+  NPrint "bob load (1 bob from line ", #WORK_LINE, "): ", bobFrames, " frames"
+  If bobFrames > 0
+    NPrint "  average lines ", bobSum/bobFrames, ", worst ", bobMax
+  EndIf
+  NPrint "figure, 2 plane copy, shape and sprite: Chip RAM ", chipBeforeSprite - chipAfterSprite, " bytes"
+  NPrint ""
+  NPrint "The picture is the main result: report the five points at the top of the proof."
+  CloseFile 0
+EndIf
+End

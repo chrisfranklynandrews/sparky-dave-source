@@ -1,0 +1,466 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; blit-last-write.ab3 -- does a blit's last word go astray when the next blit's destination is written too soon?
+;; Compile in UAE. Not part of the game. For the stray one-pixel rows (the main project's candidates notes): the stamp check of 2026-11-06 found
+;; each stray to be a word MOVED: the last word of a tile's plane 2 blit missing, and the same word in plane 3 of the same
+;; bitmap exactly $20000 bytes higher. That is a blit's last D write landing between the two halves of the next blit's long
+;; write to BLTDPT (the 68020 writes the high word first): the new high word with the old low word.
+;;
+;; Two bitmaps the size of the game's world bitmaps (3904 x 256, 4 planes) are cleared, and a solid 16x16 tile (pen 15: every
+;; word $FFFF in every plane) is blitted into every other cell, a checkerboard, cell after cell as the stamp does. Then every
+;; word is read: a blitted cell's word that is not $FFFF is MISSING, an empty cell's word that is not 0 is a STRAY. Four ways
+;; of blitting, #ROUNDS rounds of #PASSES_A_ROUND passes each (below):
+;;   method 0  Blitz's Block (the game's stamp)
+;;   method 1  a blit of our own, one plane at a time: wait as the libraries do, then BLTDPT first, then the rest
+;;   method 2  as 1, but after the wait a second read of DMACONR and a second wait
+;;   method 3  as 1, but BLTDPT written last, just before BLTSIZE (five register writes after the wait)
+;; Expected if the idea is right: methods 0 and 1 leave some (rarely), method 3 none. Each method's time (CIA-A frames,
+;; the scans included) is kept too. It runs in Blitz mode for a minute or so (the screen does not change), then writes
+;; results/blit-last-write-results.txt. A stray that lands outside both bitmaps lands in other Chip RAM: if the proof
+;; crashes, that is the likely reason, and worth knowing too.
+;; The display is the game's (SparkyDave.ab3, as proofs/allstars-scene.ab3 has it): a 16 line HUD list that loads the colours
+;; and a 208 line dual playfield world list, 8 planes at fetch mode 1, 8 sprite channels, showing bitmap 0 over a back bitmap
+;; the game's size. The first version of this proof had no display of its own, the chip bus nearly idle, and found nothing
+;; in 39,040 tiles a method (2026-11-06); the game, with its display on, had 7 words in about 45,000. So this one loads the
+;; bus as the game does. (The sprite channels are given no sprite: a band of garbage under the picture is only that.)
+;; Rounds (third version, 2026-11-06): the second version caught one moved word in 39,040 tiles (Block, $20000 apart), too few
+;; to compare the methods. A round clears both bitmaps once, blits the checkerboard #PASSES_A_ROUND times over without clearing,
+;; then scans once: a stray lands in an empty cell and stays, so the strays add up over the round (each is one event; a
+;; missing word is written again by the next pass, so the missing count is the last pass's only). The blits' own time is
+;; counted apart from the scans', so a method's cost can be compared.
+;; Progress: the screen's colour 0 is set while it scans, one colour a method (red, green, blue, yellow), bright and dark on
+;; alternate passes, so a hang shows as a colour that stays. The results file is written after each method, so a run cut
+;; short by a reset still says how far it got.
+
+WBStartup
+
+#WORLD_A_BM     = 0
+#WORLD_B_BM     = 1
+#SOURCE_BM      = 2
+#TILE_SHAPE     = 0
+#WORLD_W        = 3904
+#WORLD_H        = 256
+#WORLD_WORDS    = 244
+#CELL_ROWS      = 16
+#ROUNDS         = 5
+#PASSES_A_ROUND = 20
+#METHODS        = 4
+#KEPT_MAX       = 60
+#BROKEN_WORDS   = 2000
+#HUD_BM         = 3
+#BACK_BM        = 4
+#HUD_LINE       = 44
+#HUD_H          = 16
+#LIST_GAP       = 3
+#VIEW_H         = 208
+#VIEW_TOP       = 32
+#BACK_W         = 1088
+#BACK_H         = 288
+#HUD_W          = 320
+#HUD_FLAGS      = $11414
+#WORLD_FLAGS    = $11438
+#PF2_OFFSET     = $1c00
+
+;; The counts for each method, and the words kept (the first #KEPT_MAX over all methods): the method, the pass, the bitmap,
+;; the plane, x, y, the word found, whether it is missing (True) or a stray (False), and its address.
+Dim methodMissing.l(#METHODS - 1)
+Dim methodStrays.l(#METHODS - 1)
+Dim methodFrames.l(#METHODS - 1)
+Dim methodBlitFrames.l(#METHODS - 1)
+;; Whether a method was stopped as broken (a pass with more than #BROKEN_WORDS words wrong: the blit itself is wrong, not the
+;; rare word), its passes run, the methods done so far (the results file is written after each), and the colour shown.
+Dim methodBroken.w(#METHODS - 1)
+Dim methodPasses.w(#METHODS - 1)
+methodsDone.w = 0
+progressColour.w = 0
+stageTrail$ = ""
+Dim methodColour.w(#METHODS - 1)
+methodColour(0) = $F00
+methodColour(1) = $0F0
+methodColour(2) = $00F
+methodColour(3) = $FF0
+keptCount.w = 0
+Dim keptMethod.w(#KEPT_MAX - 1)
+Dim keptPass.w(#KEPT_MAX - 1)
+Dim keptBitmap.w(#KEPT_MAX - 1)
+Dim keptPlane.w(#KEPT_MAX - 1)
+Dim keptX.w(#KEPT_MAX - 1)
+Dim keptY.w(#KEPT_MAX - 1)
+Dim keptFound.w(#KEPT_MAX - 1)
+Dim keptMissing.w(#KEPT_MAX - 1)
+Dim keptAddress.l(#KEPT_MAX - 1)
+
+;; One 16x16 tile, all planes, from sourceStruct's bitmap (its top left) into destStruct's at byte offset destOffset in each
+;; plane, one blit a plane, a straight copy (A to D, minterm $F0). blitMode is the method less one (see the header): 0 BLTDPT
+;; first after one wait, 1 the same after a second wait, 2 BLTDPT last. In Blitz mode, which owns the blitter.
+;; d0 sourceStruct, d1 destStruct, d2 destOffset, d3 blitMode; a4 to a6 and d7 are Blitz's and are left alone.
+Statement AsmBlockTile{sourceStruct.l, destStruct.l, destOffset.l, blitMode.w}
+  MOVE.l d0,a0
+  MOVE.l d1,a1
+  LEA $DFF000,a2
+  MOVE.w (a0),d4
+  SUBQ.w #2,d4
+  MOVE.w (a1),d5
+  SUBQ.w #2,d5
+  LEA 8(a0),a0
+  LEA 8(a1),a1
+  MOVEQ #3,d6
+abtPlane:
+  MOVE.l (a0)+,a3
+  MOVE.l (a1)+,d0
+  ADD.l d2,d0
+  BTST #6,2(a2)
+abtWaitFirst:
+  BTST #6,2(a2)
+  BNE.w abtWaitFirst
+  CMP.w #1,d3
+  BNE.w abtNoSecondWait
+  TST.w 2(a2)
+abtWaitSecond:
+  BTST #6,2(a2)
+  BNE.w abtWaitSecond
+abtNoSecondWait:
+  CMP.w #2,d3
+  BEQ.w abtPointerLast
+  MOVE.l d0,84(a2)
+  MOVE.l #$09F00000,64(a2)
+  MOVE.l #$FFFFFFFF,68(a2)
+  MOVE.w d4,100(a2)
+  MOVE.w d5,102(a2)
+  MOVE.l a3,80(a2)
+  BRA.w abtStart
+abtPointerLast:
+  MOVE.l #$09F00000,64(a2)
+  MOVE.l #$FFFFFFFF,68(a2)
+  MOVE.w d4,100(a2)
+  MOVE.w d5,102(a2)
+  MOVE.l a3,80(a2)
+  MOVE.l d0,84(a2)
+abtStart:
+  MOVE.w #$0401,88(a2)
+  DBRA d6,abtPlane
+  AsmExit
+End Statement
+
+; CIA-A's frame counter (the vertical blanks), 24 bits: the high byte read first latches the rest.
+Function.l CiaFrames{}
+  highByte.l = Peek.b($BFEA01) AND 255
+  middleByte.l = Peek.b($BFE901) AND 255
+  lowByte.l = Peek.b($BFE801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+;; Every word of one bitmap against the checkerboard: in cell row r, the cells whose column + r is even are blitted ($FFFF),
+;; the others empty (0). Compared a long (two cells) at a time; only a long that differs is looked at word by word.
+Statement ScanBitmap{bitmapNumber.w, methodIndex.w, roundIndex.w}
+  SHARED methodMissing(), methodStrays(), keptCount, keptMethod(), keptPass(), keptBitmap(), keptPlane(), keptX(), keptY()
+  SHARED keptFound(), keptMissing(), keptAddress(), progressColour
+  structAddress.l = Addr BitMap(bitmapNumber)
+  rowBytes.l = Peek.w(structAddress)
+  For planeIndex.w = 0 To 3
+    planeBase.l = Peek.l(structAddress + 8 + planeIndex*4)
+    For pixelRow.w = 0 To #WORLD_H - 1
+      ; The screen's colour 0, every row, so the Copper's own setting of it each frame does not hide the progress.
+      Poke.w $DFF180, progressColour
+      rowStart.l = planeBase + pixelRow*rowBytes
+      cellRow.w = pixelRow/16
+      wantedLong.l = $FFFF0000
+      If cellRow MOD 2 = 1 Then wantedLong = $0000FFFF
+      For pairIndex.w = 0 To #WORLD_WORDS/2 - 1
+        If Peek.l(rowStart + pairIndex*4) <> wantedLong
+          For wordIndex.w = pairIndex*2 To pairIndex*2 + 1
+            wordAddress.l = rowStart + wordIndex*2
+            foundWord.w = Peek.w(wordAddress)
+            wantedWord.w = 0
+            If (wordIndex + cellRow) MOD 2 = 0 Then wantedWord = -1
+            If foundWord <> wantedWord
+              isMissing.w = False
+              If wantedWord = -1
+                isMissing = True
+                methodMissing(methodIndex) = methodMissing(methodIndex) + 1
+              Else
+                methodStrays(methodIndex) = methodStrays(methodIndex) + 1
+              EndIf
+              If keptCount < #KEPT_MAX
+                keptMethod(keptCount) = methodIndex
+                keptPass(keptCount) = roundIndex
+                keptBitmap(keptCount) = bitmapNumber
+                keptPlane(keptCount) = planeIndex
+                keptX(keptCount) = wordIndex*16
+                keptY(keptCount) = pixelRow
+                keptFound(keptCount) = foundWord
+                keptMissing(keptCount) = isMissing
+                keptAddress(keptCount) = wordAddress
+                keptCount = keptCount + 1
+              EndIf
+            EndIf
+          Next
+        EndIf
+      Next
+    Next
+  Next
+End Statement
+
+;; The trail of steps reached, written whole to results/blit-last-write-stages.txt at each step: the last line is the last
+;; step reached before a hang. In Amiga mode (WriteStages{}); MarkStage{} is the call from Blitz mode.
+Statement WriteStages{}
+  SHARED stageTrail$
+  If WriteFile(1, "sparky-dave:game/proofs/results/blit-last-write-stages.txt")
+    FileOutput 1
+    Print stageTrail$
+    CloseFile 1
+    DefaultOutput
+  EndIf
+End Statement
+
+Statement MarkStage{stageText$}
+  SHARED stageTrail$
+  stageTrail$ = stageTrail$ + stageText$ + Chr$(10)
+  QAMIGA
+  WriteStages{}
+  BLITZ
+End Statement
+
+;; The checkerboard into one bitmap by one method. markRows True marks each cell row in the stage trail (the first pass of
+;; the first bitmap of each method): a hang always at row 0 is a blit that never returns, one at a row that changes from run
+;; to run is a stray write that broke the machine.
+Statement BlitCheckerboard{bitmapNumber.w, methodIndex.w, markRows.w}
+  sourceStruct.l = Addr BitMap(#SOURCE_BM)
+  destStruct.l = Addr BitMap(bitmapNumber)
+  rowBytes.l = Peek.w(destStruct)
+  Use BitMap bitmapNumber
+  For cellRow.w = 0 To #CELL_ROWS - 1
+    If markRows = True
+      MarkStage{"  method " + Str$(methodIndex) + ", cell row " + Str$(cellRow) + " starting"}
+      Use BitMap bitmapNumber
+    EndIf
+    For cellColumn.w = cellRow MOD 2 To #WORLD_WORDS - 1 Step 2
+      If methodIndex = 0
+        Block #TILE_SHAPE, cellColumn*16, cellRow*16
+      Else
+        AsmBlockTile{sourceStruct, destStruct, cellRow*16*rowBytes + cellColumn*2, methodIndex - 1}
+      EndIf
+    Next
+  Next
+End Statement
+
+;; The results so far (the methods done), in Amiga mode: written after each method, so a run cut short still has them.
+Statement WriteResults{}
+  SHARED methodMissing(), methodStrays(), methodFrames(), methodBlitFrames(), methodBroken(), methodPasses(), methodsDone, keptCount, keptMethod()
+  SHARED keptPass(), keptBitmap(), keptPlane(), keptX(), keptY(), keptFound(), keptMissing(), keptAddress()
+  If WriteFile(0, "sparky-dave:game/proofs/results/blit-last-write-results.txt")
+    FileOutput 0
+    NPrint "blit-last-write: a solid 16x16 tile into every other cell of two 3904 x 256 x 4 bitmaps, under the game's display"
+    NPrint #ROUNDS, " rounds a method, each ", #PASSES_A_ROUND, " passes over the same checkerboard, then one scan"
+    NPrint "tiles a pass: ", #CELL_ROWS*#WORLD_WORDS, " (4 planes each); missing: a blitted word not $FFFF after a round's last pass;"
+    NPrint "stray: an empty word not 0 (they stay, so a round's strays are all its passes')"
+    NPrint "bitmap 0 bytes a row ", Peek.w(Addr BitMap(#WORLD_A_BM))
+    For planeIndex.w = 0 To 3
+      NPrint "  bitmap 0 plane ", planeIndex, " at $", Hex$(Peek.l(Addr BitMap(#WORLD_A_BM) + 8 + planeIndex*4))
+    Next
+    For planeIndex = 0 To 3
+      NPrint "  bitmap 1 plane ", planeIndex, " at $", Hex$(Peek.l(Addr BitMap(#WORLD_B_BM) + 8 + planeIndex*4))
+    Next
+    NPrint ""
+    NPrint "methods started: ", methodsDone, " of ", #METHODS, " (the file is written after each round: the last may be part done)"
+    NPrint "method  missing  strays  frames (CIA-A, all)  frames blitting  passes  tiles"
+    For methodIndex.w = 0 To methodsDone - 1
+      Print methodIndex, "  ", methodMissing(methodIndex), "  ", methodStrays(methodIndex), "  ", methodFrames(methodIndex), "  "
+      Print methodBlitFrames(methodIndex), "  ", methodPasses(methodIndex), "  ", methodPasses(methodIndex)*#CELL_ROWS*#WORLD_WORDS
+      If methodBroken(methodIndex) = True Then Print "  BROKEN: stopped, a pass had more than ", #BROKEN_WORDS, " words wrong"
+      NPrint ""
+    Next
+    NPrint "(0 Block; 1 own blit, BLTDPT first; 2 the same with a second wait; 3 own blit, BLTDPT last)"
+    NPrint ""
+    NPrint "the first ", #KEPT_MAX, " words kept: method  round  bitmap  plane  x  y  found  kind  address"
+    For keptIndex.w = 0 To keptCount - 1
+      Print keptMethod(keptIndex), "  ", keptPass(keptIndex), "  ", keptBitmap(keptIndex), "  ", keptPlane(keptIndex), "  "
+      Print keptX(keptIndex), "  ", keptY(keptIndex), "  $", Right$(Hex$(keptFound(keptIndex) AND $FFFF), 4), "  "
+      If keptMissing(keptIndex) = True
+        Print "missing"
+      Else
+        Print "stray"
+      EndIf
+      NPrint "  $", Hex$(keptAddress(keptIndex))
+    Next
+    CloseFile 0
+    DefaultOutput
+  EndIf
+End Statement
+
+;; From Blitz mode: to Amiga mode for the file, and back (as the game's EnsureTileSet{} does for its loads).
+Statement SaveProgress{}
+  QAMIGA
+  WriteResults{}
+  BLITZ
+End Statement
+
+BitMap #WORLD_A_BM, #WORLD_W, #WORLD_H, 4
+BitMap #WORLD_B_BM, #WORLD_W, #WORLD_H, 4
+BitMap #SOURCE_BM, 16, 16, 4
+BitMap #HUD_BM, #HUD_W, #HUD_H, 4
+BitMap #BACK_BM, #BACK_W, #BACK_H, 4
+; Pen 0 dark blue, pen 15 white (the tile), the HUD's pen 1 grey, the back's pens (16 to 31) a dark grey.
+InitPalette 0, 32
+AGAPalRGB 0, 0, 0, 0, 80
+AGAPalRGB 0, 1, 128, 128, 128
+AGAPalRGB 0, 15, 255, 255, 255
+AGAPalRGB 0, 17, 60, 60, 60
+
+; In Amiga mode still: the bitmaps as allocated (a plane at 0 is an allocation that failed).
+stageTrail$ = "bitmaps allocated: bytes a row " + Str$(Peek.w(Addr BitMap(#WORLD_A_BM)))
+stageTrail$ = stageTrail$ + ", bitmap 0 plane 0 $" + Hex$(Peek.l(Addr BitMap(#WORLD_A_BM) + 8))
+stageTrail$ = stageTrail$ + ", plane 3 $" + Hex$(Peek.l(Addr BitMap(#WORLD_A_BM) + 20))
+stageTrail$ = stageTrail$ + ", bitmap 1 plane 0 $" + Hex$(Peek.l(Addr BitMap(#WORLD_B_BM) + 8))
+stageTrail$ = stageTrail$ + ", plane 3 $" + Hex$(Peek.l(Addr BitMap(#WORLD_B_BM) + 20)) + Chr$(10)
+WriteStages{}
+
+BLITZ
+
+Use BitMap #HUD_BM
+Cls 0
+Boxf 0, #HUD_H - 2, #HUD_W - 1, #HUD_H - 1, 1
+Use BitMap #BACK_BM
+Cls 0
+For backX.w = 0 To #BACK_W - 64 Step 64
+  Boxf backX, 120, backX + 31, 200, 1
+Next
+InitCopList 0, #HUD_LINE, #HUD_H, #HUD_FLAGS, 0, 32, 0
+InitCopList 1, #HUD_LINE + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 8, 0, 0
+DisplayControls 1, 0, #PF2_OFFSET, 0
+DisplayAdjust 0, 0, 0, 0, 31, -33
+DisplayAdjust 1, 0, 0, 0, 31, -33
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #HUD_BM, -32, 0
+DisplayBitMap 1, #WORLD_A_BM, -32, #VIEW_TOP, #BACK_BM, -32, #VIEW_TOP
+
+MarkStage{"in Blitz mode, the display up"}
+
+Use BitMap #SOURCE_BM
+Cls 0
+Boxf 0, 0, 15, 15, 15
+AutoCookie Off
+GetaShape #TILE_SHAPE, 0, 0, 16, 16
+
+MarkStage{"shape cut"}
+For methodIndex.w = 0 To #METHODS - 1
+  methodMissing(methodIndex) = 0
+  methodStrays(methodIndex) = 0
+  methodBroken(methodIndex) = False
+  methodPasses(methodIndex) = 0
+  methodBlitFrames(methodIndex) = 0
+  framesBefore.l = CiaFrames{}
+  For roundIndex.w = 1 To #ROUNDS
+    If methodBroken(methodIndex) = False
+      progressColour = methodColour(methodIndex)
+      If roundIndex MOD 2 = 0 Then progressColour = (methodColour(methodIndex)/2) AND $777
+      wrongBefore.l = methodMissing(methodIndex) + methodStrays(methodIndex)
+      Use BitMap #WORLD_A_BM
+      Cls 0
+      Use BitMap #WORLD_B_BM
+      Cls 0
+      ; The first round's first pass marks each step (the trail file); the rest do not, to keep the timing clean.
+      If roundIndex = 1 Then MarkStage{"method " + Str$(methodIndex) + " round 1: both cleared"}
+      For passIndex.w = 1 To #PASSES_A_ROUND
+        markThisPass.w = False
+        If roundIndex = 1 AND passIndex = 1 Then markThisPass = True
+        blitBefore.l = CiaFrames{}
+        BlitCheckerboard{#WORLD_A_BM, methodIndex, markThisPass}
+        BlitCheckerboard{#WORLD_B_BM, methodIndex, False}
+        WaitBlitter
+        If markThisPass = False Then methodBlitFrames(methodIndex) = methodBlitFrames(methodIndex) + CiaFrames{} - blitBefore
+        methodPasses(methodIndex) = methodPasses(methodIndex) + 1
+      Next
+      If roundIndex = 1 Then MarkStage{"method " + Str$(methodIndex) + " round 1: all passes blitted"}
+      ScanBitmap{#WORLD_A_BM, methodIndex, roundIndex}
+      ScanBitmap{#WORLD_B_BM, methodIndex, roundIndex}
+      If roundIndex = 1 Then MarkStage{"method " + Str$(methodIndex) + " round 1: both scanned"}
+      If methodMissing(methodIndex) + methodStrays(methodIndex) - wrongBefore > #BROKEN_WORDS Then methodBroken(methodIndex) = True
+      ; The file after every round, so a run cut short has the strays found so far.
+      methodFrames(methodIndex) = CiaFrames{} - framesBefore
+      methodsDone = methodIndex + 1
+      SaveProgress{}
+    EndIf
+  Next
+Next
+
+AMIGA
+End

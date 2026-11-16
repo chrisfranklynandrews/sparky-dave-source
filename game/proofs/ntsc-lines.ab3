@@ -1,0 +1,215 @@
+;; display-edge.ab3 -- which pixel columns are really on screen at the left and right edges,
+;; on the game's own two-list display, and what the library puts in the window registers.
+;; Compile in UAE. Not part of the game. Proof for the HUD text that looks one pixel off
+;; the left edge, and for the 321 px window.
+;;
+;; Two strips on the game's own lists, with the game's own flags:
+;;   TOP strip (list 0, where the HUD is), 16 lines
+;;   LOWER strip (list 1, where the world is), 48 lines
+;; Both show a bitmap that has a column ruler painted into it:
+;;   left edge:   x 0 RED, x 1 GREEN, x 2 BLUE, x 3 WHITE, then black, then YELLOW at x 8
+;;   a WHITE line every 16 px from x 16 (so a tile column can be counted)
+;;   right edge:  x 316 YELLOW, 317 WHITE, 318 RED, 319 GREEN, 320 BLUE, 321 WHITE
+;;
+;; RESULT (2026-10-12, both emulators): the library's window is 129 to 449, 320 wide, but its
+;; fetch starts a word early so column 0 sits at pixel 128 and is hidden; DisplayAdjust -1 and -1
+;; (one Z, one X) gives red first and green last in both. See the main project's AMIGA_RENDERER note, "The display window".
+;;
+;; Run 1 (2026-10-11) showed: AmigaForever shows columns 0 to 320 (321 columns), FS-UAE
+;; shows 1 to 320 (320 columns). Column 321 is hidden in both.
+;;
+;; THE WINDOW REGISTERS. DISPLAYLIB.guide gives the copper-list object's layout (coppos is
+;; its second long, the copper list's place in Chip RAM), so this proof reads the library's
+;; own copper list and writes the display registers it set to
+;; display-edge-results.txt: DIWSTRT, DIWSTOP, DDFSTRT, DDFSTOP, BPLCON1, FMODE (and DIWHIGH
+;; if the library writes one), with the window width worked out from them. The width of a
+;; window is (256 + the stop's horizontal byte) minus the start's.
+;;
+;; THE ADJUSTMENT. DisplayAdjust moves the window edges; in the older hw-scroll proof one
+;; unit of DIWSTRT was one lores pixel. Keys (each rebuilds both lists, the picture may
+;; flicker; the adjustments apply to both lists):
+;;   A / Z   DIWSTRT +1 / -1     (the window's left edge: +1 moves it right, hiding a column)
+;;   S / X   DIWSTOP +1 / -1     (the window's right edge: -1 moves it left)
+;;   R       back to the library's own window (no adjustment)
+;;   1       the TOP strip with the literal form (as the HUD does it, the starting state)
+;;   2       the TOP strip with a variable x (the extended form, as the world does it)
+;;   Esc     quit (the results file is written then)
+;;
+;; What to try, in each emulator (AmigaForever and FS-UAE):
+;;   - Find the adjustment that makes the coloured columns start at RED (x 0) and end at
+;;     GREEN (x 319): exactly 320 columns, with BLUE (x 320) just gone. Note the A/Z and
+;;     S/X presses you used (the results file records them).
+;;   - If the same adjustment gives exactly that picture in both emulators, the game can use
+;;     it. If they want different adjustments, the emulators disagree and no setting can
+;;     satisfy both: then only a safe margin helps.
+;;   - Quit with Esc and read display-edge-results.txt (the first line pair is the library's
+;;     own window, before any adjustment).
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_1   = $01
+#RAW_KEY_2   = $02
+#RAW_KEY_A   = $20
+#RAW_KEY_S   = $21
+#RAW_KEY_R   = $13
+#RAW_KEY_Z   = $31
+#RAW_KEY_X   = $32
+
+#COPPER_FLAGS  = $10014
+#TOP_YPOS   = 44
+#TOP_H      = 16
+#LOWER_YPOS = 63
+#LOWER_H    = 48
+#BM_W       = 336
+
+;; What the copper list says, per list (0 top, 1 lower).
+Dim copDiwStart.l(1)
+Dim copDiwStop.l(1)
+Dim copDdfStart.l(1)
+Dim copDdfStop.l(1)
+Dim copBplcon1.l(1)
+Dim copFmode.l(1)
+Dim copDiwHigh.l(1)
+Dim firstDiwStart.l(1)
+Dim firstDiwStop.l(1)
+Dim firstDdfStart.l(1)
+Dim firstDdfStop.l(1)
+Dim firstBplcon1.l(1)
+Dim firstFmode.l(1)
+;; ntsc-lines.ab3 -- which start line can the game's two lists (a 16 line HUD band, a 3 line gap
+;; and a 208 line world list: 227 lines in all) have, so that all of them are on screen?
+;; Run it in UAE in NTSC mode and in PAL mode.
+;; The plan is in the map-height plan (git history), "NTSC".
+;;
+;; What you see: a grey band (the HUD stand-in) with a RED line along its top edge, then 208 lines
+;; of black with white ticks every 16 lines, ending in a GREEN line along the bottom. For each start
+;; line in the list, look at the screen and press
+;;   Y   if both the red line at the top and the green line at the bottom are on screen
+;;   N   if either is cut off (or you cannot see it)
+;; Each answer moves to the next start line. Esc ends early. The order is 26 (the first guess),
+;; 24, 22, 20, then 28 to 44, so a result is known quickly. The results file lists every answer.
+;; Results: game/proofs/results/ntsc-lines-results.txt
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_Y   = $15
+#RAW_KEY_N   = $36
+
+#COPPER_FLAGS = $10014
+#HUD_H     = 16
+#GAP_H     = 3
+#VIEW_H    = 208
+#VIEW_TOP  = 32
+#BM_W      = 336
+#BM_H      = 256
+#LINE_COUNT = 10
+
+videoIsNtsc.w = NTSC
+
+Dim startLines.w(#LINE_COUNT - 1)
+Dim verdict.w(#LINE_COUNT - 1)
+startLines(0) = 26
+startLines(1) = 24
+startLines(2) = 22
+startLines(3) = 20
+startLines(4) = 28
+startLines(5) = 30
+startLines(6) = 32
+startLines(7) = 36
+startLines(8) = 40
+startLines(9) = 44
+For verdictIndex.w = 0 To #LINE_COUNT - 1
+  verdict(verdictIndex) = -1
+Next
+lineIndex.w = 0
+yHeld.w = False
+nHeld.w = False
+
+BLITZ
+
+;; Both lists at a start line, the picture on them.
+Statement ApplyLists{startLine.w}
+  scrollX.q = 0
+  InitCopList 0, startLine, #HUD_H, #COPPER_FLAGS, 8, 16, 0
+  InitCopList 1, startLine + #HUD_H + #GAP_H, #VIEW_H, #COPPER_FLAGS, 8, 0, 0
+  DisplayAdjust 0, 0, 0, 0, -1, -1
+  DisplayAdjust 1, 0, 0, 0, -1, -1
+  CreateDisplay 0, 1
+  AGAPalRGB 0, 0, 0, 0, 0
+  AGAPalRGB 0, 1, 255, 0, 0
+  AGAPalRGB 0, 2, 70, 70, 70
+  AGAPalRGB 0, 3, 0, 255, 0
+  AGAPalRGB 0, 4, 255, 255, 255
+  AGAPalRGB 0, 6, 160, 160, 160
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, 1, 0, 0
+  DisplayBitMap 1, 0, scrollX, #VIEW_TOP
+End Statement
+
+BitMap 0, #BM_W, #BM_H, 4
+Use BitMap 0
+Boxf 0, 0, #BM_W - 1, #BM_H - 1, 0
+For tickY = #VIEW_TOP To #BM_H - 1 Step 16
+  Boxf 0, tickY, 40, tickY, 4
+Next
+Boxf 0, #VIEW_TOP, #BM_W - 1, #VIEW_TOP + 1, 3
+Boxf 0, #BM_H - 18, #BM_W - 1, #BM_H - 17, 3
+BitMap 1, #BM_W, #HUD_H, 4
+Use BitMap 1
+Boxf 0, 0, #BM_W - 1, #HUD_H - 1, 6
+Boxf 0, 0, #BM_W - 1, 1, 1
+Boxf 0, #HUD_H - 2, #BM_W - 1, #HUD_H - 1, 2
+
+ApplyLists{startLines(lineIndex)}
+
+While RawStatus(#RAW_KEY_ESC) = 0 AND lineIndex < #LINE_COUNT
+  VWait
+  answered.w = -1
+  If RawStatus(#RAW_KEY_Y) <> 0
+    If yHeld = False Then answered = 1
+    yHeld = True
+  Else
+    yHeld = False
+  EndIf
+  If RawStatus(#RAW_KEY_N) <> 0
+    If nHeld = False Then answered = 0
+    nHeld = True
+  Else
+    nHeld = False
+  EndIf
+  If answered >= 0
+    verdict(lineIndex) = answered
+    lineIndex = lineIndex + 1
+    If lineIndex < #LINE_COUNT Then ApplyLists{startLines(lineIndex)}
+  EndIf
+Wend
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+
+If WriteFile(0, "sparky-dave:game/proofs/results/ntsc-lines-results.txt")
+  FileOutput 0
+  NPrint "ntsc-lines"
+  NPrint ""
+  If videoIsNtsc <> False
+    NPrint "this machine reports NTSC (262 lines)"
+  Else
+    NPrint "this machine reports PAL (312 lines)"
+  EndIf
+  NPrint "the picture is ", #HUD_H + #GAP_H + #VIEW_H, " lines: a start line S shows lines S to S + ", #HUD_H + #GAP_H + #VIEW_H - 1
+  NPrint ""
+  NPrint "start line   last line   answer (Y both edges visible, N cut off, - not asked)"
+  For verdictIndex.w = 0 To #LINE_COUNT - 1
+    NPrint startLines(verdictIndex), "           ", startLines(verdictIndex) + #HUD_H + #GAP_H + #VIEW_H - 1, "          ", verdict(verdictIndex)
+  Next
+  NPrint ""
+  NPrint "(answers: 1 is Y, 0 is N, -1 was not asked)"
+  CloseFile 0
+EndIf
+End

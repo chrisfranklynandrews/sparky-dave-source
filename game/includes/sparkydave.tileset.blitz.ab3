@@ -1,0 +1,208 @@
+;; =======================================================
+;; TILE SETS (BLITZ MODE)
+;; =======================================================
+;; The All-Stars look has four tile sets, each with its own 15 front pens: the overground's (1-1, 1-2's pipe intro and its end),
+;; the underground's (1-2's main map and the coin rooms), the water's (2-2) and the castle's (1-4 and 2-4). The atlas, the enemies' and items' sheets and so the shapes cut from them are in the
+;; pens of one set, so when the area on show changes set they are loaded and cut again, behind the cover the caller has up (a stamp always has one).
+;; The set is the area's type: an underground area is set #TILE_SET_UNDERGROUND, a water area #TILE_SET_WATER, a castle #TILE_SET_CASTLE, every other area is set 0. The palette follows the same rule (AllStarsPaletteComponent{}).
+;; The HUD, the digits and the title are cut once and stay: their pens are white and gold in both sets.
+;; Not used by the NES look, which has one palette.
+
+; The shapes cut from the two sheets, cut again from the sheets of the set just loaded (the shape slots are the start-up ones, filled in place).
+Statement RecutSetShapes{}
+  SHARED plantCellGid(), plantCellNext
+  ; The pipe tiles cut for the plants (PlantCellShape{}) are the old set's: forget them, to be cut again from the atlas now loaded.
+  For plantCacheIndex.w = 0 To #PLANT_CELL_CACHE - 1
+    plantCellGid(plantCacheIndex) = 0
+  Next
+  plantCellNext = 0
+  CutEnemyShapes{}
+  CutItemShapes{}
+  CutDebrisShapes{}
+  Use BitMap #ITEMS_BM
+  GetaShape #FLOATER_ONEUP_SHAPE, #FLOATER_UP_CELL*#TILE, 0, #TILE, #TILE
+End Statement
+
+; The tile set an area of type areaType is drawn in: 0 the overground's, or #TILE_SET_*.
+Function.w TileSetOfType{areaType.w}
+  If areaType = #AREA_TYPE_UNDERGROUND Then Function Return #TILE_SET_UNDERGROUND
+  If areaType = #AREA_TYPE_WATER Then Function Return #TILE_SET_WATER
+  If areaType = #AREA_TYPE_CASTLE Then Function Return #TILE_SET_CASTLE
+  Function Return 0
+End Function
+
+;; ---------------------------------------------------------------
+;; The tile sets kept in Fast RAM
+;; ---------------------------------------------------------------
+;; Loading a set from its three IFFs takes about 43 frames from UAE's host folder (the decoding) and seconds from a floppy, at every
+;; change of set: a pipe into an underground room and back reads 110 KB. A set copied from Fast RAM takes a frame. No
+;; level uses more than two sets (over and under, over and water, or castle), so two blocks: the level's sets are read into them
+;; behind the lives cover (PreloadLevelTileSets{}), and its pipes then read nothing. A set is the atlas and the enemies' and items'
+;; sheets, plane after plane, 55,296 bytes. Copied with exec's CopyMem (CopyMem_), which works in Blitz mode.
+
+; The bytes of one set: the atlas's and the two sheets' planes.
+Function.l TileSetBytes{}
+  Function Return #PLAYFIELD_PLANES*(#LOOK_ATLAS_W*#LOOK_ATLAS_H + #ENEMIES_SHEET_W*#ENEMIES_SHEET_H + #ITEMS_SHEET_W*#ITEMS_SHEET_H)/8
+End Function
+
+;; One bitmap's planes (Addr BitMap: bytes per row, rows, then the plane pointers at +8) to the block at blockAddress (toBlock True) or
+;; from it. Returns the address after them in the block.
+Function.l CopyBitmapPlanes{bitmapStruct.l, blockAddress.l, toBlock.w}
+  planeBytes.l = (Peek.w(bitmapStruct) AND $ffff)*(Peek.w(bitmapStruct + 2) AND $ffff)
+  For planeIndex.w = 0 To #PLAYFIELD_PLANES - 1
+    planeAddress.l = Peek.l(bitmapStruct + 8 + planeIndex*4)
+    If toBlock <> False
+      CopyMem_ planeAddress, blockAddress, planeBytes
+    Else
+      CopyMem_ blockAddress, planeAddress, planeBytes
+    EndIf
+    blockAddress = blockAddress + planeBytes
+  Next
+  Function Return blockAddress
+End Function
+
+;; The set on the bitmaps (the atlas, and the two sheets, which must exist: MakeSetSheets{} or LoadSetSheets{}) to the block, or the
+;; block's onto them. The blitter is let finish first: a Block or GetaShape may still be reading the atlas.
+Statement CopyTileSet{blockAddress.l, toBlock.w}
+  WaitBlitter
+  blockAddress = CopyBitmapPlanes{Addr BitMap(#ATLAS_BM), blockAddress, toBlock}
+  blockAddress = CopyBitmapPlanes{Addr BitMap(#ENEMIES_BM), blockAddress, toBlock}
+  blockAddress = CopyBitmapPlanes{Addr BitMap(#ITEMS_BM), blockAddress, toBlock}
+End Statement
+
+; The block holding set tileSet, or -1.
+Function.w TileSetSlot{tileSet.w}
+  SHARED tileSetCacheBlock(), tileSetCacheSet()
+  For cacheSlot.w = 0 To 1
+    If tileSetCacheBlock(cacheSlot) <> 0 AND tileSetCacheSet(cacheSlot) = tileSet Then Function Return cacheSlot
+  Next
+  Function Return -1
+End Function
+
+;; The bytes the three bitmaps hold now (each one's bytes per row times rows, times the planes): what CopyTileSet{} copies.
+;; The sheets must exist (start-up, before FreeStartupSheets{}).
+Function.l TileSetBitmapBytes{}
+  bytesNow.l = 0
+  bitmapStruct.l = Addr BitMap(#ATLAS_BM)
+  bytesNow = bytesNow + (Peek.w(bitmapStruct) AND $ffff)*(Peek.w(bitmapStruct + 2) AND $ffff)
+  bitmapStruct = Addr BitMap(#ENEMIES_BM)
+  bytesNow = bytesNow + (Peek.w(bitmapStruct) AND $ffff)*(Peek.w(bitmapStruct + 2) AND $ffff)
+  bitmapStruct = Addr BitMap(#ITEMS_BM)
+  bytesNow = bytesNow + (Peek.w(bitmapStruct) AND $ffff)*(Peek.w(bitmapStruct + 2) AND $ffff)
+  Function Return bytesNow*#PLAYFIELD_PLANES
+End Function
+
+;; The two blocks, from Fast RAM, cleared (MEMF_FAST + MEMF_CLEAR), in the All-Stars look only. One that cannot be had stays 0, and
+;; the sets are then read from disk at each change. In Amiga mode: exec's memory lists. Called at start-up while the sheets are
+;; there: if the bitmaps do not hold the bytes a block is made for (a sheet made another size), no block is allocated, as a copy
+;; would run past its block.
+Statement AllocTileSetCache{}
+  SHARED tileSetCacheBlock()
+  If #LOOK_ALLSTARS = 0 Then Statement Return
+  If TileSetBitmapBytes{} <> TileSetBytes{} Then Statement Return
+  QAMIGA
+  For cacheSlot.w = 0 To 1
+    tileSetCacheBlock(cacheSlot) = AllocMem_(TileSetBytes{}, $10004)
+  Next
+  BLITZ
+End Statement
+
+; Both blocks back, at the end (SparkyDave.ab3's shutdown, Amiga mode).
+Statement FreeTileSetCache{}
+  SHARED tileSetCacheBlock(), tileSetCacheSet()
+  For cacheSlot.w = 0 To 1
+    If tileSetCacheBlock(cacheSlot) <> 0 Then FreeMem_ tileSetCacheBlock(cacheSlot), TileSetBytes{}
+    tileSetCacheBlock(cacheSlot) = 0
+    tileSetCacheSet(cacheSlot) = -1
+  Next
+End Statement
+
+;; The set on the bitmaps now (tileSet; the two sheets must exist) kept in a block, unless one has it: an empty block, else the one
+;; not holding keepSet (the level's other set).
+Statement StoreTileSet{tileSet.w, keepSet.w}
+  SHARED tileSetCacheBlock(), tileSetCacheSet()
+  If TileSetSlot{tileSet} >= 0 Then Statement Return
+  storeSlot.w = -1
+  For cacheSlot.w = 1 To 0 Step -1
+    If tileSetCacheBlock(cacheSlot) <> 0 AND tileSetCacheSet(cacheSlot) < 0 Then storeSlot = cacheSlot
+  Next
+  If storeSlot < 0
+    For cacheSlot.w = 1 To 0 Step -1
+      If tileSetCacheBlock(cacheSlot) <> 0 AND tileSetCacheSet(cacheSlot) <> keepSet Then storeSlot = cacheSlot
+    Next
+  EndIf
+  If storeSlot < 0 Then Statement Return
+  CopyTileSet{tileSetCacheBlock(storeSlot), True}
+  tileSetCacheSet(storeSlot) = tileSet
+End Statement
+
+;; The sets the level in the slots uses (at most two) read into the blocks now, behind the lives cover, if not there already, so its
+;; pipes read nothing from disk. The areas are the slots' (slotAreaIndex(), what LoadLevelAreas{} read), so the preload keeps in step
+;; with what was loaded. A set read here is left on the atlas with the shapes still the old set's, so tileSetShown is made -1 and the
+;; EnsureTileSet{} that follows (RestartLevel{}) copies the one wanted back from its block.
+Statement PreloadLevelTileSets{}
+  SHARED slotAreaIndex(), slotCount, tableAreaType(), tileSetCacheBlock(), tileSetShown
+  If #LOOK_ALLSTARS = 0 Then Statement Return
+  If tileSetCacheBlock(0) = 0 OR tileSetCacheBlock(1) = 0 Then Statement Return
+  firstSet.w = -1
+  secondSet.w = -1
+  For areaSlot.w = 0 To slotCount - 1
+    setNow.w = TileSetOfType{tableAreaType(slotAreaIndex(areaSlot))}
+    If firstSet < 0
+      firstSet = setNow
+    Else
+      If setNow <> firstSet AND secondSet < 0 Then secondSet = setNow
+    EndIf
+  Next
+  For pickIndex.w = 0 To 1
+    setNow = firstSet
+    otherSet.w = secondSet
+    If pickIndex = 1
+      setNow = secondSet
+      otherSet = firstSet
+    EndIf
+    If setNow >= 0 AND TileSetSlot{setNow} < 0
+      MarkTransition{"PreloadLevelTileSets: begin"}
+      QAMIGA
+      LoadAtlasSet{setNow}
+      LoadSetSheets{setNow}
+      BLITZ
+      StoreTileSet{setNow, otherSet}
+      FreeSetSheets{}
+      tileSetShown = -1
+      MarkTransition{"PreloadLevelTileSets: a set read from disk and kept"}
+    EndIf
+  Next
+End Statement
+
+; Make the area on show's tile set the one loaded: from its block if kept, else from disk (and then kept). Called before a stamp of the playfields, once currentAreaType is the area's.
+Statement EnsureTileSet{}
+  SHARED currentAreaType, tileSetShown, tileSetJustChanged, tileSetCacheBlock()
+  If #LOOK_ALLSTARS = 0 Then Statement Return
+  tileSetWanted.w = TileSetOfType{currentAreaType}
+  If tileSetWanted = tileSetShown Then Statement Return
+  MarkTransition{"EnsureTileSet: begin"}
+  cacheSlot.w = TileSetSlot{tileSetWanted}
+  If cacheSlot >= 0
+    QAMIGA
+    MakeSetSheets{}
+    BLITZ
+    CopyTileSet{tileSetCacheBlock(cacheSlot), False}
+    MarkTransition{"EnsureTileSet: set copied from Fast RAM"}
+  Else
+    QAMIGA
+    LoadAtlasSet{tileSetWanted}
+    LoadSetSheets{tileSetWanted}
+    BLITZ
+    MarkTransition{"EnsureTileSet: set read from disk"}
+    StoreTileSet{tileSetWanted, tileSetShown}
+  EndIf
+  RecutSetShapes{}
+  FreeSetSheets{}
+  MarkTransition{"EnsureTileSet: shapes recut"}
+  tileSetShown = tileSetWanted
+  ; For the stamp repair's report (RepairStampedBitmaps{}): the next stamp comes right after a change of set.
+  tileSetJustChanged = True
+End Statement
+
+;; END OF TILE SETS (BLITZ MODE)

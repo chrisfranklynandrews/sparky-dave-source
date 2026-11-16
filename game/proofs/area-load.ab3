@@ -1,0 +1,401 @@
+;; area-load.ab3 -- proof for loading a level's areas from disk in the middle of the game's display
+;; (the levels plan, step 3). Compile in UAE. Not part of the game.
+;;
+;; The plan keeps no level compiled in: an area is a binary file (tools/area_bin.py describes the
+;; format), all of a level's areas are read at its start, behind the lives cover, and a pipe then
+;; switches area from memory. It rests on three things nothing has tried yet, and this answers them:
+;;   1. Can ReadMem fill a Dim array directly, through &array(index)? (Method A.) The fallback is a
+;;      block from AllocMem and a copy loop (Method B), which is timed too, for the price of not
+;;      being able to.
+;;   2. Can it be done from the running Blitz display, as the settings file is saved (QAMIGA, the
+;;      file commands, BLITZ), and is the display alive afterwards?
+;;   3. Does what was read equal what the PC wrote (a checksum over every word, in Blitz, against the
+;;      one in the file's header), and what does it cost, in frames (the CIA-A time of day counts them)?
+;;
+;; The files are the four a visit to 1-2 loads (the pipe intro, 1-2, the second bonus room, 1-1),
+;; written by python tools/area_bin.py --proof-files into game/proofs/area-load-data. Rebuild them
+;; after editing a TMX; nothing here depends on their contents but their format.
+;;
+;; Passes: 0 and 1 are Method A (the second finds the files in the disk cache, if there is one), 2 is
+;; Method B. The arrays are cleared between passes, so every pass reads for real. Then Method A reads
+;; one file 20 times for a figure better than a frame. The run ends by itself when the results are
+;; written (no key needed). Results: game/proofs/results/area-load-results.txt.
+;;
+;; UAE's host-folder volumes are not a hard disk. A real drive's seek and read time is what the
+;; plan's "from hard disk" figure needs; this is the cost of the code path and of the emulated one.
+
+WBStartup
+
+#COPPER_FLAGS         = $10014
+#BM_W              = 336
+#RAW_KEY_ESC            = $45
+#AREA_COUNT        = 4
+#STRIDE            = 224
+#ROWS              = 15
+#MAP_WORDS         = 3360
+#MAX_OBJECTS       = 64
+#OBJECT_WORDS      = 6
+#MAX_OBJECT_WORDS  = 384
+#HEADER_BYTES      = 32
+#PASSES            = 3
+#REPEAT_READS      = 20
+#ALIVE_FRAMES      = 25
+
+;; The areas of the arrays: the base word of each in areaGids(), areaClasses() and areaObjects().
+Dim areaGids.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim areaClasses.w(#AREA_COUNT*#MAP_WORDS - 1)
+Dim areaObjects.w(#AREA_COUNT*#MAX_OBJECT_WORDS - 1)
+Dim headerWords.w(15)
+Dim addressTest.w(7)
+
+Dim areaName$(#AREA_COUNT - 1)
+Dim areaPath$(#AREA_COUNT - 1)
+Dim areaColumns.w(#AREA_COUNT - 1)
+Dim areaObjectCount.w(#AREA_COUNT - 1)
+Dim areaChecksumFile.l(#AREA_COUNT - 1)
+Dim areaFileBytes.l(#AREA_COUNT - 1)
+
+Dim loadStatus.w(#PASSES*#AREA_COUNT - 1)
+Dim loadFrames.l(#PASSES*#AREA_COUNT - 1)
+Dim passFrames.l(#PASSES - 1)
+Dim passGood.w(#PASSES - 1)
+Dim passDone.w(#PASSES - 1)
+Dim checkLog$(160)
+checkCount.w = 0
+checkFailed.w = 0
+repeatFrames.l = 0
+repeatStatus.w = 0
+checksumFrames.l = 0
+aliveDelta.l = 0
+
+areaName$(0) = "world1-2-pipe-intro"
+areaName$(1) = "world1-2"
+areaName$(2) = "bonus-room-2"
+areaName$(3) = "world1-1"
+For index.w = 0 To #AREA_COUNT - 1
+  areaPath$(index) = "sparky-dave:game/proofs/area-load-data/" + areaName$(index) + ".bin"
+Next
+
+;; Record one named self-check for the results file.
+Statement Check{label$, conditionNow.w}
+  SHARED checkCount, checkFailed, checkLog$()
+  checkCount = checkCount + 1
+  If conditionNow <> False
+    checkLog$(checkCount) = "PASS  " + label$
+  Else
+    checkLog$(checkCount) = "FAIL  " + label$
+    checkFailed = checkFailed + 1
+  EndIf
+End Statement
+
+;; CIA-A's time of day, in frames. The high byte is read first, which latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+;; An unsigned 16-bit value out of a .w array element.
+Function.l UnsignedWord{wordValue.w}
+  Function Return wordValue AND $ffff
+End Function
+
+;; The header's long at word index wordIndex (high word first, as the file has it).
+Function.l HeaderLong{wordIndex.w}
+  SHARED headerWords()
+  Function Return (headerWords(wordIndex) AND $ffff)*65536 + (headerWords(wordIndex + 1) AND $ffff)
+End Function
+
+;; Read the header and check it. Returns 0 if good, else a code: -3 not an area file, -4 a size that
+;; is not the file's or does not fit the arrays. Fills areaColumns(), areaObjectCount(),
+;; areaChecksumFile() and areaFileBytes() for the area.
+Function.w ReadHeader{areaIndex.w, fileLength.l}
+  SHARED headerWords(), areaColumns(), areaObjectCount(), areaChecksumFile(), areaFileBytes()
+  If headerWords(0) <> $5344 OR headerWords(1) <> $4152 OR headerWords(2) <> $4541 OR headerWords(3) <> $3031
+    Function Return -3
+  EndIf
+  areaColumns(areaIndex) = headerWords(4)
+  areaObjectCount(areaIndex) = headerWords(7)
+  gidWords.l = HeaderLong{8}
+  classWords.l = HeaderLong{10}
+  objectWords.l = HeaderLong{12}
+  areaChecksumFile(areaIndex) = HeaderLong{14}
+  areaFileBytes(areaIndex) = fileLength
+  If headerWords(5) <> #ROWS OR headerWords(6) <> #STRIDE Then Function Return -4
+  If gidWords <> #MAP_WORDS OR classWords <> #MAP_WORDS Then Function Return -4
+  If objectWords <> headerWords(7)*#OBJECT_WORDS OR objectWords > #MAX_OBJECT_WORDS Then Function Return -4
+  If #HEADER_BYTES + 2*(gidWords + classWords + objectWords) <> fileLength Then Function Return -4
+  Function Return 0
+End Function
+
+;; Method A: ReadMem straight into the arrays. Amiga mode: it is file I/O. 0 is good; -1 no such
+;; file, -2 could not open it, -3 and -4 from ReadHeader{}.
+Function.w ReadAreaFile{areaIndex.w, path$}
+  SHARED headerWords(), areaGids(), areaClasses(), areaObjects(), areaObjectCount()
+  fileLength.l = Exists(path$)
+  If fileLength = 0 Then Function Return -1
+  If ReadFile(0, path$) = 0 Then Function Return -2
+  ReadMem 0, &headerWords(0), #HEADER_BYTES
+  headerStatus.w = ReadHeader{areaIndex, fileLength}
+  If headerStatus <> 0
+    CloseFile 0
+    Function Return headerStatus
+  EndIf
+  gidBase.l = areaIndex*#MAP_WORDS
+  objectBase.l = areaIndex*#MAX_OBJECT_WORDS
+  ReadMem 0, &areaGids(gidBase), #MAP_WORDS*2
+  ReadMem 0, &areaClasses(gidBase), #MAP_WORDS*2
+  If areaObjectCount(areaIndex) > 0 Then ReadMem 0, &areaObjects(objectBase), areaObjectCount(areaIndex)*#OBJECT_WORDS*2
+  CloseFile 0
+  Function Return 0
+End Function
+
+;; Method B: the whole file into one block of memory, then copied into the arrays word by word.
+Function.w ReadAreaFileCopy{areaIndex.w, path$}
+  SHARED headerWords(), areaGids(), areaClasses(), areaObjects(), areaObjectCount()
+  fileLength.l = Exists(path$)
+  If fileLength = 0 Then Function Return -1
+  block.l = AllocMem(fileLength, 1)
+  If block = 0 Then Function Return -5
+  If ReadFile(0, path$) = 0
+    FreeMem block, fileLength
+    Function Return -2
+  EndIf
+  ReadMem 0, block, fileLength
+  CloseFile 0
+  For headerIndex.w = 0 To 15
+    headerWords(headerIndex) = Peek.w(block + headerIndex*2)
+  Next
+  headerStatus.w = ReadHeader{areaIndex, fileLength}
+  If headerStatus <> 0
+    FreeMem block, fileLength
+    Function Return headerStatus
+  EndIf
+  gidBase.l = areaIndex*#MAP_WORDS
+  objectBase.l = areaIndex*#MAX_OBJECT_WORDS
+  classOffset.l = block + #HEADER_BYTES + #MAP_WORDS*2
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    areaGids(gidBase + cellIndex) = Peek.w(block + #HEADER_BYTES + cellIndex*2)
+    areaClasses(gidBase + cellIndex) = Peek.w(classOffset + cellIndex*2)
+  Next
+  objectOffset.l = classOffset + #MAP_WORDS*2
+  For objectWordIndex.l = 0 To areaObjectCount(areaIndex)*#OBJECT_WORDS - 1
+    areaObjects(objectBase + objectWordIndex) = Peek.w(objectOffset + objectWordIndex*2)
+  Next
+  FreeMem block, fileLength
+  Function Return 0
+End Function
+
+;; The checksum tools/area_bin.py computes: acc = (acc*31 + word) mod 2^24 over the gids, then the
+;; classes, then the objects.
+Function.l ChecksumArea{areaIndex.w}
+  SHARED areaGids(), areaClasses(), areaObjects(), areaObjectCount()
+  accumulator.l = 0
+  gidBase.l = areaIndex*#MAP_WORDS
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    accumulator = (accumulator*31 + (areaGids(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  For cellIndex.l = 0 To #MAP_WORDS - 1
+    accumulator = (accumulator*31 + (areaClasses(gidBase + cellIndex) AND $ffff)) AND $ffffff
+  Next
+  objectBase.l = areaIndex*#MAX_OBJECT_WORDS
+  For objectWordIndex.l = 0 To areaObjectCount(areaIndex)*#OBJECT_WORDS - 1
+    accumulator = (accumulator*31 + (areaObjects(objectBase + objectWordIndex) AND $ffff)) AND $ffffff
+  Next
+  Function Return accumulator
+End Function
+
+Statement ClearArrays{}
+  SHARED areaGids(), areaClasses(), areaObjects(), areaColumns(), areaObjectCount(), areaChecksumFile(), areaFileBytes()
+  For cellIndex.l = 0 To #AREA_COUNT*#MAP_WORDS - 1
+    areaGids(cellIndex) = 0
+    areaClasses(cellIndex) = 0
+  Next
+  For objectWordIndex.l = 0 To #AREA_COUNT*#MAX_OBJECT_WORDS - 1
+    areaObjects(objectWordIndex) = 0
+  Next
+  For areaIndex.w = 0 To #AREA_COUNT - 1
+    areaColumns(areaIndex) = 0
+    areaObjectCount(areaIndex) = 0
+    areaChecksumFile(areaIndex) = 0
+    areaFileBytes(areaIndex) = 0
+  Next
+End Statement
+
+;; ---- start: does & give an array's address, and are .w elements two bytes apart? ----
+For index.w = 0 To 7
+  addressTest(index) = index*257 + 1
+Next
+Check{"&addressTest(0) is an address (not 0)", &addressTest(0) <> 0}
+Check{"&addressTest(7) is 14 bytes after &addressTest(0)", &addressTest(7) - &addressTest(0) = 14}
+Check{"Peek.w(&addressTest(0) + 6) is element 3", Peek.w(&addressTest(0) + 6) = 3*257 + 1}
+Poke.w &addressTest(5), 4660
+Check{"Poke.w through &addressTest(5) changes element 5", addressTest(5) = 4660}
+Check{"an expression index, &areaGids(2*3360), is 6720 words after &areaGids(0)", &areaGids(2*3360) - &areaGids(0) = 2*3360*2}
+
+BLITZ
+
+;; One area's readings, from the Blitz display: out to Amiga mode without touching the display, read,
+;; back to Blitz mode. Only the file commands are inside the switch. method 0 is A, 1 is B.
+Statement LoadAllAreas{passNumber.w, method.w}
+  SHARED loadStatus(), loadFrames(), passFrames(), areaPath$()
+  startTime.l = ReadTimeOfDay{}
+  QAMIGA
+  For areaIndex.w = 0 To #AREA_COUNT - 1
+    beforeTime.l = ReadTimeOfDay{}
+    statusNow.w = 0
+    If method = 0
+      statusNow = ReadAreaFile{areaIndex, areaPath$(areaIndex)}
+    Else
+      statusNow = ReadAreaFileCopy{areaIndex, areaPath$(areaIndex)}
+    EndIf
+    loadFrames(passNumber*#AREA_COUNT + areaIndex) = ReadTimeOfDay{} - beforeTime
+    loadStatus(passNumber*#AREA_COUNT + areaIndex) = statusNow
+  Next
+  BLITZ
+  passFrames(passNumber) = ReadTimeOfDay{} - startTime
+End Statement
+
+;; Method A on one file, many times, in one switch: the cost of a read to better than a frame.
+Statement RepeatReads{areaIndex.w}
+  SHARED repeatFrames, repeatStatus, areaPath$()
+  startTime.l = ReadTimeOfDay{}
+  QAMIGA
+  For repeatIndex.w = 1 To #REPEAT_READS
+    statusNow.w = ReadAreaFile{areaIndex, areaPath$(areaIndex)}
+    If statusNow <> 0 Then repeatStatus = statusNow
+  Next
+  BLITZ
+  repeatFrames = ReadTimeOfDay{} - startTime
+End Statement
+
+;; What a pass loaded, checked in Blitz mode: every area read without error, its checksum equal to the
+;; file's, its width and size sensible, its ground row ground (cell row 13, column 0: gid 1, class 1).
+Statement VerifyPass{passNumber.w, passLabel$}
+  SHARED loadStatus(), areaName$(), areaChecksumFile(), areaColumns(), areaObjectCount(), areaFileBytes()
+  SHARED areaGids(), areaClasses(), passGood(), passDone()
+  allGood.w = True
+  For areaIndex.w = 0 To #AREA_COUNT - 1
+    statusNow.w = loadStatus(passNumber*#AREA_COUNT + areaIndex)
+    Check{passLabel$ + " " + areaName$(areaIndex) + ": read without error (status " + Str$(statusNow) + ")", statusNow = 0}
+    If statusNow <> 0
+      allGood = False
+    Else
+      checksumNow.l = ChecksumArea{areaIndex}
+      sameChecksum.w = False
+      If checksumNow = areaChecksumFile(areaIndex) Then sameChecksum = True
+      Check{passLabel$ + " " + areaName$(areaIndex) + ": checksum $" + Hex$(checksumNow) + " equals the file's $" + Hex$(areaChecksumFile(areaIndex)), sameChecksum}
+      If sameChecksum = False Then allGood = False
+      groundCell.l = areaIndex*#MAP_WORDS + 13*#STRIDE
+      Check{passLabel$ + " " + areaName$(areaIndex) + ": the ground at row 13, column 0 is gid 1, class 1", areaGids(groundCell) = 1 AND areaClasses(groundCell) = 1}
+      shapeGood.w = False
+      If areaColumns(areaIndex) >= 20 AND areaColumns(areaIndex) <= #STRIDE AND areaObjectCount(areaIndex) > 0 Then shapeGood = True
+      shapeText$ = Str$(areaColumns(areaIndex)) + " columns, " + Str$(areaObjectCount(areaIndex)) + " objects, " + Str$(areaFileBytes(areaIndex)) + " bytes"
+      Check{passLabel$ + " " + areaName$(areaIndex) + ": " + shapeText$, shapeGood}
+    EndIf
+  Next
+  passGood(passNumber) = allGood
+  passDone(passNumber) = True
+End Statement
+
+;; Pass, fail, or not yet, one bar each: grey waiting, green good, red bad.
+Statement DrawStatus{}
+  SHARED passGood(), passDone()
+  Use BitMap 0
+  Boxf 0, 0, #BM_W - 1, 255, 0
+  For passIndex.w = 0 To #PASSES - 1
+    penNow.w = 1
+    If passDone(passIndex) <> False
+      penNow = 3
+      If passGood(passIndex) = False Then penNow = 4
+    EndIf
+    Boxf 40, 24 + passIndex*40, 280, 24 + passIndex*40 + 24, penNow
+  Next
+End Statement
+
+BitMap 0, #BM_W, 256, 4
+Use BitMap 0
+InitCopList 0, 44, 256, #COPPER_FLAGS, 8, 16, 0
+DisplayAdjust 0, 0, 0, 0, -1, -1
+CreateDisplay 0
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 90, 90, 90
+AGAPalRGB 0, 2, 255, 255, 0
+AGAPalRGB 0, 3, 0, 200, 0
+AGAPalRGB 0, 4, 255, 0, 0
+AGAPalRGB 0, 5, 0, 120, 255
+DisplayPalette 0, 0
+BlitzKeys On
+DisplayBitMap 0, 0, 0, 0
+DrawStatus{}
+
+VWait 10
+For passNumber.w = 0 To #PASSES - 1
+  ClearArrays{}
+  If passNumber < 2
+    LoadAllAreas{passNumber, 0}
+    VerifyPass{passNumber, "pass " + Str$(passNumber) + " (A)"}
+  Else
+    LoadAllAreas{passNumber, 1}
+    VerifyPass{passNumber, "pass " + Str$(passNumber) + " (B)"}
+  EndIf
+  DrawStatus{}
+  VWait 5
+Next
+
+;; The cost of the checksum loop itself, so the cost of a read is not confused with it.
+checksumStart.l = ReadTimeOfDay{}
+For areaIndex.w = 0 To #AREA_COUNT - 1
+  discardedChecksum.l = ChecksumArea{areaIndex}
+Next
+checksumFrames = ReadTimeOfDay{} - checksumStart
+
+RepeatReads{1}
+
+;; Is the display still running after the reads? A fixed number of VWaits should take that many
+;; frames of the time of day.
+aliveStart.l = ReadTimeOfDay{}
+VWait #ALIVE_FRAMES
+aliveDelta = ReadTimeOfDay{} - aliveStart
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+
+Check{"the display ran " + Str$(#ALIVE_FRAMES) + " VWaits in the same number of frames of time of day (" + Str$(aliveDelta) + ")", aliveDelta >= #ALIVE_FRAMES - 1 AND aliveDelta <= #ALIVE_FRAMES + 1}
+Check{"the repeated reads of world1-2 all succeeded (status " + Str$(repeatStatus) + ")", repeatStatus = 0}
+Check{"Method A and Method B give the same arrays (both passes passed the same file checksums)", passGood(0) <> False AND passGood(2) <> False}
+
+If WriteFile(0, "sparky-dave:game/proofs/results/area-load-results.txt")
+  FileOutput 0
+  NPrint "area-load"
+  NPrint ""
+  NPrint "SELF-CHECKS (", checkCount, ", failed ", checkFailed, ")"
+  For index.w = 1 To checkCount
+    NPrint checkLog$(index)
+  Next
+  NPrint ""
+  NPrint "COST, in frames (CIA-A time of day: 1 frame is 20 ms on PAL, 16.7 ms on NTSC; 0 means under a frame)"
+  NPrint "  per file, then the whole pass including the two mode switches"
+  For passIndex.w = 0 To #PASSES - 1
+    If passIndex < 2
+      NPrint "  pass ", passIndex, " Method A:"
+    Else
+      NPrint "  pass ", passIndex, " Method B (AllocMem and copy):"
+    EndIf
+    For areaIndex.w = 0 To #AREA_COUNT - 1
+      NPrint "    ", areaName$(areaIndex), "  ", areaFileBytes(areaIndex), " bytes  ", loadFrames(passIndex*#AREA_COUNT + areaIndex), " frames"
+    Next
+    NPrint "    whole pass: ", passFrames(passIndex), " frames"
+  Next
+  NPrint "  ", #REPEAT_READS, " reads of ", areaName$(1), " (Method A, one switch): ", repeatFrames, " frames, about ", repeatFrames*20/#REPEAT_READS, " ms each on PAL"
+  NPrint "  the checksum of all four areas, in Blitz: ", checksumFrames, " frames"
+  NPrint ""
+  NPrint "FOR COMPARISON: the lives cover holds 147 ticks, about 2.5 s; a level's four areas are about 55 KB."
+  NPrint "A host folder under UAE is not a real disk: the figure for a real hard drive or a floppy needs the real machine."
+  CloseFile 0
+EndIf
+End

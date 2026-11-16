@@ -1,0 +1,153 @@
+;; joystick-probe.ab3 -- what do the joystick reads really return, and what is on the port's
+;; hardware registers? Compile in UAE. Not part of the game.
+;; Proof for the first joystick test (2026-10-14, FS-UAE):
+;;   - the two stick choices: Up seems to move Mario left as well (the CD32 pad, which uses the
+;;     same Joyx and Joyy, does not);
+;;   - Joystick 2 button: the fire button (run) works, the second button (jump) does not.
+;; So this shows what Joyx, Joyy, Joyr and Joyb return for each press, next to the raw words they
+;; are made from, JOY1DAT ($dff00c: bit 9 is left, bit 1 right, up is bit 9 XOR bit 8, down is
+;; bit 1 XOR bit 0) and POTGOR ($dff016: bit 14 is port 1's second button, active low).
+;;
+;; THE SCREEN (lit = true; every lamp is a 32 px box):
+;;   row 1  Joyx left, Joyx right, Joyy up, Joyy down
+;;   row 2  Joyb 1 (the fire button), Joyb 2 (the second button)
+;;   row 3  Gameb: play, reverse, forward, green, yellow, red, blue (only after G)
+;;
+;; KEYS
+;;   G     read Gameb too (it drives the port's pot lines for the CD32 protocol, so it is off
+;;         until you want it: it can change what the other reads see)
+;;   Esc   quit; the results are written then
+;;
+;; WHAT TO DO, in the same FS-UAE setup as the game test, once for each device:
+;;   1. Leave the stick alone for two seconds.
+;;   2. Left, release. Right, release. Up, release. Down, release. Up and Left together, release.
+;;   3. The fire button, release. The second button, release (if there is one).
+;;   4. Esc.
+;; joystick-probe-results.txt lists every change: the frame, then Joyx, Joyy, Joyr, Joyb, Gameb
+;; (-1 when not read), then the two raw words in hex. Send me the file, and say which device
+;; (a keyboard-emulated stick, a USB pad as a joystick, a CD32 pad) each run was.
+
+WBStartup
+
+#RAW_KEY_ESC  = $45
+#RAW_KEY_G    = $24
+#MAX_LOG = 400
+
+Dim logFrame.l(#MAX_LOG - 1)
+Dim logJoyx.w(#MAX_LOG - 1)
+Dim logJoyy.w(#MAX_LOG - 1)
+Dim logJoyr.w(#MAX_LOG - 1)
+Dim logJoyb.w(#MAX_LOG - 1)
+Dim logPad.w(#MAX_LOG - 1)
+Dim logRaw.l(#MAX_LOG - 1)
+Dim logPot.l(#MAX_LOG - 1)
+
+BitMap 0, 320, 128, 4
+InitPalette 0, 16
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 255, 255, 255
+AGAPalRGB 0, 2, 255, 60, 60
+AGAPalRGB 0, 3, 60, 60, 60
+
+BLITZ
+
+InitCopList 0, 44, 128, $10014, 8, 16, 0
+CreateDisplay 0
+DisplayPalette 0, 0
+BlitzKeys On
+DisplayBitMap 0, 0, 0, 0
+
+;; One lamp: a 32 px box, white when on and dark grey when off.
+Statement Lamp{lampX.w, lampY.w, lampOn.w}
+  lampColour.w = 3
+  If lampOn <> 0 Then lampColour = 1
+  Boxf lampX, lampY, lampX + 31, lampY + 31, lampColour
+End Statement
+
+Use BitMap 0
+Cls 0
+
+logCount.w = 0
+readPad.w = False
+gHeld.w = False
+quitNow.w = False
+frameNumber.l = 0
+lastJoyx.w = 99
+lastJoyy.w = 99
+lastJoyr.w = 99
+lastJoyb.w = 99
+lastPad.w = 99
+lastRaw.l = -1
+lastPot.l = -1
+
+Repeat
+  VWait
+  frameNumber = frameNumber + 1
+  If RawStatus(#RAW_KEY_ESC) Then quitNow = True
+  If RawStatus(#RAW_KEY_G)
+    If gHeld = False Then readPad = 1 - readPad
+    gHeld = True
+  Else
+    gHeld = False
+  EndIf
+
+  joyxNow.w = Joyx(1)
+  joyyNow.w = Joyy(1)
+  joyrNow.w = Joyr(1)
+  joybNow.w = Joyb(1)
+  padNow.w = -1
+  If readPad <> False Then padNow = Gameb(1)
+  rawNow.l = Peek.w($dff00c) AND $ffff
+  potNow.l = Peek.w($dff016) AND $ffff
+
+  Use BitMap 0
+  Lamp{8, 8, joyxNow < 0}
+  Lamp{48, 8, joyxNow > 0}
+  Lamp{88, 8, joyyNow < 0}
+  Lamp{128, 8, joyyNow > 0}
+  Lamp{8, 48, joybNow AND 1}
+  Lamp{48, 48, joybNow AND 2}
+  padMask.w = 1
+  For padBit.w = 0 To 6
+    padOn.w = 0
+    If padNow >= 0 Then padOn = padNow AND padMask
+    Lamp{8 + padBit*40, 88, padOn}
+    padMask = padMask + padMask
+  Next
+
+  If joyxNow <> lastJoyx OR joyyNow <> lastJoyy OR joyrNow <> lastJoyr OR joybNow <> lastJoyb OR padNow <> lastPad OR rawNow <> lastRaw OR potNow <> lastPot
+    If logCount < #MAX_LOG
+      logFrame(logCount) = frameNumber
+      logJoyx(logCount) = joyxNow
+      logJoyy(logCount) = joyyNow
+      logJoyr(logCount) = joyrNow
+      logJoyb(logCount) = joybNow
+      logPad(logCount) = padNow
+      logRaw(logCount) = rawNow
+      logPot(logCount) = potNow
+      logCount = logCount + 1
+    EndIf
+    lastJoyx = joyxNow
+    lastJoyy = joyyNow
+    lastJoyr = joyrNow
+    lastJoyb = joybNow
+    lastPad = padNow
+    lastRaw = rawNow
+    lastPot = potNow
+  EndIf
+Until quitNow <> False
+
+AMIGA
+
+If WriteFile(0, "sparky-dave:game/proofs/results/joystick-probe-results.txt")
+  FileOutput 0
+  NPrint "joystick-probe"
+  NPrint "frame joyx joyy joyr joyb gameb(-1 = not read) JOY1DAT POTGOR"
+  For logIndex.w = 0 To logCount - 1
+    NPrint logFrame(logIndex), " ", logJoyx(logIndex), " ", logJoyy(logIndex), " ", logJoyr(logIndex), " ", logJoyb(logIndex), " ", logPad(logIndex), " $", Hex$(logRaw(logIndex)), " $", Hex$(logPot(logIndex))
+  Next
+  If logCount >= #MAX_LOG Then NPrint "(the log filled at ", #MAX_LOG, " changes)"
+  CloseFile 0
+EndIf
+
+End

@@ -1,0 +1,231 @@
+;; display-edge.ab3 -- which pixel columns are really on screen at the left and right edges,
+;; on the game's own two-list display, and what the library puts in the window registers.
+;; Compile in UAE. Not part of the game. Proof for the HUD text that looks one pixel off
+;; the left edge, and for the 321 px window.
+;;
+;; Two strips on the game's own lists, with the game's own flags:
+;;   TOP strip (list 0, where the HUD is), 16 lines
+;;   LOWER strip (list 1, where the world is), 48 lines
+;; Both show a bitmap that has a column ruler painted into it:
+;;   left edge:   x 0 RED, x 1 GREEN, x 2 BLUE, x 3 WHITE, then black, then YELLOW at x 8
+;;   a WHITE line every 16 px from x 16 (so a tile column can be counted)
+;;   right edge:  x 316 YELLOW, 317 WHITE, 318 RED, 319 GREEN, 320 BLUE, 321 WHITE
+;;
+;; RESULT (2026-10-12, both emulators): the library's window is 129 to 449, 320 wide, but its
+;; fetch starts a word early so column 0 sits at pixel 128 and is hidden; DisplayAdjust -1 and -1
+;; (one Z, one X) gives red first and green last in both. See the main project's AMIGA_RENDERER note, "The display window".
+;;
+;; Run 1 (2026-10-11) showed: AmigaForever shows columns 0 to 320 (321 columns), FS-UAE
+;; shows 1 to 320 (320 columns). Column 321 is hidden in both.
+;;
+;; THE WINDOW REGISTERS. DISPLAYLIB.guide gives the copper-list object's layout (coppos is
+;; its second long, the copper list's place in Chip RAM), so this proof reads the library's
+;; own copper list and writes the display registers it set to
+;; display-edge-results.txt: DIWSTRT, DIWSTOP, DDFSTRT, DDFSTOP, BPLCON1, FMODE (and DIWHIGH
+;; if the library writes one), with the window width worked out from them. The width of a
+;; window is (256 + the stop's horizontal byte) minus the start's.
+;;
+;; THE ADJUSTMENT. DisplayAdjust moves the window edges; in the older hw-scroll proof one
+;; unit of DIWSTRT was one lores pixel. Keys (each rebuilds both lists, the picture may
+;; flicker; the adjustments apply to both lists):
+;;   A / Z   DIWSTRT +1 / -1     (the window's left edge: +1 moves it right, hiding a column)
+;;   S / X   DIWSTOP +1 / -1     (the window's right edge: -1 moves it left)
+;;   R       back to the library's own window (no adjustment)
+;;   1       the TOP strip with the literal form (as the HUD does it, the starting state)
+;;   2       the TOP strip with a variable x (the extended form, as the world does it)
+;;   Esc     quit (the results file is written then)
+;;
+;; What to try, in each emulator (AmigaForever and FS-UAE):
+;;   - Find the adjustment that makes the coloured columns start at RED (x 0) and end at
+;;     GREEN (x 319): exactly 320 columns, with BLUE (x 320) just gone. Note the A/Z and
+;;     S/X presses you used (the results file records them).
+;;   - If the same adjustment gives exactly that picture in both emulators, the game can use
+;;     it. If they want different adjustments, the emulators disagree and no setting can
+;;     satisfy both: then only a safe margin helps.
+;;   - Quit with Esc and read display-edge-results.txt (the first line pair is the library's
+;;     own window, before any adjustment).
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_1   = $01
+#RAW_KEY_2   = $02
+#RAW_KEY_A   = $20
+#RAW_KEY_S   = $21
+#RAW_KEY_R   = $13
+#RAW_KEY_Z   = $31
+#RAW_KEY_X   = $32
+
+#COPPER_FLAGS  = $10014
+#TOP_YPOS   = 44
+#TOP_H      = 16
+#LOWER_YPOS = 63
+#LOWER_H    = 48
+#BM_W       = 336
+
+;; What the copper list says, per list (0 top, 1 lower).
+Dim copDiwStart.l(1)
+Dim copDiwStop.l(1)
+Dim copDdfStart.l(1)
+Dim copDdfStop.l(1)
+Dim copBplcon1.l(1)
+Dim copFmode.l(1)
+Dim copDiwHigh.l(1)
+Dim firstDiwStart.l(1)
+Dim firstDiwStop.l(1)
+Dim firstDdfStart.l(1)
+Dim firstDdfStop.l(1)
+Dim firstBplcon1.l(1)
+Dim firstFmode.l(1)
+;; display-crop.ab3 -- can the world's list show only part of a tall bitmap, by the y of
+;; DisplayBitMap? The plan (the main project's journal notes, "Shorten the map height"): the map's top 32 rows of
+;; pixels are the NES status bar zone, which our separate HUD band replaces, so the world list
+;; would be 208 lines and DisplayBitMap would start it at y = 32 of the bitmap.
+;;
+;; What to see (a 336 x 256 bitmap, a 16 line grey band above as a stand-in for the HUD):
+;;   1  y = 0, the whole top: the blue band (bitmap rows 0 to 31) is the first thing shown, and
+;;      the picture ends at a row near the middle of the bitmap (the list is 208 lines)
+;;   2  y = 32 (the one wanted): the first line under the grey band is the RED bar (bitmap rows
+;;      32 to 35) with no blue above it, and the last lines at the bottom are the GREEN bar (rows
+;;      236 to 239): the whole of rows 32 to 239 and nothing else
+;; The picture scrolls sideways a little (the vertical offset has to work together with the
+;; smooth scroll). Keys: 1 and 2 as above, Esc quits. The results file says how far the copper
+;; list's bitplane pointer moved between the two (it should be 32 rows of the bitmap's row
+;; bytes), and which key was last pressed.
+;; Results: game/proofs/results/display-crop-results.txt
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_1   = $01
+#RAW_KEY_2   = $02
+
+#COPPER_FLAGS = $10014
+#TOP_YPOS  = 58
+#TOP_H     = 16
+#VIEW_YPOS = 77
+#VIEW_H    = 208
+#VIEW_TOP  = 32
+#BM_W      = 336
+#BM_H      = 256
+
+Dim planePointer.l(1)
+Dim planeAtTop.l(1)
+Dim planeAtCrop.l(1)
+shownMode.w = 2
+sawTop.w = False
+sawCrop.w = False
+
+BLITZ
+
+;; The bitplane pointers of list 1 as the copper list holds them (BPL1PT at $0e0 and $0e2, BPL2PT
+;; at $0e4 and $0e6): the copper's MOVE instructions are pairs of words, the register and its value.
+Statement ReadPlanes{}
+  SHARED planePointer()
+  copperBase.l = Peek.l(Addr CopList(1) + 4)
+  planePointer(0) = -1
+  planePointer(1) = -1
+  highWord.l = -1
+  For instruction = 0 To 399
+    registerWord.l = Peek.w(copperBase + instruction*4) AND $ffff
+    valueWord.l = Peek.w(copperBase + instruction*4 + 2) AND $ffff
+    If registerWord = $00e0 Then highWord = valueWord
+    If registerWord = $00e2 Then planePointer(0) = highWord*65536 + valueWord
+    If registerWord = $00e4 Then highWord = valueWord
+    If registerWord = $00e6 Then planePointer(1) = highWord*65536 + valueWord
+  Next
+End Statement
+
+BitMap 0, #BM_W, #BM_H, 4
+Use BitMap 0
+Boxf 0, 0, #BM_W - 1, #BM_H - 1, 0
+Boxf 0, 0, #BM_W - 1, 31, 5
+Boxf 0, 32, #BM_W - 1, 35, 1
+Boxf 0, 236, #BM_W - 1, 239, 3
+For markY = 48 To 224 Step 16
+  Boxf 0, markY, #BM_W - 1, markY, 4
+Next
+For markX = 0 To #BM_W - 1 Step 16
+  Boxf markX, 36, markX, 235, 2
+Next
+BitMap 1, #BM_W, #TOP_H, 4
+Use BitMap 1
+Boxf 0, 0, #BM_W - 1, #TOP_H - 1, 6
+
+InitCopList 0, #TOP_YPOS, #TOP_H, #COPPER_FLAGS, 8, 16, 0
+InitCopList 1, #VIEW_YPOS, #VIEW_H, #COPPER_FLAGS, 8, 0, 0
+DisplayAdjust 0, 0, 0, 0, -1, -1
+DisplayAdjust 1, 0, 0, 0, -1, -1
+CreateDisplay 0, 1
+AGAPalRGB 0, 0, 0, 0, 0
+AGAPalRGB 0, 1, 255, 0, 0
+AGAPalRGB 0, 2, 70, 70, 70
+AGAPalRGB 0, 3, 0, 255, 0
+AGAPalRGB 0, 4, 255, 255, 255
+AGAPalRGB 0, 5, 0, 80, 255
+AGAPalRGB 0, 6, 160, 160, 160
+DisplayPalette 0, 0
+BlitzKeys On
+DisplayBitMap 0, 1, 0, 0
+
+scrollX.q = 0
+viewTopNow.w = #VIEW_TOP
+DisplayBitMap 1, 0, scrollX, viewTopNow
+ReadPlanes{}
+planeAtCrop(0) = planePointer(0)
+planeAtCrop(1) = planePointer(1)
+sawCrop = True
+
+While RawStatus(#RAW_KEY_ESC) = 0
+  VWait
+  scrollX = scrollX + 0.5
+  If scrollX >= 16 Then scrollX = 0
+  If RawStatus(#RAW_KEY_1) <> 0
+    If shownMode <> 1
+      shownMode = 1
+      viewTopNow = 0
+      DisplayBitMap 1, 0, scrollX, viewTopNow
+      ReadPlanes{}
+      planeAtTop(0) = planePointer(0)
+      planeAtTop(1) = planePointer(1)
+      sawTop = True
+    EndIf
+  EndIf
+  If RawStatus(#RAW_KEY_2) <> 0
+    If shownMode <> 2
+      shownMode = 2
+      viewTopNow = #VIEW_TOP
+      DisplayBitMap 1, 0, scrollX, viewTopNow
+      ReadPlanes{}
+      planeAtCrop(0) = planePointer(0)
+      planeAtCrop(1) = planePointer(1)
+      sawCrop = True
+    EndIf
+  EndIf
+  DisplayBitMap 1, 0, scrollX, viewTopNow
+Wend
+
+;; =======================================================
+;; RESULTS (AMIGA MODE)
+;; =======================================================
+
+AMIGA
+
+If WriteFile(0, "sparky-dave:game/proofs/results/display-crop-results.txt")
+  FileOutput 0
+  NPrint "display-crop"
+  NPrint ""
+  NPrint "bitmap ", #BM_W, " x ", #BM_H, ", row bytes ", #BM_W/8, ", list ", #VIEW_H, " lines starting at y offset ", #VIEW_TOP
+  NPrint "expected pointer move for ", #VIEW_TOP, " rows: ", #VIEW_TOP*(#BM_W/8)
+  NPrint ""
+  If sawTop <> False
+    NPrint "plane 1 pointer at y 0 : $", Hex$(planeAtTop(0)), "  at y ", #VIEW_TOP, " : $", Hex$(planeAtCrop(0)), "  moved ", planeAtCrop(0) - planeAtTop(0)
+    NPrint "plane 2 pointer at y 0 : $", Hex$(planeAtTop(1)), "  at y ", #VIEW_TOP, " : $", Hex$(planeAtCrop(1)), "  moved ", planeAtCrop(1) - planeAtTop(1)
+  Else
+    NPrint "key 1 was never pressed, so only y ", #VIEW_TOP, " was read: plane 1 pointer $", Hex$(planeAtCrop(0)), ", plane 2 $", Hex$(planeAtCrop(1))
+  EndIf
+  NPrint ""
+  NPrint "last mode shown: ", shownMode
+  CloseFile 0
+EndIf
+End

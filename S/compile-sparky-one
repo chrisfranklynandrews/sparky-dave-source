@@ -1,0 +1,71 @@
+.KEY variant/A,look/A,program/A
+.BRA {
+.KET }
+; Compile one build of Sparky Dave with AmiBlitz 3.13: one physics variant (ntsc or pal) in one look
+; (nes or allstars), to sparky-dave:compiled/{program}. Called by compile-sparky-bin for each of the
+; four; it can be run by hand too:
+;   execute sparky-dave:S/compile-sparky-one pal allstars SparkyDavePalAllStars
+; The variant and the look are the copies of sparkydave.physics.ab3 and sparkydave.look.ab3 in place
+; at compile time, so this copies the two files over them for the compile, and puts the committed
+; copies back (the NTSC physics, the NES look) when it ends, compiled or not: the PC-side checks
+; (tools/check_source_split.py VARIANTS, tools/release_check.py) expect them, and compile-sparky
+; builds whatever is in place. (Stopped part way, with Ctrl-C, the copies stay switched until the
+; next run of this, or python tools/build_variant.py ntsc and look nes on the PC.) Compile errors go
+; to game/compile-{variant}-{look}.log. A failure is noted in RAM:sparky-compile-failed, which
+; compile-sparky-bin reads.
+
+FAILAT 21
+
+ECHO "Compiling {program} ({variant}, {look})"
+SET compileresult ok
+
+COPY sparky-dave:game/includes/sparkydave.physics.{variant}.ab3 TO sparky-dave:game/includes/sparkydave.physics.ab3 QUIET
+IF ERROR
+  ECHO "Could not copy the {variant} physics file into place"
+  SET compileresult failed
+ENDIF
+IF "$compileresult" EQ "ok"
+  COPY sparky-dave:game/includes/sparkydave.look.{look}.ab3 TO sparky-dave:game/includes/sparkydave.look.ab3 QUIET
+  IF ERROR
+    ECHO "Could not copy the {look} look file into place"
+    SET compileresult failed
+  ENDIF
+ENDIF
+
+IF "$compileresult" EQ "ok"
+  DELETE sparky-dave:game/compile-{variant}-{look}.log QUIET
+  DELETE sparky-dave:compiled/{program} QUIET
+
+  Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/SparkyDave.ab3 -e sparky-dave:compiled/{program} -v 2 > sparky-dave:game/compile-{variant}-{look}.log
+
+  ; The compiler does not always return an error code when it finds errors, so the three checks
+  ; are the return code, the log (an error is a "Compiler Error" line) and the program, which was
+  ; deleted above.
+  IF ERROR
+    SET compileresult failed
+  ENDIF
+  SEARCH sparky-dave:game/compile-{variant}-{look}.log "Compiler Error" QUIET
+  IF NOT WARN
+    SET compileresult failed
+  ENDIF
+  IF NOT EXISTS sparky-dave:compiled/{program}
+    SET compileresult failed
+  ENDIF
+  IF "$compileresult" EQ "failed"
+    ECHO "{program} compile failed"
+    TYPE sparky-dave:game/compile-{variant}-{look}.log
+  ENDIF
+ENDIF
+
+; The committed copies go back whatever happened.
+COPY sparky-dave:game/includes/sparkydave.physics.ntsc.ab3 TO sparky-dave:game/includes/sparkydave.physics.ab3 QUIET
+COPY sparky-dave:game/includes/sparkydave.look.nes.ab3 TO sparky-dave:game/includes/sparkydave.look.ab3 QUIET
+
+IF "$compileresult" EQ "failed"
+  UNSET compileresult
+  ECHO "failed" TO RAM:sparky-compile-failed
+  QUIT 0
+ENDIF
+UNSET compileresult
+
+ECHO "{program} compiled"

@@ -1,0 +1,675 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; band-split.ab3 -- the back playfield's two bands at their own speeds, for a few copper
+;; moves instead of DisplayScroll's whole list.
+;; Compile in UAE. Not part of the game. Fourth proof of the scrolling options in
+;; the main project's AMIGA_RENDERER note ("Parallax and scrolling options").
+;;
+;; line-scroll.ab3 proved the picture (2026-10-14) but DisplayScroll cost 52 lines a
+;; frame: it rewrites BPLCON1 and both modulos on all 207 lines every frame. Only the
+;; boundary between the clouds and the hills needs anything, so here two CustomStrings
+;; sit at the boundary (in rows that are sky in the back bitmap, so a line half way
+;; through the change shows nothing):
+;;   at list line #BAND_LINE - 2: the pointers of back planes 0 and 1 (BPL2PT, BPL4PT)
+;;   at list line #BAND_LINE - 1: back planes 2 and 3 (BPL6PT, BPL8PT) and BPLCON1
+;; Split over two lines so each group of moves fits in the horizontal blank. The values
+;; are worked out the way displaylib.ab3 does it for a dual playfield (_displaydbmap2 and
+;; its bp1 table): x in quarter pixels; the low 8 bits (64 px at fetch mode 3) are the
+;; fine delay, 255 less them, packed into BPLCON1; the rest, as bytes (8 per 64 px), is
+;; added to the plane pointer of the bitmap row. The front's part of BPLCON1 is the same
+;; one the list's header already has, so the front does not move.
+;;
+;; The camera now moves rightwards for ever, so nothing reverses. The front is a 128 px
+;; pattern and wraps at 512; the clouds (a quarter of the camera) and the hills (half)
+;; wrap at 768. Keys:
+;;   1 to 5  camera speed 0.5, 1, 1.25, 2, 3 px a frame (the HUD shows 1 to 5 boxes)
+;;   R       the back's bands at whole pixels or at the quarter pixel (a red box in the
+;;           HUD means whole pixels)
+;;   U       stop and restart the band updates (a dark red box in the HUD means stopped;
+;;           the hills then keep the last position they were given)
+;;   Esc     quit and write band-split-results.txt
+;;
+;; First run (2026-10-14): the bands worked, R made no visible difference and the
+;; judder is the sub-pixel steps of a slow layer (smoother the faster it goes). But the
+;; band update, two CustomStrings built from Mki$ every frame, took 44 lines: the cost was
+;; the Blitz strings. So the strings are now built once, and each frame only the nine
+;; value words are poked into the copper list, found through the CopList object
+;; (Addr CopList, then its customs pointer). The poke is used only if both strings' first
+;; register words are where that layout puts them; else it falls back to CustomString.
+;; The results file says which ran. Also seen on the first run: after scrolling a
+;; distance, the whole display dropped by 1 pixel.
+;;
+;; Second run (2026-10-14): the "drop" is a vertical seam in the FRONT playfield, about
+;; 137 px in: right of it the pillars and ground are one line higher, as if that part of
+;; each line came from the next bitmap row. The back is not split. It comes and goes as
+;; the scroll moves, and it happens with the band updates stopped (U), so it is not the
+;; band code. Suspect: fetch mode 3's fetch against the fine scroll. More keys to find it:
+;;   S       stop and restart the camera; while stopped, the cursor keys left and right
+;;           move it a quarter pixel a frame
+;;   F       switch between fetch mode 3 (lists 0 and 1, the band split) and fetch mode
+;;           1 (lists 2 and 3, no band split: the hills follow the clouds). A yellow box
+;;           in the HUD means fetch mode 1.
+;; The thin bar in the HUD, from x = #BAR_X, is the front's x within its 64 px fetch
+;; block (0 to 63 px): the front's fine scroll.
+;;
+;; Then the user saw the seam scroll along with the picture and out of view: so it was in
+;; the bitmap position, not the fetch. The cause was the front's wrap (QWrap wraps once;
+;; see the main loop), not fetch mode 3. Fixed with a loop. S, the cursor keys and F stay
+;; for checking.
+;;
+;; Third run: no seam at any speed. The poke path ran, but the update still took 25
+;; lines (all nine words, function calls and divisions every frame). Now BPLCON1 comes
+;; from tables and the pointers are poked only when the hills cross a 64 px block
+;; (PokeBand{}).
+;;
+;; What to look at and report
+;; 1. The bands exactly as on the third run: the hills smooth, with no jump each 64 px
+;;    (where the pointers are now poked), and no seam.
+;; 2. The results file: the band update's lines, average and worst.
+;; The results file has the bob load (72 lines in dual-playfield.ab3) and the lines the
+;; band update takes (44 by CustomString, 52 by DisplayScroll).
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_1   = $01
+#RAW_KEY_5   = $05
+#RAW_KEY_R   = $13
+#RAW_KEY_U     = $16
+#RAW_KEY_S     = $21
+#RAW_KEY_F     = $23
+#RAW_KEY_ESC   = $45
+#RAW_KEY_RIGHT = $4E
+#RAW_KEY_LEFT  = $4F
+
+;; The same display at fetch mode 1, on lists 2 and 3, for the seam hunt (F). No band
+;; split there: its values would need fetch mode 1's sums.
+#HUD_FLAGS_FM1   = $11014
+#WORLD_FLAGS_FM1 = $11038
+
+;; The fine-scroll bar in the HUD: the front's x within its 64 px fetch block, one pixel
+;; of bar a pixel, from x = #BAR_X.
+#BAR_X = 100
+
+;; The CopList object (displaylib.ab3, NEWTYPE .mycop): the pointer to its custom copper
+;; area is the eighth long. CustomString puts a string at customs + 4 * CCOffset: two
+;; longs (a no-op move and the wait), then the moves, each a register word and a value
+;; word. These are the byte offsets of the value words, from customs.
+#MYCOP_CUSTOMS = 28
+#POKE_FIRST    = 10
+#POKE_SECOND   = 34
+
+;; The hills' x in quarter pixels, less the fine part: changes once every 64 px.
+#HILL_BLOCK_MASK = $FF00
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 32
+
+;; 4 planes, smooth scroll, AGA colours, fetch mode 3; the world adds dual playfield and
+;; counts 8 planes (two playfields of 4).
+#HUD_FLAGS   = $13014
+#WORLD_FLAGS = $13038
+
+;; Two CustomStrings: each is 2 instructions (the wait) plus its moves. The first has 4
+;; moves (6 in all) and starts at offset 0, the second 5 (7 in all) at offset 6.
+#BAND_CUSTOMS  = 13
+#STRING_B_SLOT = 6
+
+;; BPLCON3 is the library default $c00 XOR this: PF2OF 16 rather than 8.
+#PLAYFIELD2_OFFSET_16 = $1c00
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; Bitmaps: 0 and 1 the front pair, 2 the back, 3 the HUD band, 4 the shape source.
+#BM_A     = 0
+#BM_B     = 1
+#BM_BACK  = 2
+#BM_HUD   = 3
+#BM_SHAPE = 4
+#FRONT_W  = 1024
+#BACK_W   = 1152
+#PERIOD   = 768
+#FRONT_WRAP = 512
+#WORLD_H  = 256
+#HUD_W    = 384
+
+;; The hills band starts at list line #BAND_LINE, bitmap row #VIEW_TOP + #BAND_LINE (112,
+;; between the clouds at 40 to 79 and the hills at 140 to 207).
+#BAND_LINE = 80
+
+;; Copper registers: the even (back) planes' pointers, high word, and BPLCON1.
+#BPL2PTH = $E4
+#BPL4PTH = $EC
+#BPL6PTH = $F4
+#BPL8PTH = $FC
+#BPLCON1 = $102
+
+#BOB_SHAPE  = 0
+#TILE       = 16
+#BOB_BYTES  = 16384
+
+#SPEEDS      = 5
+#BOBS        = 8
+#WORK_LINE   = 80
+#LINES_PAL   = 312
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+frameCount.l = 0
+speedIndex.w = 2
+wholePixels.w = False
+rWasDown.w = False
+cameraX.q = 0
+frontX.q = 0
+cloudX.q = 0
+hillX.q = 0
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+bobFrames.l = 0
+bobSum.l = 0
+bobMax.l = 0
+bandLines.l = 0
+bandSum.l = 0
+bandMax.l = 0
+backBytesPerRow.l = 0
+copListAddress.l = 0
+customsAddress.l = 0
+pokeMode.w = False
+bandFrozen.w = False
+uWasDown.w = False
+cameraStopped.w = False
+sWasDown.w = False
+fetchModeOne.w = False
+fWasDown.w = False
+worldList.w = 1
+fineX.w = 0
+
+Dim speedTable.q(#SPEEDS - 1)
+speedTable(0) = 0.5
+speedTable(1) = 1
+speedTable(2) = 1.25
+speedTable(3) = 2
+speedTable(4) = 3
+
+Dim backPlane.l(3)
+Dim frontScrollPart.l(255)
+Dim backScrollPart.l(255)
+lastHillBlock.l = -1
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #FRONT_W, #WORLD_H, 4
+BitMap #BM_B, #FRONT_W, #WORLD_H, 4
+BitMap #BM_BACK, #BACK_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_SHAPE, 16, #TILE, 4
+
+;; The back's planes, from the Blitz BitMap object: bytes per row at 0, plane pointers
+;; from 8 (the layout displaylib.ab3 reads).
+backBytesPerRow = Peek.w(Addr BitMap(#BM_BACK))
+For planeIndex.w = 0 To 3
+  backPlane(planeIndex) = Peek.l(Addr BitMap(#BM_BACK) + 8 + planeIndex*4)
+Next
+
+;; 0 the sky; 1 to 7 reds; 8 to 15 yellows; 16 black; 17 to 23 blues; 24 to 31 greys.
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+For colourIndex.w = 1 To 7
+  AGAPalRGB 0, colourIndex, 100 + colourIndex*22, 0, 0
+  AGAPalRGB 0, colourIndex + 8, 100 + colourIndex*22, 100 + colourIndex*22, 0
+  AGAPalRGB 0, colourIndex + 16, 0, 0, 100 + colourIndex*22
+  AGAPalRGB 0, colourIndex + 24, 60 + colourIndex*25, 60 + colourIndex*25, 60 + colourIndex*25
+Next
+AGAPalRGB 0, 8, 255, 255, 0
+AGAPalRGB 0, 16, 0, 0, 0
+AGAPalRGB 0, 24, 40, 40, 40
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; A 16 bit value as the signed word Mki$ takes.
+Function.l SignedWord{value.l}
+  value = value AND $ffff
+  If value > 32767 Then value = value - 65536
+  Function Return value
+End Function
+
+;; One playfield's part of BPLCON1 for a delay of 0 to 255 quarter pixels, in the
+;; playfield 1 bits: delay bits 0-1 at 8-9, bits 2-5 at 0-3, bits 6-7 at 10-11 (checked
+;; against displaylib's bp1 table). Playfield 2's part is this times 16.
+Function.l ScrollPart{delay.l}
+  Function Return (delay AND 3)*256 + ((delay/4) AND 15) + ((delay/64) AND 3)*1024
+End Function
+
+;; The two copper strings at the boundary, from the front's and the hills' x.
+Statement UpdateBand{}
+  SHARED frontX, hillX, backPlane(), backBytesPerRow
+  frontQuarter.l = Int(frontX*4)
+  hillQuarter.l = Int(hillX*4)
+  control.l = ScrollPart{255 - (frontQuarter AND 255)} + ScrollPart{255 - (hillQuarter AND 255)}*16
+  coarseBytes.l = (hillQuarter/256)*8
+  ;; Planes 0 and 1 are set at the end of line #BAND_LINE - 2, for the next line's row.
+  rowStart.l = (#VIEW_TOP + #BAND_LINE - 1)*backBytesPerRow + coarseBytes
+  pointer0.l = backPlane(0) + rowStart
+  pointer1.l = backPlane(1) + rowStart
+  firstString$ = Mki$(#BPL2PTH) + Mki$(SignedWord{pointer0/65536}) + Mki$(#BPL2PTH + 2) + Mki$(SignedWord{pointer0})
+  firstString$ = firstString$ + Mki$(#BPL4PTH) + Mki$(SignedWord{pointer1/65536}) + Mki$(#BPL4PTH + 2) + Mki$(SignedWord{pointer1})
+  ;; Planes 2 and 3 and BPLCON1 at the end of line #BAND_LINE - 1, one row further on.
+  rowStart = rowStart + backBytesPerRow
+  pointer2.l = backPlane(2) + rowStart
+  pointer3.l = backPlane(3) + rowStart
+  secondString$ = Mki$(#BPL6PTH) + Mki$(SignedWord{pointer2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{pointer2})
+  secondString$ = secondString$ + Mki$(#BPL8PTH) + Mki$(SignedWord{pointer3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{pointer3})
+  secondString$ = secondString$ + Mki$(#BPLCON1) + Mki$(SignedWord{control})
+  CustomString 1, 0, #BAND_LINE - 2, firstString$
+  CustomString 1, #STRING_B_SLOT, #BAND_LINE - 1, secondString$
+End Statement
+
+;; The band's eight pointer words, for the hills' x in quarter pixels. Above PokeBand{},
+;; which calls it.
+Statement PokeBandPointers{hillQuarter.l}
+  SHARED backPlane(), backBytesPerRow, customsAddress
+  rowStart.l = (#VIEW_TOP + #BAND_LINE - 1)*backBytesPerRow + (hillQuarter/256)*8
+  pointer.l = backPlane(0) + rowStart
+  Poke.w customsAddress + #POKE_FIRST, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_FIRST + 4, SignedWord{pointer}
+  pointer = backPlane(1) + rowStart
+  Poke.w customsAddress + #POKE_FIRST + 8, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_FIRST + 12, SignedWord{pointer}
+  rowStart = rowStart + backBytesPerRow
+  pointer = backPlane(2) + rowStart
+  Poke.w customsAddress + #POKE_SECOND, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_SECOND + 4, SignedWord{pointer}
+  pointer = backPlane(3) + rowStart
+  Poke.w customsAddress + #POKE_SECOND + 8, SignedWord{pointer/65536}
+  Poke.w customsAddress + #POKE_SECOND + 12, SignedWord{pointer}
+End Statement
+
+;; The same values as UpdateBand{}, poked straight into the value words of the two strings
+;; it left in the copper list. The third run did all nine words every frame, with
+;; ScrollPart{} and SignedWord{} calls and divisions, and took 25 lines. Now BPLCON1 comes
+;; from two tables built once (frontScrollPart() and backScrollPart(), indexed by the fine
+;; position in quarter pixels), and the eight pointer words are poked only when the hills
+;; cross into another 64 px block (#HILL_BLOCK_MASK), about one frame in 32 at 2 px a frame.
+Statement PokeBand{}
+  SHARED frontX, hillX, customsAddress, lastHillBlock, frontScrollPart(), backScrollPart()
+  frontQuarter.l = Int(frontX*4)
+  hillQuarter.l = Int(hillX*4)
+  control.l = frontScrollPart(frontQuarter AND 255) + backScrollPart(hillQuarter AND 255)
+  If control > 32767 Then control = control - 65536
+  Poke.w customsAddress + #POKE_SECOND + 16, control
+  hillBlock.l = hillQuarter AND #HILL_BLOCK_MASK
+  If hillBlock <> lastHillBlock
+    lastHillBlock = hillBlock
+    PokeBandPointers{hillQuarter}
+  EndIf
+End Statement
+
+;; The two BPLCON1 tables, indexed by the fine position (0 to 255 quarter pixels): the
+;; delay is 255 less it. The back's part is the front's in the playfield 2 bits (times 16).
+Statement BuildScrollTables{}
+  SHARED frontScrollPart(), backScrollPart()
+  For fineIndex.w = 0 To 255
+    frontScrollPart(fineIndex) = ScrollPart{255 - fineIndex}
+    backScrollPart(fineIndex) = ScrollPart{255 - fineIndex}*16
+  Next
+End Statement
+
+;; The speed as 1 to 5 white boxes, and a red box at the right for whole pixels.
+Statement DrawHud{}
+  SHARED speedIndex, wholePixels, bandFrozen, fetchModeOne
+  Use BitMap #BM_HUD
+  Cls 0
+  For boxIndex.w = 0 To speedIndex
+    Boxf 8 + boxIndex*12, 4, 15 + boxIndex*12, 11, 7
+  Next
+  If wholePixels = True Then Boxf 296, 4, 303, 11, 4
+  If bandFrozen = True Then Boxf 284, 4, 291, 11, 2
+  If fetchModeOne = True Then Boxf 272, 4, 279, 11, 9
+End Statement
+
+;; The front: ground in pens 1 and 2, a tall pillar in pen 3 every 128 px.
+Statement DrawFront{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #FRONT_W/#TILE - 1
+    pen.w = 1
+    If columnIndex MOD 2 = 1 Then pen = 2
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For pillarX.w = 48 To #FRONT_W - 64 Step 128
+    Boxf pillarX, 40, pillarX + 23, 207, 3
+  Next
+End Statement
+
+;; One cloud and one hill per 192 px, four in the 768 px period, drawn again at x + 768
+;; where it fits. A marker in each band at x = 0 and x = 768.
+Statement DrawBackPiece{pieceX.w}
+  Boxf pieceX + 16, 48, pieceX + 111, 79, 5
+  Boxf pieceX + 32, 40, pieceX + 79, 47, 5
+  Boxf pieceX + 120, 160, pieceX + 183, 207, 6
+  Boxf pieceX + 136, 140, pieceX + 167, 159, 6
+End Statement
+
+Statement DrawBack{}
+  Use BitMap #BM_BACK
+  Cls 0
+  For pieceX.w = 0 To #BACK_W - 192 Step 192
+    DrawBackPiece{pieceX}
+  Next
+  Boxf 0, 36, 3, 95, 7
+  Boxf #PERIOD, 36, #PERIOD + 3, 95, 7
+  Boxf 0, 128, 3, 207, 7
+  Boxf #PERIOD, 128, #PERIOD + 3, 207, 7
+End Statement
+
+Statement MakeShapes{}
+  Use BitMap #BM_SHAPE
+  Cls 0
+  Circlef 7, 7, 7, 4
+  Circlef 7, 7, 3, 7
+  GetaShape #BOB_SHAPE, 0, 0, #TILE, #TILE
+End Statement
+
+BBlitMode CookieMode
+MakeShapes{}
+DrawFront{#BM_A}
+DrawFront{#BM_B}
+DrawBack{}
+DrawHud{}
+
+InitCopList 0, #HUD_YPOS, #HUD_H, #HUD_FLAGS, 0, #COPPER_COLORS, 0
+InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS, 0, 0, #BAND_CUSTOMS
+DisplayAdjust 0, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 1, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+InitCopList 2, #HUD_YPOS, #HUD_H, #HUD_FLAGS_FM1, 0, #COPPER_COLORS, 0
+InitCopList 3, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #WORLD_FLAGS_FM1, 0, 0, 0
+DisplayAdjust 2, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayAdjust 3, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+DisplayControls 3, 0, #PLAYFIELD2_OFFSET_16, 0
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+DisplayBitMap 0, #BM_HUD, 0, 0
+DisplayBitMap 1, drawBm, 0, #VIEW_TOP, #BM_BACK, 0, #VIEW_TOP
+BuildScrollTables{}
+UpdateBand{}
+;; Find the strings in the copper list, and poke them only if both register words are
+;; where the layout says.
+copListAddress = Addr CopList(1)
+customsAddress = Peek.l(copListAddress + #MYCOP_CUSTOMS)
+If customsAddress <> 0
+  If Peek.w(customsAddress + #POKE_FIRST - 2) = #BPL2PTH
+    If Peek.w(customsAddress + #POKE_SECOND - 2) = #BPL6PTH Then pokeMode = True
+  EndIf
+EndIf
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+  For keyIndex.w = 0 To #SPEEDS - 1
+    If RawStatus(#RAW_KEY_1 + keyIndex)
+      If speedIndex <> keyIndex
+        speedIndex = keyIndex
+        DrawHud{}
+      EndIf
+    EndIf
+  Next
+  If RawStatus(#RAW_KEY_R)
+    If rWasDown = False
+      wholePixels = NOT wholePixels
+      DrawHud{}
+    EndIf
+    rWasDown = True
+  Else
+    rWasDown = False
+  EndIf
+  If RawStatus(#RAW_KEY_U)
+    If uWasDown = False
+      bandFrozen = NOT bandFrozen
+      DrawHud{}
+    EndIf
+    uWasDown = True
+  Else
+    uWasDown = False
+  EndIf
+
+  ;; The camera only ever moves right. The front wraps on its 128 px pattern, the bands
+  ;; on the 768 px period.
+  ;; S stops the camera; while stopped the cursor keys move it a quarter pixel a frame.
+  If RawStatus(#RAW_KEY_S)
+    If sWasDown = False Then cameraStopped = NOT cameraStopped
+    sWasDown = True
+  Else
+    sWasDown = False
+  EndIf
+  ;; F switches between the fetch mode 3 lists (0 and 1) and the fetch mode 1 lists (2 and 3).
+  If RawStatus(#RAW_KEY_F)
+    If fWasDown = False
+      fetchModeOne = NOT fetchModeOne
+      VWait
+      If fetchModeOne = True
+        worldList = 3
+        CreateDisplay 2, 3
+        DisplayPalette 2, 0
+        DisplayBitMap 2, #BM_HUD, 0, 0
+      Else
+        worldList = 1
+        CreateDisplay 0, 1
+        DisplayPalette 0, 0
+        DisplayBitMap 0, #BM_HUD, 0, 0
+      EndIf
+      DrawHud{}
+    EndIf
+    fWasDown = True
+  Else
+    fWasDown = False
+  EndIf
+
+  If cameraStopped = False
+    cameraX = cameraX + speedTable(speedIndex)
+  Else
+    If RawStatus(#RAW_KEY_RIGHT) Then cameraX = cameraX + 0.25
+    If RawStatus(#RAW_KEY_LEFT) Then cameraX = cameraX - 0.25
+    If cameraX < 0 Then cameraX = cameraX + #PERIOD*4
+  EndIf
+  If cameraX >= #PERIOD*4 Then cameraX = cameraX - #PERIOD*4
+  ;; Not QWrap: it wraps once, not to the remainder, so a camera of up to 3,072 left the
+  ;; front at up to 2,560, past its 1,024 px bitmap, and the display read on into the next
+  ;; row: the seam of the second run.
+  frontX = cameraX
+  While frontX >= #FRONT_WRAP
+    frontX = frontX - #FRONT_WRAP
+  Wend
+  cloudX = cameraX/4
+  While cloudX >= #PERIOD
+    cloudX = cloudX - #PERIOD
+  Wend
+  hillX = cameraX/2
+  While hillX >= #PERIOD
+    hillX = hillX - #PERIOD
+  Wend
+  If wholePixels = True
+    cloudX = Int(cloudX)
+    hillX = Int(hillX)
+  EndIf
+  viewX = Int(frontX)
+
+  ;; The same bob load as the earlier proofs.
+  While RasterLine{} < #WORK_LINE
+  Wend
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  For bobIndex.w = 0 To #BOBS - 1
+    BBlit drawBuf, #BOB_SHAPE, viewX + 20 + bobIndex*36, 112 + (bobIndex MOD 2)*48
+  Next
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+
+  VWait
+  DisplayBitMap worldList, drawBm, frontX, #VIEW_TOP, #BM_BACK, cloudX, #VIEW_TOP
+  ;; The fine-scroll bar: the front's x within its 64 px fetch block.
+  fineX = viewX AND 63
+  Use BitMap #BM_HUD
+  Boxf #BAR_X, 13, #BAR_X + 64, 14, 0
+  Boxf #BAR_X, 13, #BAR_X + fineX, 14, 7
+  startLine = RasterLine{}
+  If bandFrozen = False AND worldList = 1
+    If pokeMode = True
+      PokeBand{}
+    Else
+      UpdateBand{}
+    EndIf
+  EndIf
+  endLine = RasterLine{}
+  bandLines = endLine - startLine
+  If bandLines < 0 Then bandLines = bandLines + #LINES_PAL
+
+  If frameCount >= 10
+    bobFrames = bobFrames + 1
+    bobSum = bobSum + bobLines
+    If bobLines > bobMax Then bobMax = bobLines
+    bandSum = bandSum + bandLines
+    If bandLines > bandMax Then bandMax = bandLines
+  EndIf
+
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/band-split-results.txt")
+  FileOutput 0
+  NPrint "band-split: HUD $", Hex$(#HUD_FLAGS), ", world $", Hex$(#WORLD_FLAGS), ", customs ", #BAND_CUSTOMS, ", ", frameCount, " frames"
+  If bobFrames > 0
+    NPrint "bob load (", #BOBS, " bobs from line ", #WORK_LINE, "): average lines ", bobSum/bobFrames, ", worst ", bobMax
+    NPrint "band update each frame: average lines ", bandSum/bobFrames, ", worst ", bandMax
+  EndIf
+  If pokeMode = True
+    NPrint "band update by poking the copper list (customs at $", Hex$(customsAddress), ")"
+  Else
+    NPrint "band update by CustomString: the poke check failed (CopList at $", Hex$(copListAddress), ", customs read as $", Hex$(customsAddress), ")"
+  EndIf
+  NPrint "back bitmap: ", backBytesPerRow, " bytes a row, plane 0 at $", Hex$(backPlane(0))
+  NPrint ""
+  NPrint "For comparison: dual-playfield.ab3 72 lines of bobs; line-scroll.ab3 75 lines of"
+  NPrint "bobs and 52 lines of DisplayScroll a frame."
+  CloseFile 0
+EndIf
+End

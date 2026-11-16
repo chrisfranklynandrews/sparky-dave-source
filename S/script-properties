@@ -1,0 +1,13 @@
+; Occasionally through git, or filesystem magic, these lose their script bit (+s).
+; Run from any directory: execute sparky-dave:S/script-properties
+; Each protect names the file with the sparky-dave: assign, so the current directory does not matter.
+protect sparky-dave:S/run-proof +s
+protect sparky-dave:S/run-sparky +s
+protect sparky-dave:S/run-tests +s
+protect sparky-dave:S/run-tests-one +s
+protect sparky-dave:S/stage-data +s
+protect sparky-dave:S/compile-sparky +s
+protect sparky-dave:S/compile-sparky-bin +s
+protect sparky-dave:S/compile-sparky-one +s
+protect sparky-dave:S/SparkyDave +s
+protect sparky-dave:S/SparkyDave-AllStars +s

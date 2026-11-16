@@ -1,0 +1,14 @@
+;; Proof: write a sequential text file after returning from BLITZ mode.
+
+WBStartup
+
+BLITZ
+AMIGA
+
+If WriteFile(0, "RAM:file-output-mode-proof.txt")
+  FileOutput 0
+  NPrint "File output after BLITZ mode passed."
+  CloseFile 0
+EndIf
+
+End

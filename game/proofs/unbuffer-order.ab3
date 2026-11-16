@@ -1,0 +1,199 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; unbuffer-order.ab3 -- does UnBuffer put back what BBlit saved in the reverse of the order it was saved?
+;; Compile in UAE. Not part of the game. For the stray row in the world (the main project's candidates notes, "Being looked at"):
+;; the fourth report found one row of three pixels ($3800, plane 3) in one world bitmap only, in the sky of 1-1,
+;; the shape of one row of a score number's digit. If UnBuffer restores in the order the shapes were drawn, two
+;; bobs drawn in one frame that overlap leave the first one's pixels where the second's saved background held them:
+;; the second's save was taken with the first already drawn. A one-row overlap leaves one row.
+;;
+;; Each case clears a bitmap to pen 0, BBlits two solid 16x8 shapes (pen 15, all four planes) in CookieMode into
+;; one buffer as the game's DrawFrame{} does, UnBuffers it, and counts the words left non-zero. In the reverse order
+;; (a stack) every case is clean.
+;;   case 1  the second shape 7 rows below the first (one row shared)
+;;   case 2  the same two the other way round (the lower one first)
+;;   case 3  both at the same place
+;;   case 4  the second 4 px right and 4 rows down (both across a word edge)
+;;   case 5  one shape only (the control)
+;; It runs in Blitz mode for an instant, then writes results/unbuffer-order-results.txt.
+
+WBStartup
+
+#PROOF_BM    = 0
+#SOURCE_BM   = 1
+#PROOF_W     = 128
+#PROOF_H     = 64
+#SHAPE_SOLID = 0
+#CASES       = 5
+#ROWS_KEPT   = 64
+
+Dim caseWords.l(#CASES)
+Dim caseRows$(#CASES)
+Dim caseFirstX.w(#CASES)
+Dim caseFirstY.w(#CASES)
+Dim caseSecondX.w(#CASES)
+Dim caseSecondY.w(#CASES)
+Dim caseSecondOn.w(#CASES)
+
+caseFirstX(1) = 32
+caseFirstY(1) = 10
+caseSecondX(1) = 32
+caseSecondY(1) = 17
+caseSecondOn(1) = True
+caseFirstX(2) = 32
+caseFirstY(2) = 17
+caseSecondX(2) = 32
+caseSecondY(2) = 10
+caseSecondOn(2) = True
+caseFirstX(3) = 32
+caseFirstY(3) = 10
+caseSecondX(3) = 32
+caseSecondY(3) = 10
+caseSecondOn(3) = True
+caseFirstX(4) = 30
+caseFirstY(4) = 10
+caseSecondX(4) = 34
+caseSecondY(4) = 14
+caseSecondOn(4) = True
+caseFirstX(5) = 32
+caseFirstY(5) = 10
+caseSecondX(5) = 0
+caseSecondY(5) = 0
+caseSecondOn(5) = False
+
+BitMap #PROOF_BM, #PROOF_W, #PROOF_H, 4
+BitMap #SOURCE_BM, 16, 8, 4
+
+BLITZ
+
+Buffer 0, 16384
+
+Use BitMap #SOURCE_BM
+Cls 0
+Boxf 0, 0, 15, 7, 15
+GetaShape #SHAPE_SOLID, 0, 0, 16, 8
+
+BBlitMode CookieMode
+For caseIndex.w = 1 To #CASES
+  Use BitMap #PROOF_BM
+  Cls 0
+  BBlit 0, #SHAPE_SOLID, caseFirstX(caseIndex), caseFirstY(caseIndex)
+  If caseSecondOn(caseIndex) = True Then BBlit 0, #SHAPE_SOLID, caseSecondX(caseIndex), caseSecondY(caseIndex)
+  UnBuffer 0
+  ; The bitmap's bytes a row (offset 0) and its plane pointers (from offset 8), as CheckWorldBitmaps{} reads them.
+  rowBytes.l = Peek.w(Addr BitMap(#PROOF_BM))
+  leftWords.l = 0
+  rowsLeft$ = ""
+  For rowIndex.w = 0 To #PROOF_H - 1
+    rowHasLeft.w = False
+    For planeIndex.w = 0 To 3
+      planeBase.l = Peek.l(Addr BitMap(#PROOF_BM) + 8 + planeIndex*4)
+      For wordIndex.w = 0 To #PROOF_W/16 - 1
+        If Peek.w(planeBase + rowIndex*rowBytes + wordIndex*2) <> 0
+          leftWords = leftWords + 1
+          rowHasLeft = True
+        EndIf
+      Next
+    Next
+    If rowHasLeft = True Then rowsLeft$ = rowsLeft$ + " " + Str$(rowIndex)
+  Next
+  caseWords(caseIndex) = leftWords
+  caseRows$(caseIndex) = rowsLeft$
+Next
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/unbuffer-order-results.txt")
+  FileOutput 0
+  NPrint "unbuffer-order: what UnBuffer leaves of two overlapping BBlits (16x8, pen 15, CookieMode, one buffer)"
+  NPrint "A clean case leaves 0 words. Words left mean the restore is not in the reverse of the save order."
+  NPrint ""
+  NPrint "case  first x,y  second x,y  words left  rows with something left"
+  For caseIndex = 1 To #CASES
+    Print caseIndex, "  ", caseFirstX(caseIndex), ",", caseFirstY(caseIndex), "  "
+    If caseSecondOn(caseIndex) = True
+      Print caseSecondX(caseIndex), ",", caseSecondY(caseIndex)
+    Else
+      Print "none"
+    EndIf
+    NPrint "  ", caseWords(caseIndex), "  ", caseRows$(caseIndex)
+  Next
+  CloseFile 0
+EndIf
+End

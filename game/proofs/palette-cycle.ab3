@@ -1,0 +1,463 @@
+;; palette-cycle.ab3 -- real palette cycling instead of tile variants and recoloured
+;; shape sets. Compile in UAE. Not part of the game. Proof for
+;; the main project's PALETTE note.
+;;
+;; What it proves
+;;   1. ONE pen (12) can carry the `?` block body, the floating coin and the HUD
+;;      coin icon, and rewriting that one palette entry every 8 ticks makes all
+;;      of them glint together, with nothing redrawn. The three tile variants in
+;;      the atlas (bodies in pens 4, 1 and 5) are not needed.
+;;   2. Mario in three dedicated pens (15 red-role, 13 skin-role, 14 brown-role)
+;;      can be Fire Mario or Starman Mario by writing those three palette
+;;      entries alone: no extra shape sets, nothing redrawn.
+;;   3. What it costs: the raster lines the palette update takes when it runs, on
+;;      the real two-list display (the HUD list carries the palette). Written to
+;;      palette-cycle-results.txt on exit.
+;;
+;; The assets are not remapped yet (the user is reworking the tiles). This proof
+;; recolours the loaded bitmaps at start instead: pen 4 to 12 in the `?` tile
+;; (atlas index 23) and the two coin tiles (52 and 55) and the HUD coin glyph, and
+;; Mario's 11, 2, 10 to 15, 13, 14. The pen colours are the the main project's PALETTE note map, set in
+;; code below, so the proof also checks that map.
+;;
+;; The cartridge's numbers (smbdis, ColorRotation and ColorRotatePalette): one
+;; colour, six steps, a step every 8 ticks: bright, bright, bright, mid, dark, mid.
+;; The Starman steps through four sprite palettes, one every 4 ticks.
+;;
+;; The first 900 frames run by themselves in three phases of 300: normal Mario with
+;; the cycle, Fire Mario with the cycle, Starman with the cycle. Then it is
+;; interactive.
+;;
+;; Keys   C cycle on or off   N normal Mario   F Fire Mario   S Starman   Esc quit
+;;
+;; What to look at
+;;   - The six `?` blocks, the six coins and the coin icon in the HUD band all
+;;     brighten and darken TOGETHER, three bright steps, then mid, dark, mid.
+;;   - The brick row and the ground do NOT change: they use other pens.
+;;   - Fire Mario: white where normal Mario is red, red where he is brown, same
+;;     skin. Starman: all three colours change, four palettes, fast.
+;;   - No tearing or flicker in the band or the world when the palette changes.
+;;   - Mario's shapes are the SAME shapes in every mode. Only pens 13 to 15 move.
+;;   - The results file: palette updates per phase and their cost in lines.
+
+WBStartup
+
+#RAW_KEY_ESC = $45
+#RAW_KEY_C     = $33
+#RAW_KEY_F     = $23
+#RAW_KEY_S     = $21
+#RAW_KEY_N     = $36
+
+#COPPER_COLORS = 16
+#COPPER_FLAGS  = $10014
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#WORLD_YPOS = 63
+#WORLD_H    = 240
+
+#TILE    = 16
+#VIEW_W  = 320
+#BM_W    = 336
+#ATLAS_W = 464
+#ATLAS_H = 96
+#ATLAS_COLS = 29
+#SHEET_W = 352
+#SMALL_W = 224
+#SMALL_H = 16
+#BIG_W   = 304
+#BIG_H   = 32
+
+;; The idle frame of both Mario sheets (#MARIO_F_IDLE).
+#IDLE_FRAME = 6
+
+;; Bitmaps: 0 world, 1 atlas, 2 HUD band, 3 HUD glyph sheet, 4 small Mario, 5 big Mario.
+#BM_WORLD = 0
+#BM_ATLAS = 1
+#BM_BAND  = 2
+#BM_SHEET = 3
+#BM_SMALL = 4
+#BM_BIG   = 5
+
+;; Shape slots.
+#SH_TILE  = 0
+#SH_SMALL = 1
+#SH_BIG   = 2
+#SH_GLYPH = 3
+
+;; The pen map under test (the main project's PALETTE note).
+#PEN_CYCLE       = 12
+#PEN_MARIO_SKIN  = 13
+#PEN_MARIO_BROWN = 14
+#PEN_MARIO_RED   = 15
+
+;; Atlas tile indices (GID - 1).
+#T_GROUND = 0
+#T_BRICK  = 1
+#T_QUEST  = 23
+#T_COIN_W = 52
+#T_COIN_N = 55
+
+;; HUD glyph cells.
+#G_X    = 37
+#G_COIN = 43
+
+#PHASE_FRAMES = 300
+
+;; To find a crash, set this and run again: 1 stops after the recolouring, 2 after
+;; the scene is drawn, 3 shows the static scene until Esc with no palette updates,
+;; 0 runs the whole proof.
+#STOP_AFTER = 0
+#PHASES       = 3
+#CYCLE_TICKS  = 8
+#STAR_TICKS   = 4
+#CYCLE_STEPS  = 6
+
+atlasIff$ = "sparky-dave:game/assets/tiles-all.iff"
+hudIff$ = "sparky-dave:game/assets/hud-objects.iff"
+smallIff$ = "sparky-dave:game/assets/mario-small.iff"
+bigIff$ = "sparky-dave:game/assets/mario-big.iff"
+
+quitFlag.w = False
+frames.l = 0
+cycleOn.w = True
+cycleStep.w = 0
+marioSet.w = 0
+paletteDirty.w = True
+cLock.w = False
+fLock.w = False
+sLock.w = False
+nLock.w = False
+foundAtlas.w = False
+foundHud.w = False
+foundSmall.w = False
+foundBig.w = False
+shownSet.w = -1
+
+;; Cycle colours, pen 12: bright (the atlas's pen 4), mid (pen 1), dark (pen 5).
+;; Step s, component c (0 red, 1 green, 2 blue) is cycleRGB(s*3 + c).
+Dim cycleRGB.w(17)
+;; Mario's three pens in each set: 0 normal, 1 fire, 2 to 5 the Starman's four.
+;; Roles: 0 red-role (pen 15), 1 skin-role (pen 13), 2 brown-role (pen 14).
+;; Set s, role r, component c is marioRGB(s*9 + r*3 + c).
+Dim marioRGB.w(53)
+
+;; Per phase statistics: updates, line sum, worst, and frames.
+Dim phaseUpdates.l(#PHASES)
+Dim phaseLineSum.l(#PHASES)
+Dim phaseLineMax.l(#PHASES)
+Dim phaseFrames.l(#PHASES)
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_WORLD, #BM_W, #WORLD_H, 4
+BitMap #BM_ATLAS, #ATLAS_W, #ATLAS_H, 4
+BitMap #BM_BAND, #VIEW_W + 16, #HUD_H, 4
+BitMap #BM_SHEET, #SHEET_W, 8, 4
+BitMap #BM_SMALL, #SMALL_W, #SMALL_H, 4
+BitMap #BM_BIG, #BIG_W, #BIG_H, 4
+InitPalette 0, #COPPER_COLORS
+InitShape #SH_TILE, #TILE, #TILE, 4
+InitShape #SH_SMALL, #TILE, #TILE, 4
+InitShape #SH_BIG, #TILE, #BIG_H, 4
+InitShape #SH_GLYPH, 8, 8, 4
+
+If Exists(atlasIff$) > 0
+  foundAtlas = True
+  LoadBitMap #BM_ATLAS, atlasIff$, 0
+EndIf
+If Exists(hudIff$) > 0
+  foundHud = True
+  LoadBitMap #BM_SHEET, hudIff$
+EndIf
+If Exists(smallIff$) > 0
+  foundSmall = True
+  LoadBitMap #BM_SMALL, smallIff$
+EndIf
+If Exists(bigIff$) > 0
+  foundBig = True
+  LoadBitMap #BM_BIG, bigIff$
+EndIf
+
+;; The new pens, over whatever the atlas CMAP put there (pens 12 to 15 are black,
+;; black, blue and tan in tiles-all.iff).
+AGAPalRGB 0, #PEN_CYCLE, 230, 156, 33
+AGAPalRGB 0, #PEN_MARIO_SKIN, 254, 205, 198
+AGAPalRGB 0, #PEN_MARIO_BROWN, 108, 110, 0
+AGAPalRGB 0, #PEN_MARIO_RED, 181, 50, 32
+
+;; =======================================================
+;; DISPLAY AND DRAWING (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+;; The pen tables. Statements exist only in Blitz mode, so these are here and not
+;; with the Dims above.
+Statement SetTricycle{stepIndex.w, redValue.w, greenValue.w, blueValue.w}
+  SHARED cycleRGB()
+  cycleRGB(stepIndex*3) = redValue
+  cycleRGB(stepIndex*3 + 1) = greenValue
+  cycleRGB(stepIndex*3 + 2) = blueValue
+End Statement
+
+;; One role of one Mario set.
+Statement SetMarioRole{setIndex.w, roleIndex.w, redValue.w, greenValue.w, blueValue.w}
+  SHARED marioRGB()
+  marioRGB(setIndex*9 + roleIndex*3) = redValue
+  marioRGB(setIndex*9 + roleIndex*3 + 1) = greenValue
+  marioRGB(setIndex*9 + roleIndex*3 + 2) = blueValue
+End Statement
+
+;; ColorRotatePalette: $27 $27 $27 $17 $07 $17, in the atlas's own colours for those.
+SetTricycle{0, 230, 156, 33}
+SetTricycle{1, 230, 156, 33}
+SetTricycle{2, 230, 156, 33}
+SetTricycle{3, 156, 74, 0}
+SetTricycle{4, 82, 33, 0}
+SetTricycle{5, 156, 74, 0}
+
+;; Normal: red, skin, olive. Fire (PlayerColors, smbdis 1450): white shirt, same skin,
+;; red overalls. The Starman's four sprite palettes (GroundPaletteData): the
+;; roles' colours all change, skin included.
+SetMarioRole{0, 0, 181, 50, 32}
+SetMarioRole{0, 1, 254, 205, 198}
+SetMarioRole{0, 2, 108, 110, 0}
+SetMarioRole{1, 0, 255, 255, 255}
+SetMarioRole{1, 1, 254, 205, 198}
+SetMarioRole{1, 2, 181, 50, 32}
+SetMarioRole{2, 0, 181, 50, 32}
+SetMarioRole{2, 1, 254, 205, 198}
+SetMarioRole{2, 2, 108, 110, 0}
+SetMarioRole{3, 0, 16, 148, 0}
+SetMarioRole{3, 1, 255, 255, 255}
+SetMarioRole{3, 2, 254, 205, 198}
+SetMarioRole{4, 0, 181, 50, 32}
+SetMarioRole{4, 1, 255, 255, 255}
+SetMarioRole{4, 2, 254, 205, 198}
+SetMarioRole{5, 0, 0, 0, 0}
+SetMarioRole{5, 1, 252, 188, 176}
+SetMarioRole{5, 2, 156, 74, 0}
+
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return(rawPosition AND $1ff00)/256
+End Function
+
+Statement ApplyDisplay{}
+  InitCopList 0, #HUD_YPOS, #HUD_H, #COPPER_FLAGS, 8, #COPPER_COLORS, 0
+  InitCopList 1, #WORLD_YPOS, #WORLD_H, #COPPER_FLAGS, 8, 0, 0
+  CreateDisplay 0, 1
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, #BM_BAND, 0, 0
+  DisplayBitMap 1, #BM_WORLD, 0, 0
+End Statement
+
+;; Recolour a rectangle of a loaded bitmap: every pixel of one pen becomes another.
+Statement RemapPen{bitmapNumber.w, x0.w, y0.w, areaW.w, areaH.w, fromPen.w, toPen.w}
+  Use BitMap bitmapNumber
+  For remapY.w = y0 To y0 + areaH - 1
+    For remapX.w = x0 To x0 + areaW - 1
+      If Point(remapX, remapY) = fromPen Then Plot remapX, remapY, toPen
+    Next
+  Next
+End Statement
+
+;; Mario's red, skin and brown pens to his own three.
+Statement RemapMario{bitmapNumber.w, sheetW.w, sheetH.w}
+  Use BitMap bitmapNumber
+  For remapY.w = 0 To sheetH - 1
+    For remapX.w = 0 To sheetW - 1
+      remapPen.w = Point(remapX, remapY)
+      If remapPen = 11 Then Plot remapX, remapY, #PEN_MARIO_RED
+      If remapPen = 2 Then Plot remapX, remapY, #PEN_MARIO_SKIN
+      If remapPen = 10 Then Plot remapX, remapY, #PEN_MARIO_BROWN
+    Next
+  Next
+End Statement
+
+Statement DrawTile{tileIndex.w, drawX.w, drawY.w}
+  Use BitMap #BM_ATLAS
+  GetaShape #SH_TILE, (tileIndex MOD #ATLAS_COLS)*#TILE, (tileIndex/#ATLAS_COLS)*#TILE, #TILE, #TILE
+  Use BitMap #BM_WORLD
+  Block #SH_TILE, drawX, drawY
+End Statement
+
+Statement DrawGlyph{glyphIndex.w, glyphX.w, glyphY.w}
+  Use BitMap #BM_SHEET
+  GetaShape #SH_GLYPH, glyphIndex*8, 0, 8, 8
+  Use BitMap #BM_BAND
+  Boxf glyphX, glyphY, glyphX + 7, glyphY + 7, 0
+  Blit #SH_GLYPH, glyphX, glyphY
+End Statement
+
+;; The scene. Static: after this nothing is redrawn, only the palette moves.
+Statement DrawScene{}
+  Use BitMap #BM_WORLD
+  Cls 0
+  For columnIndex.w = 0 To 19
+    DrawTile{#T_GROUND, columnIndex*#TILE, 208}
+    DrawTile{#T_GROUND, columnIndex*#TILE, 224}
+  Next
+  For brickIndex.w = 0 To 4
+    DrawTile{#T_BRICK, 192 + brickIndex*#TILE, 144}
+  Next
+  For questionIndex.w = 0 To 5
+    DrawTile{#T_QUEST, 32 + questionIndex*32, 64}
+  Next
+  For coinIndex.w = 0 To 5
+    If (coinIndex AND 1) = 0
+      DrawTile{#T_COIN_W, 48 + coinIndex*32, 112}
+    Else
+      DrawTile{#T_COIN_N, 48 + coinIndex*32, 112}
+    EndIf
+  Next
+  ;; Two small and two big Mario, all from the same two shapes.
+  Use BitMap #BM_SMALL
+  GetaShape #SH_SMALL, #IDLE_FRAME*#TILE, 0, #TILE, #TILE
+  Use BitMap #BM_BIG
+  GetaShape #SH_BIG, #IDLE_FRAME*#TILE, 0, #TILE, #BIG_H
+  Use BitMap #BM_WORLD
+  Blit #SH_SMALL, 24, 192
+  Blit #SH_SMALL, 56, 192
+  Blit #SH_BIG, 96, 176
+  Blit #SH_BIG, 128, 176
+  ;; The HUD band: the coin icon where the game has it, then a small x and 05.
+  Use BitMap #BM_BAND
+  Cls 0
+  DrawGlyph{#G_COIN, 48, 8}
+  DrawGlyph{#G_X, 56, 8}
+  DrawGlyph{0, 64, 8}
+  DrawGlyph{5, 72, 8}
+End Statement
+
+;; Once per tick, right after VWait. Writes only the entries that change, and
+;; calls DisplayPalette only when one did. The cycle moves every #CYCLE_TICKS ticks
+;; and the Starman's palette every #STAR_TICKS.
+Statement UpdatePalette{tick.l}
+  SHARED cycleOn, cycleStep, marioSet, paletteDirty, shownSet, cycleRGB(), marioRGB()
+  If cycleOn = True
+    If (tick MOD #CYCLE_TICKS) = 0
+      cycleStep = (cycleStep + 1) MOD #CYCLE_STEPS
+      AGAPalRGB 0, #PEN_CYCLE, cycleRGB(cycleStep*3), cycleRGB(cycleStep*3 + 1), cycleRGB(cycleStep*3 + 2)
+      paletteDirty = True
+    EndIf
+  EndIf
+  activeSet.w = marioSet
+  If marioSet = 2
+    activeSet = 2 + ((tick/#STAR_TICKS) AND 3)
+    If (tick MOD #STAR_TICKS) = 0 Then paletteDirty = True
+  Else
+    ;; A mode change: write its set once.
+    If marioSet <> shownSet Then paletteDirty = True
+  EndIf
+  If paletteDirty = True
+    AGAPalRGB 0, #PEN_MARIO_RED, marioRGB(activeSet*9), marioRGB(activeSet*9 + 1), marioRGB(activeSet*9 + 2)
+    AGAPalRGB 0, #PEN_MARIO_SKIN, marioRGB(activeSet*9 + 3), marioRGB(activeSet*9 + 4), marioRGB(activeSet*9 + 5)
+    AGAPalRGB 0, #PEN_MARIO_BROWN, marioRGB(activeSet*9 + 6), marioRGB(activeSet*9 + 7), marioRGB(activeSet*9 + 8)
+    shownSet = marioSet
+  EndIf
+End Statement
+
+;; Recolour the loaded art, draw the scene, bring the display up.
+If foundAtlas = True
+  RemapPen{#BM_ATLAS, (#T_QUEST MOD #ATLAS_COLS)*#TILE, (#T_QUEST/#ATLAS_COLS)*#TILE, #TILE, #TILE, 4, #PEN_CYCLE}
+  RemapPen{#BM_ATLAS, (#T_COIN_W MOD #ATLAS_COLS)*#TILE, (#T_COIN_W/#ATLAS_COLS)*#TILE, #TILE, #TILE, 4, #PEN_CYCLE}
+  RemapPen{#BM_ATLAS, (#T_COIN_N MOD #ATLAS_COLS)*#TILE, (#T_COIN_N/#ATLAS_COLS)*#TILE, #TILE, #TILE, 4, #PEN_CYCLE}
+EndIf
+If foundHud = True Then RemapPen{#BM_SHEET, #G_COIN*8, 0, 8, 8, 4, #PEN_CYCLE}
+If foundSmall = True Then RemapMario{#BM_SMALL, #SMALL_W, #SMALL_H}
+If foundBig = True Then RemapMario{#BM_BIG, #BIG_W, #BIG_H}
+
+If #STOP_AFTER = 1 Then End
+BlitMode CookieMode
+DrawScene{}
+If #STOP_AFTER = 2 Then End
+ApplyDisplay{}
+If #STOP_AFTER = 3
+  While RawStatus(#RAW_KEY_ESC) = 0
+    VWait
+  Wend
+  End
+EndIf
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  ;; Phase script for the first 900 frames, keys after.
+  If frames < #PHASE_FRAMES*#PHASES
+    phaseNow.w = frames/#PHASE_FRAMES
+    marioSet = 0
+    If phaseNow = 1 Then marioSet = 1
+    If phaseNow = 2 Then marioSet = 2
+    cycleOn = True
+  Else
+    phaseNow = -1
+    If RawStatus(#RAW_KEY_C)
+      If cLock = False
+        cLock = True
+        If cycleOn = True
+          cycleOn = False
+        Else
+          cycleOn = True
+        EndIf
+      EndIf
+    Else
+      cLock = False
+    EndIf
+    If RawStatus(#RAW_KEY_N) Then marioSet = 0
+    If RawStatus(#RAW_KEY_F) Then marioSet = 1
+    If RawStatus(#RAW_KEY_S) Then marioSet = 2
+  EndIf
+
+  VWait
+  frames = frames + 1
+  paletteDirty = False
+  lineBefore.l = RasterLine{}
+  UpdatePalette{frames}
+  If paletteDirty = True Then DisplayPalette 0, 0
+  lineAfter.l = RasterLine{}
+  If phaseNow >= 0
+    phaseFrames(phaseNow) = phaseFrames(phaseNow) + 1
+    If paletteDirty = True
+      segmentLines.l = lineAfter - lineBefore
+      If segmentLines < 0 Then segmentLines = segmentLines + 312
+      phaseUpdates(phaseNow) = phaseUpdates(phaseNow) + 1
+      phaseLineSum(phaseNow) = phaseLineSum(phaseNow) + segmentLines
+      If segmentLines > phaseLineMax(phaseNow) Then phaseLineMax(phaseNow) = segmentLines
+    EndIf
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/palette-cycle-results.txt")
+  FileOutput 0
+  NPrint "palette-cycle"
+  NPrint "A raster line is about 63.5 microseconds. A PAL frame is 312 lines."
+  If foundAtlas = True
+    NPrint "atlas iff found"
+  Else
+    NPrint "atlas iff NOT found"
+  EndIf
+  If foundSmall = True AND foundBig = True
+    NPrint "mario sheets found"
+  Else
+    NPrint "a mario sheet NOT found"
+  EndIf
+  NPrint ""
+  NPrint "                         frames  updates  average lines  worst lines  average us"
+  For resultPhase.w = 0 To #PHASES - 1
+    If resultPhase = 0 Then phaseName$ = "cycle, normal Mario   "
+    If resultPhase = 1 Then phaseName$ = "cycle, Fire Mario     "
+    If resultPhase = 2 Then phaseName$ = "cycle, Starman        "
+    If phaseUpdates(resultPhase) > 0
+      NPrint phaseName$, phaseFrames(resultPhase), "  ", phaseUpdates(resultPhase), "  ", phaseLineSum(resultPhase)/phaseUpdates(resultPhase), "  ", phaseLineMax(resultPhase), "  ", (phaseLineSum(resultPhase)/phaseUpdates(resultPhase))*127/2
+    Else
+      NPrint phaseName$, phaseFrames(resultPhase), "  0 updates"
+    EndIf
+  Next
+  CloseFile 0
+EndIf
+End

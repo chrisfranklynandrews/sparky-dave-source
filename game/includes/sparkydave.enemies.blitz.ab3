@@ -1,0 +1,1511 @@
+;; =======================================================
+;; ENEMIES (BLITZ MODE)
+;; =======================================================
+;; What the walkers share, and the Koopa Troopa. The Goomba's own walk and squash
+;; stay in UpdateObjects{} (sparkydave.object-system-runtime.blitz.ab3).
+;;
+;; THE KOOPA, from the cartridge (smbdis 11376-11520, 9293-9360, 11552-11700):
+;;   walking   Stomped (Mario moving down onto it) it becomes a shell: the stomp
+;;             chain goes up, the number shows, Mario bounces, and the revive timer
+;;             starts at #KOOPA_REVIVE_INTERVALS. Touched any other way it hurts
+;;             Mario. It does not turn at a ledge (a green Koopa; a red one would).
+;;   shell     Stands still. ANY touch kicks it, from any side and even from above:
+;;             it slides away from Mario at #SHELL_SPEED. The number is 3 plus the
+;;             stomp chain (400, 500, ...), or, with under 3 intervals left, 8000,
+;;             1000 or 500. When the timer reaches 0 it is a walking Koopa again.
+;;   kicked    Slides, turns at a wall, falls off a ledge, hurts Mario on contact,
+;;             and kills every Goomba and Koopa it touches (chain 500, 800, 1000,
+;;             2000, ...). Stomped it stops, as a shell.
+;;   knocked   Upside down, thrown up and sideways, falling out of the level.
+;; A touch is handled once per overlap (the d0 collision bit, objTouch): a Mario
+;; who kicks a shell is not then hurt by it while he still overlaps it.
+
+;; Sideways by speed16 sixteenths of a pixel; the whole pixels at once and the
+;; rest carried, so half a pixel a tick is a pixel every other tick.
+Statement MoveEnemyX{slot.w, speed16.w}
+  SHARED objX(), objFractionX()
+  stepSize.w = speed16
+  If stepSize < 0 Then stepSize = -stepSize
+  objFractionX(slot) = objFractionX(slot) + stepSize
+  wholePx.w = objFractionX(slot)/16
+  objFractionX(slot) = objFractionX(slot) - wholePx*16
+  If speed16 < 0
+    objX(slot) = objX(slot) - wholePx
+  Else
+    objX(slot) = objX(slot) + wholePx
+  EndIf
+End Statement
+
+;; Gravity on a slot's vertical speed (1/256 pixels a tick, up is negative), the
+;; whole pixels applied and the remainder carried either way.
+Statement ApplyEnemyGravity{slot.w, gravity.w, fallMax.w}
+  SHARED objY(), objVelY(), objFractionY()
+  objVelY(slot) = objVelY(slot) + gravity
+  If objVelY(slot) > fallMax Then objVelY(slot) = fallMax
+  wholePx.w = objVelY(slot)/256
+  objFractionY(slot) = objFractionY(slot) + (objVelY(slot) - wholePx*256)
+  objY(slot) = objY(slot) + wholePx
+  If objFractionY(slot) >= 256
+    objY(slot) = objY(slot) + 1
+    objFractionY(slot) = objFractionY(slot) - 256
+  EndIf
+  If objFractionY(slot) < 0
+    objY(slot) = objY(slot) - 1
+    objFractionY(slot) = objFractionY(slot) + 256
+  EndIf
+End Statement
+
+;; Stand on the floor if the foot probe, at the middle of the sprite, is in a solid
+;; cell: snap to its top and stop falling. True when standing.
+Function.w EnemyLand{slot.w, enemyHeight.w}
+  SHARED objX(), objY(), objVelY(), objFractionY()
+  footRow.w = (objY(slot) + enemyHeight)/#TILE
+  If footRow >= #MAP_H Then Function Return False
+  If EnemyMetatileAt{objX(slot) + 8, objY(slot) + enemyHeight} <> #MT_EMPTY
+    objY(slot) = footRow*#TILE - enemyHeight
+    objVelY(slot) = 0
+    objFractionY(slot) = 0
+    Function Return True
+  EndIf
+  Function Return False
+End Function
+
+;; ShellOrBlockDefeat (smbdis 11172): the enemy is thrown up and away from Mario and
+;; takes no further part. It falls out of the level, upside down.
+Statement KnockEnemy{slot.w}
+  SHARED objState(), objVelX(), objVelY(), objFractionY(), objX(), objY(), objType(), playerX
+  ; A plant is put 24 px lower first (ShellOrBlockDefeat, 11172), so it falls into its pipe.
+  If objType(slot) = #OBJ_PIRANHA Then objY(slot) = objY(slot) + #PLANT_RISE
+  objState(slot) = #KOOPA_ST_KNOCKED
+  SoundSquare1{#SFX_ENEMY_SMACK}
+  ;; A flying Cheep-Cheep is stunned (SetStun, smbdis 12466): 2 px up, a speed up of #FLY_CHEEP_STUN_SPEED (its 256ths as they were),
+  ;; and it falls straight down (UpdateFlyCheep{}).
+  If objType(slot) = #OBJ_FLY_CHEEP
+    objY(slot) = objY(slot) - 2
+    objVelY(slot) = #FLY_CHEEP_STUN_SPEED
+    Statement Return
+  EndIf
+  ; A Bloober is stunned instead (SetStun): 2 px up, its fall from speed -1 straight down (UpdateBloober{}).
+  If objType(slot) = #OBJ_BLOOBER OR objType(slot) = #OBJ_CHEEP
+    objY(slot) = objY(slot) - 2
+    objVelY(slot) = #BLOOBER_STUN_SPEED
+    objVelX(slot) = 0
+    objFractionY(slot) = 0
+    Statement Return
+  EndIf
+  objVelY(slot) = #KNOCK_SPEED_Y
+  objFractionY(slot) = 0
+  If objX(slot) > playerX
+    objVelX(slot) = #KNOCK_SPEED_X
+  Else
+    objVelX(slot) = -#KNOCK_SPEED_X
+  EndIf
+End Statement
+
+Statement UpdateKnocked{slot.w}
+  SHARED objX(), objY(), objVelX(), cameraX
+  MoveEnemyX{slot, objVelX(slot)}
+  ApplyEnemyGravity{slot, #KNOCK_GRAVITY, #KNOCK_FALL_MAX}
+  If objY(slot) > #MAP_H*#TILE OR objX(slot) < cameraX - 64
+    PoolFree{slot}
+  EndIf
+End Statement
+
+;; The points for the n-th thing a sliding shell has killed: the chain starts at
+;; index 4 (500) and goes up the score table, capped at the 1-UP.
+Function.w ShellKillIndex{killCount.w}
+  killIndex.w = killCount + 4
+  If killIndex > #FLOATER_ONEUP_INDEX Then killIndex = #FLOATER_ONEUP_INDEX
+  Function Return killIndex
+End Function
+
+;; The box a shell or a fireball can hit on this slot, in enemyBox*: the whole 16x16
+;; of a walking Goomba, the Koopa's own box. False for anything already finished (a
+;; squashed Goomba, a knocked-off enemy) and for what is not an enemy.
+Function.w EnemyHitBox{slot.w}
+  SHARED objType(), objState(), objX(), objY()
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If objType(slot) = #OBJ_GOOMBA
+    If objState(slot) <> 0 Then Function Return False
+    enemyBoxLeft = objX(slot)
+    enemyBoxRight = objX(slot) + #GOOMBA_W - 1
+    enemyBoxTop = objY(slot)
+    enemyBoxBottom = objY(slot) + #GOOMBA_H - 1
+    Function Return True
+  EndIf
+  If objType(slot) = #OBJ_KOOPA
+    If objState(slot) = #KOOPA_ST_KNOCKED Then Function Return False
+    enemyBoxLeft = objX(slot) + #KOOPA_BOX_LEFT
+    enemyBoxRight = objX(slot) + #KOOPA_BOX_RIGHT
+    enemyBoxTop = objY(slot) + #KOOPA_BOX_TOP
+    enemyBoxBottom = objY(slot) + #KOOPA_BOX_BOTTOM
+    Function Return True
+  EndIf
+  Function Return False
+End Function
+
+;; A sliding shell against the other enemies, every tick: whatever it overlaps that
+;; is not already finished is knocked off, with a number.
+Statement ShellHitsEnemies{shell.w}
+  SHARED objActive(), objX(), objY(), objPopTimer()
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  shellLeft.w = objX(shell) + #KOOPA_BOX_LEFT
+  shellRight.w = objX(shell) + #KOOPA_BOX_RIGHT
+  shellTop.w = objY(shell) + #KOOPA_BOX_TOP
+  shellBottom.w = objY(shell) + #KOOPA_BOX_BOTTOM
+  For otherSlot = 0 To #MAX_OBJECTS - 1
+    If otherSlot <> shell AND objActive(otherSlot) = True
+      If EnemyHitBox{otherSlot} = True
+        If shellRight >= enemyBoxLeft AND shellLeft <= enemyBoxRight
+          If shellBottom >= enemyBoxTop AND shellTop <= enemyBoxBottom
+            KnockEnemy{otherSlot}
+            killIndex.w = ShellKillIndex{objPopTimer(shell)}
+            SpawnFloater{objX(otherSlot), objY(otherSlot), killIndex}
+            objPopTimer(shell) = objPopTimer(shell) + 1
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; A block hit from below, for what stands on it (smbdis 7261 writes a blank metatile $23
+;; into the block's cell for the hit, whether it bumps or breaks; an enemy or power-up whose
+;; ground probe finds it, HandleEToBGCollision, 12433 to 12470, is bumped). Every kind ends
+;; in SetStun (12470 to 12490): the object is lifted 2 px, given vertical speed $fd (three
+;; pixels a tick up, the jump) and sent sideways at $10 AWAY FROM MARIO (the side it is on
+;; of him, not simply reversed: one moving away from him keeps going). In the air it keeps
+;; moving sideways (a mushroom through MoveNormalEnemy's SteadM) and falls under the usual
+;; gravity. Then, by kind:
+;;   - a Goomba is also knocked off dead (KillEnemyAboveBlock, 12686) with its 100;
+;;   - a Koopa that is walking becomes a shell, a shell or a kicked shell stays one; each
+;;     gives 100 (GiveOEPoints, 12452). It is drawn upside down from the bump (the
+;;     cartridge's state 2, then 3 once landed; right side up only for a stomped shell,
+;;     state 4, 13722) and stays so if it is kicked; it gets up when its timer ends;
+;;   - a mushroom, a 1-UP and a star jump and move away and give no points (an object
+;;     past $15 skips them, 12447); the flower, which has no movement code, only ends up
+;;     2 px higher.
+;; "Standing on it": the probe is the object's middle, and its feet at the cell's top.
+;; Called from UpdateObjects{} for the cell a hit left in bumpObjectCell.
+Statement BumpObjectsOn{bumpCell.w}
+  SHARED objActive(), objType(), objState(), objX(), objY(), objVelY(), objVelX(), objDir()
+  SHARED objAux(), objPopTimer(), objFractionX(), objFractionY(), objRiseRemaining(), playerX, objFlipped()
+  cellLeft.w = (bumpCell MOD #MAP_W)*#TILE
+  cellTop.w = (bumpCell/#MAP_W)*#TILE
+  For bumpSlot = 0 To #MAX_OBJECTS - 1
+    If objActive(bumpSlot) = True
+      standingHeight.w = 0
+      halfWidth.w = 0
+      If objType(bumpSlot) = #OBJ_GOOMBA
+        If objState(bumpSlot) = 0
+          standingHeight = #GOOMBA_H
+          halfWidth = #GOOMBA_W/2
+        EndIf
+      EndIf
+      If objType(bumpSlot) = #OBJ_KOOPA
+        If objState(bumpSlot) <> #KOOPA_ST_KNOCKED
+          standingHeight = #KOOPA_H
+          halfWidth = #KOOPA_W/2
+        EndIf
+      EndIf
+      If objType(bumpSlot) = #OBJ_MUSHROOM OR objType(bumpSlot) = #OBJ_FLOWER OR objType(bumpSlot) = #OBJ_STAR
+        If objRiseRemaining(bumpSlot) = 0
+          standingHeight = #ITEM_H
+          halfWidth = #ITEM_W/2
+        EndIf
+      EndIf
+      If standingHeight > 0
+        footY.w = objY(bumpSlot) + standingHeight
+        centreX.w = objX(bumpSlot) + halfWidth
+        If centreX >= cellLeft AND centreX < cellLeft + #TILE AND footY >= cellTop - 2 AND footY <= cellTop + 2
+          ; Away from Mario: the object to his right goes right (PlayerEnemyDiff, 12482).
+          awayDirection.w = #MARIO_BTN_LEFT
+          awaySpeed.w = -#BUMP_THROW_SPEED_X
+          If objX(bumpSlot) >= playerX
+            awayDirection = #MARIO_BTN_RIGHT
+            awaySpeed = #BUMP_THROW_SPEED_X
+          EndIf
+          objY(bumpSlot) = objY(bumpSlot) - 2
+          If objType(bumpSlot) = #OBJ_GOOMBA
+            KnockEnemy{bumpSlot}
+            objVelX(bumpSlot) = awaySpeed
+            SpawnFloater{objX(bumpSlot), objY(bumpSlot), 1}
+          EndIf
+          If objType(bumpSlot) = #OBJ_KOOPA
+            objVelY(bumpSlot) = #BUMP_JUMP_SPEED_Y
+            objFractionY(bumpSlot) = 0
+            ; Over on its back, in the air and as it lands, until it gets up.
+            objFlipped(bumpSlot) = True
+            If objState(bumpSlot) = #KOOPA_ST_WALK
+              objState(bumpSlot) = #KOOPA_ST_SHELL
+              objAux(bumpSlot) = #KOOPA_REVIVE_INTERVALS
+              objPopTimer(bumpSlot) = 0
+            EndIf
+            If objState(bumpSlot) = #KOOPA_ST_SHELL
+              objVelX(bumpSlot) = awaySpeed
+              objFractionX(bumpSlot) = 0
+            Else
+              objDir(bumpSlot) = awayDirection
+            EndIf
+            SpawnFloater{objX(bumpSlot), objY(bumpSlot), 1}
+          EndIf
+          If objType(bumpSlot) = #OBJ_MUSHROOM OR objType(bumpSlot) = #OBJ_STAR
+            objVelY(bumpSlot) = #BUMP_JUMP_SPEED_Y
+            objFractionY(bumpSlot) = 0
+            objDir(bumpSlot) = awayDirection
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; A Goomba or Koopa that can turn round on meeting another: walking (a Koopa also lying
+;; as a shell), not finished, and wholly on screen (EnemiesCollision, smbdis 11551, skips
+;; an enemy with any offscreen bits).
+Function.w TurnCandidate{slot.w}
+  SHARED objActive(), objType(), objState(), objX(), cameraX, objWinged()
+  If objActive(slot) = False Then Function Return False
+  If objX(slot) < cameraX OR objX(slot) + #TILE > cameraX + #VIEW_W Then Function Return False
+  If objType(slot) = #OBJ_GOOMBA
+    If objState(slot) = 0 Then Function Return True
+  EndIf
+  If objType(slot) = #OBJ_KOOPA
+    ; Not a flying Red Paratroopa: EnemyTurnAround leaves every id from $07 alone but the Spiny and the green hopper.
+    If objWinged(slot) = #WINGS_FLY Then Function Return False
+    If objState(slot) = #KOOPA_ST_WALK OR objState(slot) = #KOOPA_ST_SHELL Then Function Return True
+  EndIf
+  Function Return False
+End Function
+
+;; Enemies walking into each other turn round (EnemiesCollision, smbdis 11551, and
+;; ProcEnemyCollisions to EnemyTurnAround, 11638 to 11695: both are reversed). Every other
+;; tick; the pair that overlaps turns once, and not again until they have parted
+;; (Enemy_CollisionBits). A sliding shell is not here: it kills what it meets
+;; (ShellHitsEnemies{}).
+Statement EnemiesTurnAround{}
+  SHARED objDir(), enemyPairTouch(), simTickCounter, turnCandidateSlot()
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If (simTickCounter AND 1) = 0 Then Statement Return
+  ;; The slots that can turn, once, then the pairs among them only, in slot order: asking about every slot from every
+  ;; other slot is most of the object time when the pool has twelve (the lifts and the plants fill it, and are not candidates).
+  candidateCount.w = 0
+  For candidateSlot.w = 0 To #MAX_OBJECTS - 1
+    If TurnCandidate{candidateSlot} = True
+      turnCandidateSlot(candidateCount) = candidateSlot
+      candidateCount = candidateCount + 1
+    EndIf
+  Next
+  If candidateCount < 2 Then Statement Return
+  For firstIndex.w = 0 To candidateCount - 2
+    firstSlot.w = turnCandidateSlot(firstIndex)
+    If EnemyHitBox{firstSlot} = True
+      firstLeft.w = enemyBoxLeft
+      firstRight.w = enemyBoxRight
+      firstTop.w = enemyBoxTop
+      firstBottom.w = enemyBoxBottom
+      For secondIndex.w = firstIndex + 1 To candidateCount - 1
+        secondSlot.w = turnCandidateSlot(secondIndex)
+        If EnemyHitBox{secondSlot} = True
+          pairIndex.w = firstSlot*#MAX_OBJECTS + secondSlot
+          If firstRight >= enemyBoxLeft AND firstLeft <= enemyBoxRight AND firstBottom >= enemyBoxTop AND firstTop <= enemyBoxBottom
+            If enemyPairTouch(pairIndex) = False
+              enemyPairTouch(pairIndex) = True
+              objDir(firstSlot) = Xor(objDir(firstSlot), #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+              objDir(secondSlot) = Xor(objDir(secondSlot), #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+            EndIf
+          Else
+            enemyPairTouch(pairIndex) = False
+          EndIf
+        EndIf
+      Next
+    EndIf
+  Next
+End Statement
+
+;; Gravity on a flying Cheep-Cheep, as the cartridge's ImposeGravity (smbdis 7704) exactly: the y moves by the speed and the carry of its
+;; own 256ths (objRiseStep, which take the speed's 256ths), then the speed's 256ths (objFractionY) take the force and carry into the
+;; speed (objVelY, whole pixels), which is held at fallMax once its 256ths are past a half.
+Statement FlyCheepGravity{slot.w, force.w, fallMax.w}
+  SHARED objY(), objVelY(), objFractionY(), objRiseStep()
+  objRiseStep(slot) = objRiseStep(slot) + objFractionY(slot)
+  positionCarry.w = 0
+  If objRiseStep(slot) >= 256
+    objRiseStep(slot) = objRiseStep(slot) - 256
+    positionCarry = 1
+  EndIf
+  objY(slot) = objY(slot) + objVelY(slot) + positionCarry
+  objFractionY(slot) = objFractionY(slot) + force
+  If objFractionY(slot) >= 256
+    objFractionY(slot) = objFractionY(slot) - 256
+    objVelY(slot) = objVelY(slot) + 1
+  EndIf
+  If objVelY(slot) >= fallMax AND objFractionY(slot) >= 128
+    objVelY(slot) = fallMax
+    objFractionY(slot) = 0
+  EndIf
+End Statement
+
+;; ImposeGravity's other half (smbdis 7704, its direction 1): the down force first, as FlyCheepGravity{}, then the up force taken off the
+;; speed's 256ths, borrowing from the speed, which is held at minus the cap (its 256ths 255) once they are under a half.
+Statement SwingGravity{slot.w, downForce.w, upForce.w, maxSpeed.w}
+  SHARED objVelY(), objFractionY()
+  FlyCheepGravity{slot, downForce, maxSpeed}
+  objFractionY(slot) = objFractionY(slot) - upForce
+  If objFractionY(slot) < 0
+    objFractionY(slot) = objFractionY(slot) + 256
+    objVelY(slot) = objVelY(slot) - 1
+  EndIf
+  If objVelY(slot) < -maxSpeed AND objFractionY(slot) < 128
+    objVelY(slot) = -maxSpeed
+    objFractionY(slot) = 255
+  EndIf
+End Statement
+
+;; One tick of a swing about a centre (YMovingPlatform, smbdis 10896; ProcMoveRedPTroopa, 9377; checked against
+;; tools/record/swing_model.py): with no speed and no 256ths and above its top (objStartY) it creeps down a pixel every eighth tick, its y's own
+;; 256ths cleared; otherwise it is pulled down while above its centre (objRiseTarget) and up from it on. The y is compared as one byte.
+Statement StepSwing{slot.w, downForce.w, upForce.w, maxSpeed.w}
+  SHARED objY(), objVelY(), objFractionY(), objRiseStep(), objStartY(), objRiseTarget(), simTickCounter
+  If objVelY(slot) = 0 AND objFractionY(slot) = 0
+    objRiseStep(slot) = 0
+    If (objY(slot) AND 255) < objStartY(slot)
+      If (simTickCounter AND #SWING_CREEP_MASK) = 0 Then objY(slot) = objY(slot) + 1
+      Statement Return
+    EndIf
+  EndIf
+  If (objY(slot) AND 255) < objRiseTarget(slot)
+    FlyCheepGravity{slot, downForce, maxSpeed}
+  Else
+    SwingGravity{slot, downForce, upForce, maxSpeed}
+  EndIf
+End Statement
+
+;; The stomp (HandleStompedShellE, smbdis 11499): a shell, the chain up, its number,
+;; the timer, Mario's bounce.
+Statement StompKoopa{slot.w}
+  SHARED objState(), objAux(), objPopTimer(), objX(), objY(), objFractionX()
+  SHARED stompChain, playerSpeedY, playerOnGround
+  SHARED objWinged(), objVelY(), objFractionY(), objDir(), playerX
+  playerOnGround = False
+  ;; A Paratroopa loses its wings and walks on (ChkForDemoteKoopa, 11481): 400 and no chain, turned to face Mario (EnemyFacePlayer),
+  ;; and Mario bounces.
+  If objWinged(slot) <> 0
+    objWinged(slot) = 0
+    objVelY(slot) = 0
+    objFractionY(slot) = 0
+    objDir(slot) = #MARIO_BTN_RIGHT
+    If objX(slot) > playerX Then objDir(slot) = #MARIO_BTN_LEFT
+    SoundSquare1{#SFX_ENEMY_STOMP}
+    SpawnFloater{objX(slot), objY(slot), #PARATROOPA_DEMOTE_FLOATER}
+    playerSpeedY = #STOMP_BOUNCE_SPEED_Y
+    Statement Return
+  EndIf
+  stompChain = stompChain + 1
+  SoundSquare1{#SFX_ENEMY_STOMP}
+  objState(slot) = #KOOPA_ST_SHELL
+  objAux(slot) = #KOOPA_REVIVE_INTERVALS
+  objPopTimer(slot) = 0
+  objFractionX(slot) = 0
+  SpawnFloater{objX(slot), objY(slot), stompChain}
+  playerSpeedY = #STOMP_BOUNCE_SPEED_Y
+End Statement
+
+;; The kick (smbdis 11360-11375): away from Mario, with the number from the stomp
+;; chain, or by how close the revive timer is to running out.
+Statement KickShell{slot.w}
+  SHARED objState(), objAux(), objPopTimer(), objDir(), objX(), objY(), playerX, stompChain
+  kickIndex.w = 3 + stompChain
+  If kickIndex > #FLOATER_ONEUP_INDEX Then kickIndex = #FLOATER_ONEUP_INDEX
+  If objAux(slot) < 3
+    kickIndex = 4
+    If objAux(slot) = 1 Then kickIndex = 6
+    If objAux(slot) = 0 Then kickIndex = 10
+  EndIf
+  objState(slot) = #KOOPA_ST_KICKED
+  SoundSquare1{#SFX_ENEMY_SMACK}
+  objPopTimer(slot) = 0
+  If objX(slot) > playerX
+    objDir(slot) = #MARIO_BTN_RIGHT
+  Else
+    objDir(slot) = #MARIO_BTN_LEFT
+  EndIf
+  SpawnFloater{objX(slot), objY(slot), kickIndex}
+End Statement
+
+;; Benchmark scene (the main project's TIMING note): a kicked shell and five Goombas in its path,
+;; ahead of Mario on his ground, so the busiest thing a sliding shell can make is one
+;; key press away (F3, from ReadControls{}). Mario's feet are at playerY + 16 for either
+;; size; a Goomba's y is its top (16 px tall), a Koopa's (24 px).
+Statement SpawnShellChainBench{}
+  SHARED playerX, playerY, coverKind, objState(), objDir()
+  If coverKind <> #COVER_NONE Then Statement Return
+  shellX.w = playerX + 40
+  koopaSlot.w = PoolAlloc{}
+  If koopaSlot = -1 Then Statement Return
+  PoolInitKoopa{koopaSlot, shellX, playerY + #TILE - 24}
+  objState(koopaSlot) = #KOOPA_ST_KICKED
+  objDir(koopaSlot) = #MARIO_BTN_RIGHT
+  For benchIndex = 0 To 4
+    goombaSlot.w = PoolAlloc{}
+    If goombaSlot <> -1 Then PoolInitGoomba{goombaSlot, shellX + 56 + benchIndex*24, playerY}
+  Next
+End Statement
+
+;; Mario against a Koopa or shell: once per overlap, in the normal player state, on
+;; the ticks #CONTACT_EVERY_OTHER_TICK allows, for a Koopa on screen (the same gates
+;; as the Goomba's).
+Statement KoopaContact{slot.w}
+  SHARED objX(), objY(), objState(), objDir(), objTouch(), objWinged()
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerSpeedY, playerX, playerState, playerInjuryIntervals, simTickCounter, cameraX
+  SHARED playerStarIntervals
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  If objX(slot) + #KOOPA_W <= cameraX Then Statement Return
+  If objX(slot) >= cameraX + #VIEW_W Then Statement Return
+  touching.w = False
+  If boundBoxRight >= objX(slot) + #KOOPA_BOX_LEFT AND boundBoxLeft <= objX(slot) + #KOOPA_BOX_RIGHT
+    If boundBoxBottom >= objY(slot) + #KOOPA_BOX_TOP AND boundBoxTop <= objY(slot) + #KOOPA_BOX_BOTTOM
+      touching = True
+    EndIf
+  EndIf
+  If touching = False
+    objTouch(slot) = False
+    Statement Return
+  EndIf
+  ;; A Starman Mario knocks off whatever he touches, a standing shell too (EColl,
+  ;; smbdis 11321: the star test comes before the kick and the stomp), with a 200.
+  If playerStarIntervals > 0
+    KnockEnemy{slot}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    Statement Return
+  EndIf
+  If objTouch(slot) = True Then Statement Return
+  objTouch(slot) = True
+  If objState(slot) = #KOOPA_ST_SHELL
+    KickShell{slot}
+    Statement Return
+  EndIf
+  If playerSpeedY > 0
+    StompKoopa{slot}
+    Statement Return
+  EndIf
+  If playerInjuryIntervals = 0
+    ; A flying Red Paratroopa is not turned (EnemyTurnAround: ids from $07 are left alone).
+    If objState(slot) = #KOOPA_ST_WALK AND objWinged(slot) <> #WINGS_FLY
+      If playerX < objX(slot)
+        objDir(slot) = #MARIO_BTN_LEFT
+      Else
+        objDir(slot) = #MARIO_BTN_RIGHT
+      EndIf
+    EndIf
+    InjurePlayer{}
+  EndIf
+End Statement
+
+; A Koopa's walk (or a Paratroopa's flap) one tick on: the frame flips every #GOOMBA_ANIM_SPEED ticks.
+Statement KoopaAnimStep{slot.w}
+  SHARED objAnimTimer(), objAnimFrame()
+  objAnimTimer(slot) = objAnimTimer(slot) + 1
+  If objAnimTimer(slot) >= #GOOMBA_ANIM_SPEED
+    objAnimTimer(slot) = 0
+    objAnimFrame(slot) = 1 - objAnimFrame(slot)
+  EndIf
+End Statement
+
+;; Erased 72 px beyond either edge of the screen (OffscreenBoundsCheck, smbdis 11006), or fallen out of the world: True if it went,
+;; so a shell sent off to the right is gone before it reaches Goombas not yet woken.
+Function.w KoopaCulled{slot.w}
+  SHARED objX(), objY(), cameraX
+  If objY(slot) > #MAP_H*#TILE OR objX(slot) < cameraX - 72 OR objX(slot) > cameraX + #VIEW_W + 72
+    PoolFree{slot}
+    Function Return True
+  EndIf
+  Function Return False
+End Function
+
+; One tick of a Koopa in any state, from UpdateObjects{}.
+Statement UpdateKoopa{slot.w}
+  SHARED objX(), objY(), objState(), objDir(), objAux(), objAnimTimer(), objAnimFrame()
+  SHARED objVelY(), objVelX(), simTickCounter, cameraX, objFlipped(), objRed(), objGrounded(), objWinged()
+  ; A bump that turned it over took the wings (the cartridge's SetStun demotes it); a knocked one never had them again.
+  If objState(slot) <> #KOOPA_ST_WALK Then objWinged(slot) = 0
+  If objState(slot) = #KOOPA_ST_KNOCKED
+    UpdateKnocked{slot}
+    Statement Return
+  EndIf
+  ;; A Red Paratroopa flies up and down about its centre and nothing else (ProcMoveRedPTroopa is the whole of its move, and the cartridge
+  ;; runs no ground or wall check for it); it flaps as a walker walks.
+  If objWinged(slot) = #WINGS_FLY
+    StepSwing{slot, #RED_PARA_DOWN_FORCE, #RED_PARA_UP_FORCE, #RED_PARA_SPEED_MAX}
+    KoopaAnimStep{slot}
+    If KoopaCulled{slot} = True Then Statement Return
+    KoopaContact{slot}
+    Statement Return
+  EndIf
+  If objState(slot) = #KOOPA_ST_WALK OR objState(slot) = #KOOPA_ST_KICKED
+    moveSpeed.w = #ENEMY_WALK_SPEED
+    If objState(slot) = #KOOPA_ST_KICKED Then moveSpeed = #SHELL_SPEED
+    If objDir(slot) = #MARIO_BTN_LEFT Then moveSpeed = -moveSpeed
+    MoveEnemyX{slot, moveSpeed}
+    If objDir(slot) = #MARIO_BTN_RIGHT
+      wallX.w = objX(slot) + #KOOPA_W
+    Else
+      wallX = objX(slot) - 1
+    EndIf
+    If EnemyMetatileAt{wallX, objY(slot) + #KOOPA_WALL_PROBE_Y} <> #MT_EMPTY
+      objDir(slot) = Xor(objDir(slot), #MARIO_BTN_LEFT + #MARIO_BTN_RIGHT)
+    EndIf
+  EndIf
+  ; A shell thrown by a bump (BumpObjectsOn{}) slides sideways while it is in the air.
+  If objState(slot) = #KOOPA_ST_SHELL AND objVelX(slot) <> 0 Then MoveEnemyX{slot, objVelX(slot)}
+  ;; A Red Koopa that is walking and has landed turns round where there is no ground under it instead of falling (the
+  ;; cartridge's ChkForRedKoopa, 12572: normal state, nothing under its feet at its middle). Any other state, or one still
+  ;; falling from where it was built, falls as a green one does.
+  If objState(slot) <> #KOOPA_ST_WALK Then objGrounded(slot) = False
+  ;; A Paratroopa hops: gravity as the Starman's, and it bounces off what it lands on once it is falling by a pixel a tick or more
+  ;; (EnemyJump, 12661), never settling.
+  If objWinged(slot) = #WINGS_HOP
+    ApplyEnemyGravity{slot, #PARATROOPA_GRAVITY, #PARATROOPA_FALL_MAX}
+    If objVelY(slot) >= #PARATROOPA_LAND_SPEED
+      If EnemyLand{slot, #KOOPA_H} <> False Then objVelY(slot) = #PARATROOPA_BOUNCE_VY
+    EndIf
+  Else
+  If EnemyLand{slot, #KOOPA_H} = False
+    ;; Towards the foot that has ground, not simply reversed: at under a pixel a tick it is still past the edge on the next
+    ;; tick, and a plain reversal flipped it back and forth in place. With ground under neither foot (what it stood on is
+    ;; gone) there is nothing to turn towards, and it falls.
+    leftGround.w = #MT_EMPTY
+    rightGround.w = #MT_EMPTY
+    redLedge.w = False
+    If objRed(slot) = #RED_TURNS AND objGrounded(slot) <> False AND objState(slot) = #KOOPA_ST_WALK
+      leftGround = EnemyMetatileAt{objX(slot), objY(slot) + #KOOPA_H}
+      rightGround = EnemyMetatileAt{objX(slot) + #KOOPA_W - 1, objY(slot) + #KOOPA_H}
+      If leftGround <> #MT_EMPTY OR rightGround <> #MT_EMPTY Then redLedge = True
+    EndIf
+    If redLedge <> False
+      If leftGround <> #MT_EMPTY
+        objDir(slot) = #MARIO_BTN_LEFT
+      Else
+        objDir(slot) = #MARIO_BTN_RIGHT
+      EndIf
+    Else
+      ApplyEnemyGravity{slot, #GOOMBA_GRAVITY, #GOOMBA_FALL_MAX}
+    EndIf
+  Else
+    If objState(slot) = #KOOPA_ST_SHELL Then objVelX(slot) = 0
+    If objState(slot) = #KOOPA_ST_WALK Then objGrounded(slot) = True
+  EndIf
+  EndIf
+  If objState(slot) = #KOOPA_ST_WALK Then KoopaAnimStep{slot}
+  ; The timer has run out: walking again, in a direction taken from the tick.
+  If objState(slot) = #KOOPA_ST_SHELL
+    If objAux(slot) = 0
+      objFlipped(slot) = False
+      objState(slot) = #KOOPA_ST_WALK
+      objDir(slot) = #MARIO_BTN_LEFT
+      If (simTickCounter AND 1) = 0 Then objDir(slot) = #MARIO_BTN_RIGHT
+    EndIf
+  EndIf
+  If objState(slot) = #KOOPA_ST_KICKED Then ShellHitsEnemies{slot}
+  If KoopaCulled{slot} = True Then Statement Return
+  KoopaContact{slot}
+End Statement
+
+;; THE PIRANHA PLANT, from the cartridge (smbdis 8814 InitPiranhaPlant, 10577 MovePiranhaPlant, 11330 the injury):
+;;   It sits in its pipe and, when Mario is not within #PLANT_NEAR pixels across of it (either side, so not while he stands on
+;;   or beside the pipe), rises #PLANT_RISE pixels at #ENEMY_WALK_SPEED, waits #PLANT_WAIT_TICKS, sinks, waits, and tries
+;;   again. Touching it, at any height of its box, hurts Mario: there is no stomp. A fireball or the Starman knocks it off
+;;   (200, its sprite first put 24 px lower, so it falls into its pipe); a shell does not touch it.
+;;   objStartY is where it sits down, objVelY its direction (1 down), objTouch the cartridge's movement flag, objAux the pause.
+
+; The plant's box, in enemyBox*, for a fireball: False once it has been knocked off.
+Function.w SmallBoxHitBox{slot.w}
+  SHARED objX(), objY(), objState()
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If objState(slot) = #KOOPA_ST_KNOCKED Then Function Return False
+  enemyBoxLeft = objX(slot) + #SMALL_BOX_LEFT
+  enemyBoxRight = objX(slot) + #SMALL_BOX_RIGHT
+  enemyBoxTop = objY(slot) + #SMALL_BOX_TOP
+  enemyBoxBottom = objY(slot) + #SMALL_BOX_BOTTOM
+  Function Return True
+End Function
+
+;; Mario against one of the small-box enemies (a plant, a Bloober, a Cheep-Cheep): the Koopa's gates (the normal player state, the
+;; ticks #CONTACT_EVERY_OTHER_TICK allows, the enemy on screen), then the Starman knocks it off and anything else hurts him. There is no
+;; stomp: a plant has none, and in a water area nothing has (HandlePECollisions, smbdis 11330).
+Statement SmallBoxContact{slot.w}
+  SHARED objX(), objY(), boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerInjuryIntervals, simTickCounter, cameraX, playerStarIntervals
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  If objX(slot) + #TILE <= cameraX Then Statement Return
+  If objX(slot) >= cameraX + #VIEW_W Then Statement Return
+  If SmallBoxHitBox{slot} = False Then Statement Return
+  If boundBoxRight < enemyBoxLeft OR boundBoxLeft > enemyBoxRight Then Statement Return
+  If boundBoxBottom < enemyBoxTop OR boundBoxTop > enemyBoxBottom Then Statement Return
+  If playerStarIntervals > 0
+    KnockEnemy{slot}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    Statement Return
+  EndIf
+  If playerInjuryIntervals = 0 Then InjurePlayer{}
+End Statement
+
+; One tick of a plant, from UpdateObjects{}.
+Statement UpdatePiranha{slot.w}
+  SHARED objX(), objY(), objState(), objVelY(), objAux(), objStartY(), objTouch(), objFractionY(), playerX, cameraX
+  If objState(slot) = #KOOPA_ST_KNOCKED
+    UpdateKnocked{slot}
+    Statement Return
+  EndIf
+  If objAux(slot) > 0 Then objAux(slot) = objAux(slot) - 1
+  If objAux(slot) = 0
+    ; At an end with its pause over: it goes if it is at the top, or at the bottom and Mario is not near.
+    If objTouch(slot) = False
+      mayGo.w = True
+      If objVelY(slot) > 0
+        plantDistance.w = playerX - objX(slot)
+        If plantDistance < 0 Then plantDistance = -plantDistance
+        If plantDistance < #PLANT_NEAR Then mayGo = False
+      EndIf
+      If mayGo = True
+        objVelY(slot) = -objVelY(slot)
+        objTouch(slot) = True
+        objFractionY(slot) = 0
+      EndIf
+    EndIf
+    If objTouch(slot) = True
+      objFractionY(slot) = objFractionY(slot) + #ENEMY_WALK_SPEED
+      plantStep.w = objFractionY(slot)/16
+      objFractionY(slot) = objFractionY(slot) - plantStep*16
+      objY(slot) = objY(slot) + objVelY(slot)*plantStep
+      plantArrived.w = False
+      If objVelY(slot) < 0
+        If objY(slot) <= objStartY(slot) - #PLANT_RISE
+          objY(slot) = objStartY(slot) - #PLANT_RISE
+          plantArrived = True
+        EndIf
+      Else
+        If objY(slot) >= objStartY(slot)
+          objY(slot) = objStartY(slot)
+          plantArrived = True
+        EndIf
+      EndIf
+      If plantArrived = True
+        objTouch(slot) = False
+        objAux(slot) = #PLANT_WAIT_TICKS
+      EndIf
+    EndIf
+  EndIf
+  ;; Erased 16 px left of the screen (OffscreenBoundsCheck, 11014: a plant's margin is 56 px less than the others'), never
+  ;; on the right.
+  If objX(slot) < cameraX - 16
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  SmallBoxContact{slot}
+End Statement
+
+;; THE BLOOBER, from the cartridge (smbdis 9468 MoveBloober, 9520 ProcSwimmingB, 11330 HandlePECollisions, 11172
+;; ShellOrBlockDefeat, 7635 MoveEnemySlowVert; the constants' block says the numbers):
+;;   swim      every #BLOOBER_SWIM_TICKS ticks its climb speeds up by 1 to #BLOOBER_SWIM_TOP, then slows by 1 to 0; each tick it
+;;             climbs by that (not above #BLOOBER_TOP_Y) and goes the same sideways. Then it floats down a pixel every other tick
+;;             for #BLOOBER_FLOAT_INTERVALS intervals and on while it is more than #BLOOBER_NEAR_Y above Mario (the cartridge's y,
+;;             16 above this game's playerY), and swims again.
+;;   aim       on a tick its random bits (the register's byte after its slot's own, as the cartridge's PseudoRandomBitReg+1,x;
+;;             this game's pool is wider, so its slot's low two bits) are all clear under #BLOOBER_AIM_MASK: in an odd slot it takes
+;;             Mario's moving direction, in an even one it heads toward him.
+;;   touch     in a water area any touch hurts Mario (no stomp): the Starman beats it (SmallBoxContact{}, the plant's).
+;;   beaten    a fireball or the Starman: 200, then it falls slowly out of the level, upside down.
+;; A beaten Bloober or Cheep-Cheep (MoveEnemySlowVert): straight down, slowly, out of the world. True if it is beaten (and has moved).
+Function.w BeatenSwimmerFalls{slot.w}
+  SHARED objState(), objY()
+  If objState(slot) <> #KOOPA_ST_KNOCKED Then Function Return False
+  ApplyEnemyGravity{slot, #BLOOBER_FALL_FORCE, #BLOOBER_FALL_MAX}
+  If objY(slot) > #MAP_H*#TILE Then PoolFree{slot}
+  Function Return True
+End Function
+
+; One tick of a swimming Cheep-Cheep, from UpdateObjects{} (MoveSwimmingCheepCheep, smbdis 9595). Its touch and its fall are the Bloober's.
+Statement UpdateCheep{slot.w}
+  SHARED objX(), objY(), objState(), objVelY(), objAux(), objStartY(), objFractionX(), objFractionY(), objRed(), cameraX
+  If BeatenSwimmerFalls{slot} = True Then Statement Return
+  ; Left: the speed's 256ths taken from the carried force, a pixel for each borrow.
+  cheepSpeed.w = #CHEEP_SPEED_GREY
+  If objRed(slot) <> 0 Then cheepSpeed = #CHEEP_SPEED_RED
+  objFractionX(slot) = objFractionX(slot) - cheepSpeed
+  If objFractionX(slot) < 0
+    objFractionX(slot) = objFractionX(slot) + 256
+    objX(slot) = objX(slot) - 1
+  EndIf
+  ;; A bobbing one: a pixel each time the bob's 256ths carry, up or down, turning once it is #CHEEP_BOB_RANGE from where it came in
+  ;; (below that: up; above: down).
+  If objAux(slot) <> 0
+    objFractionY(slot) = objFractionY(slot) + #CHEEP_BOB_SPEED
+    If objFractionY(slot) >= 256
+      objFractionY(slot) = objFractionY(slot) - 256
+      If objVelY(slot) <> 0
+        objY(slot) = objY(slot) + 1
+      Else
+        objY(slot) = objY(slot) - 1
+      EndIf
+    EndIf
+    bobOffset.w = objY(slot) - objStartY(slot)
+    bobWay.w = 0
+    If bobOffset < 0
+      bobWay = 1
+      bobOffset = -bobOffset
+    EndIf
+    If bobOffset >= #CHEEP_BOB_RANGE Then objVelY(slot) = bobWay
+  EndIf
+  ; Erased once it is well left of the view (OffscreenBoundsCheck); it comes in from the right.
+  If objX(slot) < cameraX - #BLOOBER_ERASE_MARGIN
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  SmallBoxContact{slot}
+End Statement
+
+;; Mario against a flying Cheep-Cheep (PlayerEnemyCollision, smbdis 11293): the small-box gates, and not until it is wholly above the
+;; screen's bottom (EnemyOffscrBitsMasked). The Starman knocks it off; a stomp (Mario moving down, or his cartridge y, playerY less 16,
+;; #FLY_CHEEP_STOMP_REACH above its y: ChkInj, for the enemies from the Bloober on) is 200, fixed, with the stomp sound, and it is
+;; stunned with its speeds cleared (EnemyStomped, 11439) and Mario bounces at #FLY_CHEEP_STOMP_BOUNCE; any other touch hurts him.
+Statement FlyCheepContact{slot.w}
+  SHARED objX(), objY(), objState(), objVelX(), objVelY(), objFractionY(), boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerInjuryIntervals, simTickCounter, cameraX, playerStarIntervals, playerSpeedY, playerY, playerOnGround
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  If objY(slot) > #FLY_CHEEP_SHOWN_Y Then Statement Return
+  If objX(slot) + #TILE <= cameraX Then Statement Return
+  If objX(slot) >= cameraX + #VIEW_W Then Statement Return
+  If SmallBoxHitBox{slot} = False Then Statement Return
+  If boundBoxRight < enemyBoxLeft OR boundBoxLeft > enemyBoxRight Then Statement Return
+  If boundBoxBottom < enemyBoxTop OR boundBoxTop > enemyBoxBottom Then Statement Return
+  If playerStarIntervals > 0
+    KnockEnemy{slot}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    Statement Return
+  EndIf
+  If playerSpeedY > 0 OR playerY - 16 + #FLY_CHEEP_STOMP_REACH < objY(slot)
+    objState(slot) = #KOOPA_ST_KNOCKED
+    objY(slot) = objY(slot) - 2
+    objVelX(slot) = 0
+    objVelY(slot) = 0
+    objFractionY(slot) = 0
+    SoundSquare1{#SFX_ENEMY_STOMP}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    playerOnGround = False
+    playerSpeedY = #FLY_CHEEP_STOMP_BOUNCE
+    Statement Return
+  EndIf
+  If playerInjuryIntervals = 0 Then InjurePlayer{}
+End Statement
+
+;; One tick of a flying Cheep-Cheep, from UpdateObjects{}, in the cartridge's order (RunNormalEnemies): erased once below the screen
+;; (EnemyGfxHandler, before it moves; never sideways, OffscreenBoundsCheck skips it); not moved on the tick it came; its touch on Mario;
+;; then its move (MoveFlyingCheepCheep, smbdis 9922). Beaten, it falls straight down (MoveJ_EnemyVertically). Alive: sideways by its
+;; speed in sixteenths (MoveObjectHorizontally: the whole part rounded down, so -14 from nothing is a pixel left and 2 carried), gravity,
+;; then the nudge: within 8 px of the height its speed's 256ths pick (flyCheepNudgeHeight), those 256ths gain #FLY_CHEEP_NUDGE, no carry.
+Statement UpdateFlyCheep{slot.w}
+  SHARED objX(), objY(), objState(), objVelX(), objFractionX(), objFractionY(), objPopTimer(), flyCheepNudgeHeight()
+  If objY(slot) >= #FLY_CHEEP_ERASE_Y
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  If objPopTimer(slot) <> 0
+    objPopTimer(slot) = 0
+    Statement Return
+  EndIf
+  If objState(slot) <> #KOOPA_ST_KNOCKED Then FlyCheepContact{slot}
+  If objState(slot) = #KOOPA_ST_KNOCKED
+    FlyCheepGravity{slot, #FLY_CHEEP_BEATEN_FORCE, #FLY_CHEEP_BEATEN_MAX}
+    Statement Return
+  EndIf
+  stepTotal.w = objFractionX(slot) + objVelX(slot)
+  If stepTotal >= 0
+    stepWhole.w = stepTotal/16
+  Else
+    stepWhole = -((15 - stepTotal)/16)
+  EndIf
+  objFractionX(slot) = stepTotal - stepWhole*16
+  objX(slot) = objX(slot) + stepWhole
+  FlyCheepGravity{slot, #FLY_CHEEP_GRAVITY, #FLY_CHEEP_FALL_MAX}
+  nudgeDistance.w = ((objY(slot) AND 255) - flyCheepNudgeHeight(objFractionY(slot)/16)) AND 255
+  If nudgeDistance >= 128 Then nudgeDistance = (256 - nudgeDistance) AND 255
+  If nudgeDistance < 8 Then objFractionY(slot) = (objFractionY(slot) + #FLY_CHEEP_NUDGE) AND 255
+End Statement
+
+;; A firebar's spin, one tick (FirebarSpin, smbdis 10639, and ProcFirebar's mask): its speed onto the spin state's low byte (off it, for
+;; the counter-clockwise kinds), the carry into the high byte, five bits kept; the long bar steps over the level states 8 and 24.
+Statement SpinFirebar{slot.w}
+  SHARED objAux(), objVelX(), objVelY(), firebarSpeed(), firebarWay()
+  firebarKind.w = objAux(slot)
+  If firebarWay(firebarKind) = 0
+    spinTotal.w = objVelX(slot) + firebarSpeed(firebarKind)
+    objVelX(slot) = spinTotal AND 255
+    objVelY(slot) = objVelY(slot) + spinTotal/256
+  Else
+    spinTotal = objVelX(slot) - firebarSpeed(firebarKind)
+    If spinTotal < 0
+      objVelX(slot) = spinTotal + 256
+      objVelY(slot) = objVelY(slot) - 1
+    Else
+      objVelX(slot) = spinTotal
+    EndIf
+  EndIf
+  objVelY(slot) = objVelY(slot) AND 31
+  If firebarKind = #FIREBAR_LONG
+    If objVelY(slot) = 8 OR objVelY(slot) = 24 Then objVelY(slot) = objVelY(slot) + 1
+  EndIf
+End Statement
+
+;; A part's offset from a firebar's centre at a spin state, into firebarBallX and firebarBallY (GetFirebarPosition): the angle's low four
+;; bits folded into one quadrant (9 and up count back down) for x, the same eight on for y, each looked up in the part's row of
+;; firebarTable(), and the quarter turn's mirroring for their signs.
+Statement FirebarBallOffset{spinHigh.w, part.w}
+  SHARED firebarOffsetX(), firebarOffsetY(), firebarBallX, firebarBallY
+  offsetIndex.w = (spinHigh AND 31)*#FIREBAR_LONG_PARTS + part
+  firebarBallX = firebarOffsetX(offsetIndex)
+  firebarBallY = firebarOffsetY(offsetIndex)
+End Statement
+
+;; Does a ball of this firebar touch Mario (FirebarCollision, smbdis 9797)? Each ball, the centre's first, within 8 px both ways of his x
+;; + 4 and a point of him: his cartridge y (playerY less 16, the top of his 32 px) plus 24 small or crouching, or plus 0, 12 and 24 big.
+;; Not a ball at the screen's far right (its x 240 or more from the view's left, as the cartridge skips).
+Function.w FirebarTouchesMario{slot.w}
+  SHARED objX(), objY(), objAux(), objVelY(), playerX, playerY, playerIsBig, cameraX, firebarOffsetX(), firebarOffsetY()
+  partCount.w = #FIREBAR_SHORT_PARTS
+  If objAux(slot) = #FIREBAR_LONG Then partCount = #FIREBAR_LONG_PARTS
+  marioTopY.w = playerY - 16
+  ;; Nowhere near: no ball reaches past (parts + 1) * 8 from the centre, and a touch is within 8 more of his x + 4 and of his points
+  ;; (his cartridge y to 24 below it). Most ticks stop here.
+  barReach.w = partCount*8 + 16
+  centreGap.w = playerX + 4 - objX(slot)
+  If centreGap >= barReach OR centreGap <= -barReach Then Function Return False
+  If marioTopY - objY(slot) >= barReach OR objY(slot) - marioTopY - 24 >= barReach Then Function Return False
+  firstPoint.w = 0
+  If playerIsBig = False Then firstPoint = 2
+  If playerIsBig = True
+    If BigStanding{} = False Then firstPoint = 2
+  EndIf
+  offsetBase.w = (objVelY(slot) AND 31)*#FIREBAR_LONG_PARTS
+  For partIndex.w = -1 To partCount - 1
+    ballLeft.w = objX(slot)
+    ballTop.w = objY(slot)
+    If partIndex >= 0
+      ballLeft = ballLeft + firebarOffsetX(offsetBase + partIndex)
+      ballTop = ballTop + firebarOffsetY(offsetBase + partIndex)
+    EndIf
+    If ballLeft - cameraX < 240
+      gapX.w = playerX + 4 - ballLeft
+      If gapX < 0 Then gapX = -gapX
+      If gapX < 8
+        For pointIndex.w = firstPoint To 2
+          gapY.w = marioTopY + pointIndex*12 - ballTop
+          If gapY < 0 Then gapY = -gapY
+          If gapY < 8 Then Function Return True
+        Next
+      EndIf
+    EndIf
+  Next
+  Function Return False
+End Function
+
+;; One tick of a firebar, from UpdateObjects{} (RunFirebarObj, ProcFirebar): erased #FIREBAR_ERASE_MARGIN out of the view either side
+;; (OffscreenBoundsCheck), its spin, then its balls against Mario, who is hurt by a touch (not while the Starman lasts, nor out of the
+;; normal player state; FirebarCollision then InjurePlayer). UpdateObjects{} does not run while the world is held (TimerControl).
+Statement UpdateFirebar{slot.w}
+  SHARED objX(), cameraX, playerStarIntervals, playerState, playerInjuryIntervals
+  If objX(slot) < cameraX - #FIREBAR_ERASE_MARGIN OR objX(slot) > cameraX + #VIEW_W + #FIREBAR_ERASE_MARGIN
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  SpinFirebar{slot}
+  If playerStarIntervals > 0 OR playerState <> #PLAYER_ST_FREE OR playerInjuryIntervals > 0 Then Statement Return
+  If FirebarTouchesMario{slot} = True Then InjurePlayer{}
+End Statement
+
+;; Mario against a Podoboo (PlayerEnemyCollision, smbdis 11293): the small-box gates, and not until it is wholly above the screen's
+;; bottom (EnemyOffscrBitsMasked) nor while it is knocked (state d5). The Starman knocks it (ShellOrBlockDefeat: SetStun's 2 px up and
+;; speed, 200, the smack); otherwise any touch hurts him (no stomp).
+Statement PodobooContact{slot.w}
+  SHARED objX(), objY(), objState(), objVelY(), boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerInjuryIntervals, simTickCounter, cameraX, playerStarIntervals
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If objState(slot) = #KOOPA_ST_KNOCKED Then Statement Return
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  If objY(slot) > #FLY_CHEEP_SHOWN_Y Then Statement Return
+  If objX(slot) + #TILE <= cameraX Then Statement Return
+  If objX(slot) >= cameraX + #VIEW_W Then Statement Return
+  If SmallBoxHitBox{slot} = False Then Statement Return
+  If boundBoxRight < enemyBoxLeft OR boundBoxLeft > enemyBoxRight Then Statement Return
+  If boundBoxBottom < enemyBoxTop OR boundBoxTop > enemyBoxBottom Then Statement Return
+  If playerStarIntervals > 0
+    objState(slot) = #KOOPA_ST_KNOCKED
+    objY(slot) = objY(slot) - 2
+    objVelY(slot) = #PODOBOO_STUN_SPEED
+    SoundSquare1{#SFX_ENEMY_SMACK}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    Statement Return
+  EndIf
+  If playerInjuryIntervals = 0 Then InjurePlayer{}
+End Statement
+
+;; One tick of a Podoboo, from UpdateObjects{} (MovePodoboo, smbdis 9187): erased #FIREBAR_ERASE_MARGIN out of the view either side
+;; (never below the screen: EnemyGfxHandler spares it); its touch on Mario; then, its interval timer out, it starts again below the screen
+;; (InitPodoboo: back from a knock too) and leaps: the speed #PODOBOO_LAUNCH, the 256ths from the register's byte after its slot's own
+;; with d7 set, the next wait that byte's low four bits ORed with #PODOBOO_MIN_INTERVALS (6, 7, 14 or 15); and every tick, that one too, the gravity.
+Statement UpdatePodoboo{slot.w}
+  SHARED objX(), objY(), objState(), objVelY(), objFractionY(), objPopTimer(), objRiseStep(), randomBits(), cameraX
+  If objX(slot) < cameraX - #FIREBAR_ERASE_MARGIN OR objX(slot) > cameraX + #VIEW_W + #FIREBAR_ERASE_MARGIN
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  PodobooContact{slot}
+  If objPopTimer(slot) = 0
+    leapByte.w = randomBits(1 + (slot AND 3)) OR $80
+    objState(slot) = 0
+    objY(slot) = #PODOBOO_WAIT_Y
+    objFractionY(slot) = (leapByte*#PODOBOO_FORCE_TIMES)/5 - #PODOBOO_FORCE_LESS
+    objPopTimer(slot) = (leapByte AND 15) OR #PODOBOO_MIN_INTERVALS
+    objVelY(slot) = #PODOBOO_LAUNCH
+  EndIf
+  FlyCheepGravity{slot, #PODOBOO_FORCE, #PODOBOO_FALL_MAX}
+End Statement
+
+;; One half of Bowser's box (control $0a), into enemyBox*: the front (halfIndex 0) at his x and y, the rear (1) #BOWSER_HALF_W behind it
+;; (to the right facing left) and #BOWSER_REAR_DROP lower. False once he has been knocked.
+Function.w BowserHalfBox{slot.w, halfIndex.w}
+  SHARED objX(), objY(), objDir(), objState(), enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If objState(slot) <> 0 Then Function Return False
+  halfX.w = objX(slot)
+  halfY.w = objY(slot)
+  If halfIndex = 1
+    halfY = halfY + #BOWSER_REAR_DROP
+    If objDir(slot) = #MARIO_BTN_RIGHT
+      halfX = halfX - #BOWSER_HALF_W
+    Else
+      halfX = halfX + #BOWSER_HALF_W
+    EndIf
+  EndIf
+  enemyBoxLeft = halfX + #BOWSER_BOX_LEFT
+  enemyBoxRight = halfX + #BOWSER_BOX_RIGHT
+  enemyBoxTop = halfY + #BOWSER_BOX_TOP
+  enemyBoxBottom = halfY + #BOWSER_BOX_BOTTOM
+  Function Return True
+End Function
+
+;; A fireball on Bowser (HurtBowser, smbdis 11143): a hit point off; at none he is beaten: the world's own enemy in his place
+;; (BowserIdentities: world 2's a Koopa; only the Goomba and the Koopa are built, so the others are a Koopa too), knocked off, rising a
+;; little, with 5000 and his fall's sound.
+Statement BowserHit{slot.w}
+  SHARED objX(), objY(), objState(), objVelX(), objVelY(), objFractionY(), bowserHitPoints, tableLevelWorld(), currentLevel
+  bowserHitPoints = bowserHitPoints - 1
+  If bowserHitPoints > 0 Then Statement Return
+  beatenX.w = objX(slot)
+  beatenY.w = objY(slot)
+  If tableLevelWorld(currentLevel) = 1
+    PoolInitGoomba{slot, beatenX, beatenY}
+    objState(slot) = #GOOMBA_ST_KNOCKED
+  Else
+    PoolInitKoopa{slot, beatenX, beatenY}
+    objState(slot) = #KOOPA_ST_KNOCKED
+  EndIf
+  objVelX(slot) = 0
+  objVelY(slot) = #BOWSER_KOOPA_SPEED
+  objFractionY(slot) = 0
+  SpawnFloater{beatenX, beatenY, 9}
+  SoundSquare2{#SFX_BOWSER_FALL}
+End Statement
+
+; A flame's box (control $08), into enemyBox*; none once the Starman has hit it.
+Function.w FlameHitBox{slot.w}
+  SHARED objX(), objY(), objState(), enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If objState(slot) <> 0 Then Function Return False
+  enemyBoxLeft = objX(slot) + #FLAME_BOX_LEFT
+  enemyBoxRight = objX(slot) + #FLAME_BOX_RIGHT
+  enemyBoxTop = objY(slot) + #FLAME_BOX_TOP
+  enemyBoxBottom = objY(slot) + #FLAME_BOX_BOTTOM
+  Function Return True
+End Function
+
+;; Mario against a flame (PlayerEnemyCollision): on the ticks #CONTACT_EVERY_OTHER_TICK allows, once it is wholly in the view; the Starman
+;; puts it out (ShellOrBlockDefeat: 200, the smack; it goes on unseen), else a touch hurts (an id of $15 and up).
+Statement FlameContact{slot.w}
+  SHARED objX(), objY(), objState(), boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerInjuryIntervals, simTickCounter, cameraX, playerStarIntervals
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  If objX(slot) < cameraX OR objX(slot) + #FLAME_W > cameraX + #VIEW_W Then Statement Return
+  If FlameHitBox{slot} = False Then Statement Return
+  If boundBoxRight < enemyBoxLeft OR boundBoxLeft > enemyBoxRight Then Statement Return
+  If boundBoxBottom < enemyBoxTop OR boundBoxTop > enemyBoxBottom Then Statement Return
+  If playerStarIntervals > 0
+    objState(slot) = #KOOPA_ST_KNOCKED
+    SoundSquare1{#SFX_ENEMY_SMACK}
+    SpawnFloater{objX(slot), objY(slot), 2}
+    Statement Return
+  EndIf
+  If playerInjuryIntervals = 0 Then InjurePlayer{}
+End Statement
+
+;; One tick of a flame, from UpdateObjects{} (ProcBowserFlame): left by a pixel and #FLAME_FORCE 256ths (a pixel more when its force
+;; borrows), toward its height by its step (on the ticks #FLAME_STEP_RATE 64ths reach a whole step, never past it), erased once well out
+;; of the view (OffscreenBoundsCheck), then Mario.
+Statement UpdateFlame{slot.w}
+  SHARED objX(), objY(), objAux(), objVelY(), objFractionX(), simTickCounter, cameraX
+  objFractionX(slot) = objFractionX(slot) - #FLAME_FORCE
+  objX(slot) = objX(slot) - 1
+  If objFractionX(slot) < 0
+    objFractionX(slot) = objFractionX(slot) + 256
+    objX(slot) = objX(slot) - 1
+  EndIf
+  stepCount.w = ((simTickCounter + 1)*#FLAME_STEP_RATE)/64 - (simTickCounter*#FLAME_STEP_RATE)/64
+  While stepCount > 0 AND objVelY(slot) <> 0 AND objY(slot) <> objAux(slot)
+    objY(slot) = objY(slot) + objVelY(slot)
+    stepCount = stepCount - 1
+  Wend
+  If objX(slot) + #FLAME_W < cameraX - #FLAME_ERASE_MARGIN OR objX(slot) > cameraX + #VIEW_W + #FLAME_ERASE_MARGIN
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  FlameContact{slot}
+End Statement
+
+;; Mario against Bowser, after he has moved (BowserGfxHandler's ProcessBowserHalf, then PlayerEnemyCollision, smbdis 11293): each half's
+;; box in turn, on the ticks #CONTACT_EVERY_OTHER_TICK allows; the Starman knocks him off (ShellOrBlockDefeat: 2 px up, his knock's speed,
+;; 200, the smack), else any touch hurts Mario (an id of $15 and up: no stomp).
+Statement BowserContact{slot.w}
+  SHARED objX(), objY(), objState(), objVelY(), objFractionY(), boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerInjuryIntervals, simTickCounter, playerStarIntervals
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  If playerState <> #PLAYER_ST_FREE Then Statement Return
+  If #CONTACT_EVERY_OTHER_TICK = 1
+    If (simTickCounter AND 1) <> 0 Then Statement Return
+  EndIf
+  For halfIndex.w = 0 To 1
+    If BowserHalfBox{slot, halfIndex} = True
+      If boundBoxRight >= enemyBoxLeft AND boundBoxLeft <= enemyBoxRight AND boundBoxBottom >= enemyBoxTop AND boundBoxTop <= enemyBoxBottom
+        If playerStarIntervals > 0
+          objState(slot) = #KOOPA_ST_KNOCKED
+          objY(slot) = objY(slot) - 2
+          objVelY(slot) = #BOWSER_STUN_SPEED
+          objFractionY(slot) = 0
+          SoundSquare1{#SFX_ENEMY_SMACK}
+          SpawnFloater{objX(slot), objY(slot), 2}
+        Else
+          If playerInjuryIntervals = 0 Then InjurePlayer{}
+        EndIf
+        Statement Return
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; One tick of Bowser, from UpdateObjects{} (RunBowser, BowserControl, smbdis 10134). His frame timers count down first. Knocked by the
+;; Starman he falls (MoveD_Bowser), and once below #BOWSER_FALLEN_Y every object goes and the fire is over (KillAllEnemies). Else, mouth shut:
+;; his feet's timer; on every sixteenth frame he faces left; while his frame timer runs and Mario is to his right he turns to chase him
+;; (speed 2, both timers #BOWSER_CHASE_TICKS), but not past #BOWSER_PACE_LIMIT in his page; on every fourth frame he paces by his speed,
+;; choosing how far afresh at his start, and facing left turns back that far from it. Then the jump: his timer at 1, he leaps; at 0 he
+;; falls (MoveEnemySlowVert), and on the bridge (#BOWSER_GROUND_Y) waits again (bowserWait()). Then the mouth: the fire breath's timer
+;; out, the mouth opens for #BOWSER_MOUTH_TICKS, then shuts, the next wait from NextFlameWait{}, and a flame is due (UpdateFlameFrenzy{}).
+;; Then Mario.
+Statement UpdateBowser{slot.w}
+  SHARED objX(), objY(), objDir(), objAux(), objPopTimer(), objState(), objVelY(), objFractionY(), randomBits(), simTickCounter
+  SHARED playerX, bowserOrigX, bowserMaxRange, bowserFeetCounter, bowserBodyControls, bowserFireBreathTimer, bowserFlameTimerCtrl
+  SHARED bowserWait(), bowserRange(), tableLevelWorld(), currentLevel, frenzyKind
+  If objPopTimer(slot) > 0 Then objPopTimer(slot) = objPopTimer(slot) - 1
+  If bowserFireBreathTimer > 0 Then bowserFireBreathTimer = bowserFireBreathTimer - 1
+  If objState(slot) = #KOOPA_ST_KNOCKED
+    If objY(slot) >= #BOWSER_FALLEN_Y
+      KillAllEnemies{}
+      Statement Return
+    EndIf
+    FlyCheepGravity{slot, #BOWSER_FORCE, #BOWSER_FALL_MAX}
+    Statement Return
+  EndIf
+  ; A flame is queued only on the tick his mouth shuts (BowserControl empties EnemyFrenzyBuffer every frame, the fire frenzy's too).
+  If frenzyKind = #FRENZY_KIND_FLAME Then frenzyKind = #FRENZY_KIND_STOP
+  randomByte.w = randomBits(slot AND 3)
+  If (bowserBodyControls AND 128) = 0
+    bowserFeetCounter = bowserFeetCounter - 1
+    If bowserFeetCounter <= 0
+      bowserFeetCounter = #BOWSER_FEET_TICKS
+      bowserBodyControls = Xor(bowserBodyControls, 1)
+    EndIf
+    faceNow.w = ((simTickCounter + 1)*#BOWSER_FACE_RATE)/64 - (simTickCounter*#BOWSER_FACE_RATE)/64
+    If faceNow > 0 Then objDir(slot) = #MARIO_BTN_LEFT
+    paceNow.w = True
+    If objPopTimer(slot) <> 0 AND objX(slot) < playerX
+      objDir(slot) = #MARIO_BTN_RIGHT
+      objAux(slot) = 2
+      objPopTimer(slot) = #BOWSER_CHASE_TICKS
+      bowserFireBreathTimer = #BOWSER_CHASE_TICKS
+      If (objX(slot) AND 255) >= #BOWSER_PACE_LIMIT Then paceNow = False
+    EndIf
+    stepNow.w = ((simTickCounter + 1)*#BOWSER_STEP_RATE)/64 - (simTickCounter*#BOWSER_STEP_RATE)/64
+    If paceNow = True AND stepNow > 0
+      If objX(slot) = bowserOrigX Then bowserMaxRange = bowserRange(randomByte AND 3)
+      objX(slot) = objX(slot) + objAux(slot)
+      If objDir(slot) <> #MARIO_BTN_RIGHT
+        turnSpeed.w = -1
+        fromStart.w = objX(slot) - bowserOrigX
+        If fromStart < 0
+          fromStart = -fromStart
+          turnSpeed = 1
+        EndIf
+        If fromStart >= bowserMaxRange Then objAux(slot) = turnSpeed
+      EndIf
+    EndIf
+  EndIf
+  If objPopTimer(slot) <> 0
+    If objPopTimer(slot) = 1
+      objY(slot) = objY(slot) - 1
+      objVelY(slot) = #BOWSER_JUMP_SPEED
+      objFractionY(slot) = #BOWSER_JUMP_FORCE
+    EndIf
+  Else
+    FlyCheepGravity{slot, #BOWSER_FORCE, #BOWSER_FALL_MAX}
+    If objY(slot) >= #BOWSER_GROUND_Y Then objPopTimer(slot) = bowserWait(randomByte AND 3)
+  EndIf
+  bowserWorld.w = tableLevelWorld(currentLevel)
+  If bowserWorld <= 5 OR bowserWorld = 8
+    If bowserFireBreathTimer = 0
+      bowserFireBreathTimer = #BOWSER_MOUTH_TICKS
+      bowserBodyControls = Xor(bowserBodyControls, 128)
+      If (bowserBodyControls AND 128) = 0
+        bowserFireBreathTimer = NextFlameWait{}
+        frenzyKind = #FRENZY_KIND_FLAME
+      EndIf
+    EndIf
+  EndIf
+  BowserContact{slot}
+End Statement
+
+; One tick of a Bloober, from UpdateObjects{}.
+Statement UpdateBloober{slot.w}
+  SHARED objX(), objY(), objState(), objVelX(), objVelY(), objAux(), objPopTimer(), objDir(), objFractionX(), objFractionY()
+  SHARED playerX, playerY, playerMovingDirection, cameraX, simTickCounter, randomBits()
+  If BeatenSwimmerFalls{slot} = True Then Statement Return
+  ; It aims afresh when its random bits allow (MoveBloober).
+  If (randomBits(1 + (slot AND 3)) AND #BLOOBER_AIM_MASK) = 0
+    If (slot AND 1) <> 0
+      objDir(slot) = playerMovingDirection
+    Else
+      objDir(slot) = #MARIO_BTN_LEFT
+      If objX(slot) < playerX Then objDir(slot) = #MARIO_BTN_RIGHT
+    EndIf
+  EndIf
+  ;; The swim's phase (ProcSwimmingB). Its steps fall on the ticks where simTickCounter reaches a multiple of #BLOOBER_SWIM_TICKS (the
+  ;; cartridge's every eighth frame, FrameCounter AND 7, on NTSC), and its float on those where the float's sixteenths reach a whole
+  ;; pixel (the cartridge's even frames at 8), both worked by division, not MOD (the main project's OPTIMISATION note, entry 8).
+  stepNow.w = (simTickCounter + #BLOOBER_SWIM_TICKS)/#BLOOBER_SWIM_TICKS - (simTickCounter + #BLOOBER_SWIM_TICKS - 1)/#BLOOBER_SWIM_TICKS
+  floatPixels.w = ((simTickCounter + 16)*#BLOOBER_FLOAT_SPEED)/16 - ((simTickCounter + 15)*#BLOOBER_FLOAT_SPEED)/16
+  If (objAux(slot) AND 2) = 0
+    If stepNow <> 0
+      If (objAux(slot) AND 1) = 0
+        objVelY(slot) = objVelY(slot) + 1
+        objVelX(slot) = objVelY(slot)
+        If objVelY(slot) = #BLOOBER_SWIM_TOP Then objAux(slot) = objAux(slot) + 1
+      Else
+        objVelY(slot) = objVelY(slot) - 1
+        objVelX(slot) = objVelY(slot)
+        If objVelY(slot) = 0
+          objAux(slot) = objAux(slot) + 1
+          objPopTimer(slot) = #BLOOBER_FLOAT_INTERVALS
+        EndIf
+      EndIf
+    EndIf
+  Else
+    floatNow.w = True
+    ;; Its float's time up, it swims again once it is no longer well above Mario (ChkNearPlayer: the cartridge's player y is this game's
+    ;; playerY less 16).
+    If objPopTimer(slot) = 0
+      If objY(slot) + #BLOOBER_NEAR_Y >= playerY - 16
+        objAux(slot) = 0
+        floatNow = False
+      EndIf
+    EndIf
+    If floatNow = True Then objY(slot) = objY(slot) + floatPixels
+  EndIf
+  ;; The climb, never into the status bar, and the same sideways (BlooberSwim): a speed of n is n * #BLOOBER_SPEED_STEP sixteenths
+  ;; a tick, the rest carried (on NTSC 16, so whole pixels and nothing carried, as the cartridge's).
+  climbSixteenths.w = objFractionY(slot) + objVelY(slot)*#BLOOBER_SPEED_STEP
+  climbPixels.w = climbSixteenths/16
+  objFractionY(slot) = climbSixteenths - climbPixels*16
+  climbedY.w = objY(slot) - climbPixels
+  If climbedY >= #BLOOBER_TOP_Y Then objY(slot) = climbedY
+  sideSixteenths.w = objFractionX(slot) + objVelX(slot)*#BLOOBER_SPEED_STEP
+  sidePixels.w = sideSixteenths/16
+  objFractionX(slot) = sideSixteenths - sidePixels*16
+  If objDir(slot) = #MARIO_BTN_RIGHT
+    objX(slot) = objX(slot) + sidePixels
+  Else
+    objX(slot) = objX(slot) - sidePixels
+  EndIf
+  ; Erased once it is well out of the view either side (OffscreenBoundsCheck).
+  If objX(slot) < cameraX - #BLOOBER_ERASE_MARGIN OR objX(slot) > cameraX + #VIEW_W + #BLOOBER_ERASE_MARGIN
+    PoolFree{slot}
+    Statement Return
+  EndIf
+  SmallBoxContact{slot}
+End Statement
+
+;; THE LARGE LIFT, from the cartridge (smbdis 8944 LargeLiftUp and Down, 10974 MoveLargeLiftPlat and 10982 MoveLiftPlatforms, 11709
+;; LargePlatformCollision, 11760 ProcLPlatCollisions, 11846 PositionPlayerOnVPlat):
+;;   It goes up or down all the time at #LIFT_SPEED, and its y is one byte, so it wraps at #LIFT_WRAP: an up lift that leaves the
+;;   top comes in from the bottom. Mario's box against its (48 across, 13 down from the top), checked before it moves, in the
+;;   normal player state and with him above y 224:
+;;     head   his top within 4 px of its bottom, going up: his speed is set to 1, the jump is over (passing up through the body
+;;            deeper than that is allowed);
+;;     top    his feet within 6 px of its top and not going up: he stands on it. After it has moved he is put on it (his feet on
+;;            its top, no speed) and counts as on the ground, so he rides it, jumps from it, and walks off its side;
+;;     side   otherwise a push out from the left edge (his right side within 8 px of it) or the right edge (within 9).
+;;   The tick a lift wraps it lets go of Mario: he is not taken round to the bottom with it, he falls (onto the lift below, in 1-2),
+;;   because the cartridge does not collide a player wholly above the screen (CheckPlayerVertical). The line is the wrap, y 0, not
+;;   the HUD's edge (y 32), so that it still works when he is shown over the HUD. A lift wholly outside the view has no box. It is
+;;   erased 72 px left of the screen (OffscreenBoundsCheck).
+;; How wide a lift is: a small one #SMALL_LIFT_W, a large one in a castle #CASTLE_LIFT_W, else #LIFT_W.
+Function.w LiftWidth{slot.w}
+  SHARED objAux(), currentAreaType
+  If objAux(slot) = #LIFT_KIND_SMALL Then Function Return(#SMALL_LIFT_W)
+  If currentAreaType = #AREA_TYPE_CASTLE Then Function Return(#CASTLE_LIFT_W)
+  Function Return(#LIFT_W)
+End Function
+
+; A small lift (2-4) is a pair, the second #LIFT_TWIN_GAP below the first, the one-byte y wrapping: the y of box boxIndex (0 or 1).
+Function.w LiftBoxTop{slot.w, boxIndex.w}
+  SHARED objY()
+  boxTop.w = objY(slot) + boxIndex*#LIFT_TWIN_GAP
+  If boxTop >= #LIFT_WRAP Then boxTop = boxTop - #LIFT_WRAP
+  Function Return(boxTop)
+End Function
+
+Statement UpdateLift{slot.w}
+  SHARED objX(), objY(), objVelY(), objFractionY(), objFractionX(), objState(), cameraX, platformCarryX
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom, objAux(), objAnimFrame(), objAnimTimer(), simTickCounter
+  SHARED playerState, playerX, playerY, playerSpeedY, playerMoveForceY, playerFractionY, playerOnGround
+  liftWidth.w = LiftWidth{slot}
+  boxDepth.w = #LIFT_BOX_BOTTOM
+  boxCount.w = 1
+  If objAux(slot) = #LIFT_KIND_SMALL
+    boxDepth = #SMALL_LIFT_BOX_BOTTOM
+    boxCount = 2
+  EndIf
+  liftStanding.w = False
+  standBox.w = 0
+  If playerState = #PLAYER_ST_FREE AND playerY < 224
+    If objX(slot) + liftWidth > cameraX AND objX(slot) < cameraX + #VIEW_W
+      liftLeft.w = objX(slot)
+      liftRight.w = objX(slot) + liftWidth - 1
+      ; Each box in turn (a small lift's two, SmallPlatformCollision; not one in the status bar), the first he meets only.
+      boxMet.w = False
+      For boxIndex.w = 0 To boxCount - 1
+        liftTop.w = LiftBoxTop{slot, boxIndex}
+        boxUsable.w = True
+        If boxCount = 2 AND liftTop < 32 Then boxUsable = False
+        If boxUsable = True AND boxMet = False
+          liftBottom.w = liftTop + boxDepth
+          If boundBoxRight >= liftLeft AND boundBoxLeft <= liftRight AND boundBoxBottom >= liftTop AND boundBoxTop <= liftBottom
+            boxMet = True
+            If liftBottom - boundBoxTop < 4
+              If playerSpeedY < 0 Then playerSpeedY = 1
+            EndIf
+            If boundBoxBottom - liftTop < #LIFT_LAND_WINDOW AND playerSpeedY >= 0
+              liftStanding = True
+              standBox = boxIndex
+            Else
+              If boundBoxRight - liftLeft < 8
+                ImpedePlayerMove{-1}
+              Else
+                If liftRight - boundBoxLeft < 9 Then ImpedePlayerMove{1}
+              EndIf
+            EndIf
+          EndIf
+        EndIf
+      Next
+    EndIf
+  EndIf
+  liftWrapped.w = False
+  standTopBefore.w = LiftBoxTop{slot, standBox}
+  If objAux(slot) = #LIFT_KIND_SWAY
+    ;; The swaying platform (XMovingPlatform, smbdis 10927): on a counters' step (every fourth frame on NTSC) the secondary counter
+    ;; climbs to #XPLAT_SECONDARY_MAX then the primary steps, and back down to 0 and the primary steps; its speed is the secondary
+    ;; times #XPLAT_SPEED 256ths (the cartridge's: in sixteenths), to the left while the primary's d1 is clear (MoveWithXMCntrs). It
+    ;; carries Mario standing on it by what it moved. NTSC 53 px left and back in 4 s; PAL the same, scaled.
+    swayStep.w = ((simTickCounter + 1)*#XPLAT_STEP_RATE)/64 - (simTickCounter*#XPLAT_STEP_RATE)/64
+    If swayStep > 0
+      If (objAnimFrame(slot) AND 1) = 0
+        If objAnimTimer(slot) = #XPLAT_SECONDARY_MAX
+          objAnimFrame(slot) = (objAnimFrame(slot) + 1) AND 3
+        Else
+          objAnimTimer(slot) = objAnimTimer(slot) + 1
+        EndIf
+      Else
+        If objAnimTimer(slot) = 0
+          objAnimFrame(slot) = (objAnimFrame(slot) + 1) AND 3
+        Else
+          objAnimTimer(slot) = objAnimTimer(slot) - 1
+        EndIf
+      EndIf
+    EndIf
+    swaySpeed.w = objAnimTimer(slot)*#XPLAT_SPEED
+    If (objAnimFrame(slot) AND 2) = 0 Then swaySpeed = -swaySpeed
+    swayTotal.w = objFractionX(slot) + swaySpeed
+    If swayTotal >= 0
+      swayMoved.w = swayTotal/256
+    Else
+      swayMoved = -((255 - swayTotal)/256)
+    EndIf
+    objFractionX(slot) = swayTotal - swayMoved*256
+    objX(slot) = objX(slot) + swayMoved
+    If liftStanding = True
+      playerX = playerX + swayMoved
+      platformCarryX = platformCarryX + swayMoved
+    EndIf
+  Else
+    If objAux(slot) = #LIFT_KIND_VERT
+      ; The platform that moves up and down (1-3): a swing about its centre; Mario standing on it is put on it below, as on any lift.
+      StepSwing{slot, #VPLAT_DOWN_FORCE, #VPLAT_UP_FORCE, #VPLAT_SPEED_MAX}
+    Else
+      If objVelY(slot) <> 0
+        ; Up or down, a whole pixel or two when the 256ths carry; the one-byte y wraps.
+        objFractionY(slot) = objFractionY(slot) + #LIFT_SPEED
+        liftStep.w = objFractionY(slot)/256
+        objFractionY(slot) = objFractionY(slot) - liftStep*256
+        objY(slot) = objY(slot) + objVelY(slot)*liftStep
+        If objY(slot) < 0 Then objY(slot) = objY(slot) + #LIFT_WRAP
+        If objY(slot) >= #LIFT_WRAP Then objY(slot) = objY(slot) - #LIFT_WRAP
+        ; The box he stands on wrapped if its top jumped by more than half the screen.
+        wrapJump.w = LiftBoxTop{slot, standBox} - standTopBefore
+        If wrapJump > #LIFT_TWIN_GAP OR wrapJump < -#LIFT_TWIN_GAP Then liftWrapped = True
+      Else
+        ;; The platform that goes right (RightPlatform, smbdis 10950): it moves with the speed it has, and if Mario is standing on it
+        ;; sets the speed (a pixel a frame, $10) and carries him by what it just moved, so it sits still until he first stands on it
+        ;; and then goes on for good, with him or without. Nothing here takes it back to the left.
+        liftMoved.w = 0
+        If objState(slot) = 1
+          objFractionX(slot) = objFractionX(slot) + #LIFT_RIGHT_SPEED
+          liftMoved = objFractionX(slot)/256
+          objFractionX(slot) = objFractionX(slot) - liftMoved*256
+          objX(slot) = objX(slot) + liftMoved
+        EndIf
+        If liftStanding = True
+          objState(slot) = 1
+          playerX = playerX + liftMoved
+          platformCarryX = platformCarryX + liftMoved
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  ; The tick it wraps it lets go: he is not taken round with it to the bottom, he falls (onto the lift below).
+  If liftStanding = True AND liftWrapped = False
+    playerY = LiftBoxTop{slot, standBox} - #TILE
+    playerSpeedY = 0
+    playerMoveForceY = 0
+    playerFractionY = 0
+    playerOnGround = True
+  EndIf
+  If objX(slot) < cameraX - 72 Then PoolFree{slot}
+  ; And 72 px right of the screen (OffscreenBoundsCheck): the platform that goes right is the one that gets there.
+  If objX(slot) > cameraX + #VIEW_W + 72 Then PoolFree{slot}
+End Statement
+
+;; THE JUMPSPRING, from the cartridge (smbdis 4147 Jumpspring, 6628 JumpspringHandler, 12248 ChkForLandJumpSpring, 12007 and 6060 the
+;; player's side of it): a column 16 across and two tile rows (32 px) tall, solid.
+;;   Mario falling onto its top (in the normal state, his feet within #MT_FEET_MIN_SUBTILE of it, as for any floor) is put on it,
+;;   held still and squashed: jumpspringAnimCtrl runs 1 to 4, a step lasting #SPRING_STEP_TICKS ticks (the first one more, the
+;;   frame timer being set to #SPRING_LAND_TIMER at the landing and counting down before each step is looked at). Each tick he is
+;;   moved #SPRING_MOVE pixels, down while the step is 1 or 2 and up while it is 3 or 4. From the second step on, a jump key that
+;;   went down this tick makes the bounce #SPRING_FORCE_A instead of #SPRING_FORCE. In the fourth step he is let go at that speed
+;;   with #SPRING_RISE_FORCE for gravity on the first tick only: from the second his gravity is his last jump's fall force, held or not
+;;   (he is in the falling state, SelectVerticalForce{}), so the bounce rises about 56 px and 165 px on NTSC after a slow jump
+;;   (the fall force $70), less after a fast one ($90), and on PAL, with its stronger fall forces, about 50 and 150. Its picture is the
+;;   step's (up, middle, squashed, middle, up).
+;;   Otherwise it is a wall: a push out from its left or right side as the lift's, and a head bump from below.
+Statement UpdateSpring{slot.w}
+  SHARED objX(), objY(), objAux(), objAnimTimer(), objVelY(), cameraX, jumpspringAnimCtrl
+  SHARED boundBoxLeft, boundBoxTop, boundBoxRight, boundBoxBottom
+  SHARED playerState, playerX, playerY, playerSpeedY, playerMoveForceY, playerFractionY, playerOnGround
+  SHARED playerVerticalForce, playerButtons, playerButtonsLast, springLaunch
+  ; The frame timer runs down every tick (DecTimers), before the landing sets it.
+  If objAnimTimer(slot) > 0 Then objAnimTimer(slot) = objAnimTimer(slot) - 1
+  If objAux(slot) = 0 AND playerState = #PLAYER_ST_FREE
+    If objX(slot) + #TILE > cameraX AND objX(slot) < cameraX + #VIEW_W
+      springLeft.w = objX(slot)
+      springRight.w = objX(slot) + #TILE - 1
+      springTop.w = objY(slot)
+      If boundBoxRight >= springLeft AND boundBoxLeft <= springRight AND boundBoxBottom >= springTop AND boundBoxTop <= springTop + #TILE*2
+        If playerSpeedY >= 0 AND boundBoxBottom - springTop < #MT_FEET_MIN_SUBTILE AND jumpspringAnimCtrl = 0
+          ; Landed: on its top, still, squashing.
+          playerY = springTop - #TILE
+          playerSpeedY = 0
+          playerMoveForceY = 0
+          playerFractionY = 0
+          playerOnGround = True
+          objAux(slot) = 1
+          objAnimTimer(slot) = #SPRING_LAND_TIMER
+          objVelY(slot) = #SPRING_FORCE
+          jumpspringAnimCtrl = 1
+        Else
+          If springTop + #TILE*2 - boundBoxTop < 4
+            If playerSpeedY < 0 Then playerSpeedY = 1
+          Else
+            If boundBoxRight - springLeft < 8
+              ImpedePlayerMove{-1}
+            Else
+              If springRight - boundBoxLeft < 9 Then ImpedePlayerMove{1}
+            EndIf
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  EndIf
+  If objAux(slot) > 0
+    springStep.w = objAux(slot) - 1
+    If (springStep AND 2) = 0
+      playerY = playerY + #SPRING_MOVE
+    Else
+      playerY = playerY - #SPRING_MOVE
+    EndIf
+    playerOnGround = True
+    If springStep >= 1
+      If (playerButtons AND #MARIO_BTN_JUMP) <> 0 AND (playerButtonsLast AND #MARIO_BTN_JUMP) = 0 Then objVelY(slot) = #SPRING_FORCE_A
+    EndIf
+    If springStep = 3
+      playerSpeedY = objVelY(slot)
+      playerVerticalForce = #SPRING_RISE_FORCE
+      springLaunch = 1
+      playerOnGround = False
+      objAux(slot) = 0
+      jumpspringAnimCtrl = 0
+    EndIf
+  EndIf
+  ; The next step when the timer is out.
+  If objAux(slot) > 0
+    If objAnimTimer(slot) = 0
+      objAnimTimer(slot) = #SPRING_STEP_TICKS
+      objAux(slot) = objAux(slot) + 1
+      jumpspringAnimCtrl = objAux(slot)
+    EndIf
+  EndIf
+  If objX(slot) < cameraX - 72 Then PoolFree{slot}
+End Statement
+
+;; END OF ENEMIES (BLITZ MODE)

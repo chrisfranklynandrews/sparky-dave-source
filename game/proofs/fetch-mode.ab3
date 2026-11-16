@@ -1,0 +1,419 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; fetch-mode.ab3 -- does a wider AGA fetch mode give the blitter more time?
+;; Compile in UAE. Not part of the game. First proof of the scrolling options in
+;; the main project's AMIGA_RENDERER note ("Parallax and scrolling options").
+;;
+;; Bitplane fetches and the blitter share Chip RAM slots. The game shows 4 planes at
+;; fetch mode 0, about 84 of the roughly 227 slots on each of the 208 world lines, and
+;; its frame is mostly blits. Fetch mode 1 (32 bit) and 3 (64 bit) fetch the same
+;; planes in a half and a quarter of the slots. Dual playfield needs 8 planes, which at
+;; fetch mode 0 would take about 168 slots a line, so this has to be known first.
+;;
+;; The display is the game's: a 16 line HUD list at line 44 stacked over a 208 line
+;; smooth-scrolling world list at line 63 (3 line gap), DisplayAdjust -1 and -1 on both,
+;; the world double buffered and scrolled by a fractional x. It runs four configurations,
+;; each on its own pair of CopLists, switched with CreateDisplay:
+;;   config 0  $10014, 8 sprites   the game exactly
+;;   config 1  $10014, 0 sprites   the same, no sprite channels (control for 2 and 3)
+;;   config 2  $11014, 0 sprites   fetch mode 1
+;;   config 3  $13014, 0 sprites   fetch mode 3
+;; Every bitmap is a multiple of 64 pixels wide, which fetch mode 3 requires.
+;;
+;; Each frame, after VWait, it waits for the beam to reach #WORK_LINE (inside the world
+;; list, where the fetches compete) and times two blitter loads:
+;;   bobs    UnBuffer and #BOBS cookie BBlits of a 16x16 shape (the game's actors)
+;;   stamps  #STAMPS Blocks of a 16x16 tile in two columns past the view's right edge
+;;           (what seam stamping of a ring buffer would do every 16 pixels)
+;; Each config runs #PHASE_FRAMES frames, the four in turn, #ROUNDS times, then it writes
+;; fetch-mode-results.txt and quits. Esc quits early.
+;;
+;; What to look at on screen: the number of white boxes at the top left of the HUD is
+;; the config (1 to 4 boxes for configs 0 to 3). Each phase starts held at scroll 0 for
+;; #HOLD_FRAMES frames: the red line is bitmap column 0 and the green line column 319,
+;; and both should show at the very edges, with nothing past the green one. Then the
+;; world scrolls. Note any config whose picture is wrong (shifted, torn, garbage, a broken
+;; HUD or gap line).
+;;
+;; What the results answer
+;; 1. Do fetch modes 1 and 3 make blits during the display measurably faster, and by how
+;;    many lines? (A line is about 63.5 microseconds, a PAL frame 312 lines.)
+;; 2. Does dropping the sprite channels change anything on its own (config 0 against 1)?
+;; 3. What do #STAMPS tile Blocks cost, for the ring buffer estimate?
+;; With the screen: does the game's display (stacked lists, DisplayAdjust, fractional
+;; scroll) survive fetch modes 1 and 3?
+
+WBStartup
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_ESC = $45
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#VIEW_W     = 320
+#COPPER_COLORS = 16
+
+#DISPLAY_ADJUST_START = -1
+#DISPLAY_ADJUST_STOP  = -1
+
+;; Bitmaps: 0 and 1 the world pair, 2 the HUD band, 3 the shape source.
+#BM_A     = 0
+#BM_B     = 1
+#BM_HUD   = 2
+#BM_SHAPE = 3
+#WORLD_W  = 1024
+#WORLD_H  = 256
+#HUD_W    = 384
+
+#BOB_SHAPE  = 0
+#TILE_SHAPE = 1
+#TILE       = 16
+#BOB_BYTES  = 16384
+
+#CONFIGS      = 4
+#BOBS         = 8
+#STAMPS       = 26
+#STAMP_ROWS   = 13
+#WORK_LINE    = 80
+#PHASE_FRAMES = 300
+#HOLD_FRAMES  = 75
+#SETTLE       = 10
+#ROUNDS       = 2
+#LINES_PAL    = 312
+
+;; The scroll runs back and forth between 0 and this: the bitmap less the view, the two
+;; stamp columns and a 64 pixel fetch guard (the widest fetch mode 3 might need).
+#SCROLL_MAX = 608
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+drawBm.w = #BM_B
+drawBuf.w = 1
+config.w = 0
+phase.w = 0
+phaseFrame.w = 0
+scrollX.q = 0
+scrollStep.q = 1.25
+scrollDir.q = scrollStep
+viewX.w = 0
+startLine.l = 0
+endLine.l = 0
+bobLines.l = 0
+stampLines.l = 0
+stampColumn.w = 0
+
+Dim configFlags.l(#CONFIGS - 1)
+Dim configSprites.w(#CONFIGS - 1)
+configFlags(0) = $10014
+configFlags(1) = $10014
+configFlags(2) = $11014
+configFlags(3) = $13014
+configSprites(0) = 8
+configSprites(1) = 0
+configSprites(2) = 0
+configSprites(3) = 0
+
+;; Totals per config.
+Dim bobFrames.l(#CONFIGS - 1)
+Dim bobSum.l(#CONFIGS - 1)
+Dim bobMax.l(#CONFIGS - 1)
+Dim stampSum.l(#CONFIGS - 1)
+Dim stampMax.l(#CONFIGS - 1)
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_A, #WORLD_W, #WORLD_H, 4
+BitMap #BM_B, #WORLD_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+BitMap #BM_SHAPE, 64, #TILE, 4
+
+InitPalette 0, #COPPER_COLORS
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 0, 0, 0
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+Buffer 0, #BOB_BYTES
+Buffer 1, #BOB_BYTES
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; Config c uses CopList 2c for the HUD and 2c + 1 for the world, so a switch is only
+;; a CreateDisplay. All eight are built once.
+Statement BuildLists{}
+  SHARED configFlags(), configSprites()
+  For configIndex.w = 0 To #CONFIGS - 1
+    hudList.w = configIndex*2
+    worldList.w = hudList + 1
+    flags.l = configFlags(configIndex)
+    spriteCount.w = configSprites(configIndex)
+    InitCopList hudList, #HUD_YPOS, #HUD_H, flags, spriteCount, #COPPER_COLORS, 0
+    InitCopList worldList, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, flags, spriteCount, 0, 0
+    DisplayAdjust hudList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+    DisplayAdjust worldList, 0, 0, 0, #DISPLAY_ADJUST_START, #DISPLAY_ADJUST_STOP
+  Next
+End Statement
+
+Statement ShowConfig{configIndex.w}
+  SHARED drawBm
+  hudList.w = configIndex*2
+  CreateDisplay hudList, hudList + 1
+  DisplayPalette hudList, 0
+  DisplayBitMap hudList, #BM_HUD, 0, 0
+  DisplayBitMap hudList + 1, drawBm, 0, #VIEW_TOP
+End Statement
+
+;; The config number as 1 to 4 white boxes in the HUD band.
+Statement DrawConfigBoxes{configIndex.w}
+  Use BitMap #BM_HUD
+  Cls 0
+  For boxIndex.w = 0 To configIndex
+    Boxf 8 + boxIndex*12, 4, 15 + boxIndex*12, 11, 8
+  Next
+End Statement
+
+;; Ground, a ruler line every 64 pixels, and the edge markers: red on column 0, green on
+;; column 319 (both are on screen while the scroll is held at 0).
+Statement DrawWorld{bitmapIndex.w}
+  Use BitMap bitmapIndex
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/#TILE - 1
+    pen.w = 6
+    If columnIndex MOD 2 = 1 Then pen = 7
+    Boxf columnIndex*#TILE, 208, columnIndex*#TILE + #TILE - 1, 239, pen
+  Next
+  For rulerX.w = 64 To #WORLD_W - 64 Step 64
+    Boxf rulerX, #VIEW_TOP, rulerX, 207, 3
+  Next
+  Boxf 0, #VIEW_TOP, 0, 239, 11
+  Boxf #VIEW_W - 1, #VIEW_TOP, #VIEW_W - 1, 239, 12
+End Statement
+
+;; The two shapes: a ball for the bobs (pen 0 is the cookie's clear) and a filled
+;; brick for the stamps.
+Statement MakeShapes{}
+  Use BitMap #BM_SHAPE
+  Cls 0
+  Circlef 7, 7, 7, 11
+  Circlef 7, 7, 3, 8
+  Boxf 16, 0, 31, 15, 1
+  Boxf 16, 0, 31, 0, 3
+  Boxf 16, 7, 31, 7, 3
+  GetaShape #BOB_SHAPE, 0, 0, #TILE, #TILE
+  GetaShape #TILE_SHAPE, 16, 0, #TILE, #TILE
+End Statement
+
+BBlitMode CookieMode
+MakeShapes{}
+DrawWorld{#BM_A}
+DrawWorld{#BM_B}
+DrawConfigBoxes{0}
+BuildLists{}
+ShowConfig{0}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  ;; Held at 0 at the start of a phase, then back and forth.
+  If phaseFrame >= #HOLD_FRAMES
+    scrollX = scrollX + scrollDir
+    If scrollX >= #SCROLL_MAX Then scrollDir = -scrollStep
+    If scrollX <= 0
+      scrollX = 0
+      scrollDir = scrollStep
+    EndIf
+  EndIf
+  viewX = Int(scrollX)
+
+  ;; Into the world list's lines before timing anything.
+  While RasterLine{} < #WORK_LINE
+  Wend
+
+  Use BitMap drawBm
+  startLine = RasterLine{}
+  UnBuffer drawBuf
+  For bobIndex.w = 0 To #BOBS - 1
+    BBlit drawBuf, #BOB_SHAPE, viewX + 20 + bobIndex*36, 160 + (bobIndex MOD 2)*16
+  Next
+  endLine = RasterLine{}
+  bobLines = endLine - startLine
+  If bobLines < 0 Then bobLines = bobLines + #LINES_PAL
+
+  ;; Two columns past the view's right edge, rows 2 to 14 (lines 32 to 239).
+  stampColumn = (viewX/#TILE + #VIEW_W/#TILE + 1)*#TILE
+  startLine = RasterLine{}
+  For stampIndex.w = 0 To #STAMPS - 1
+    Block #TILE_SHAPE, stampColumn + (stampIndex/#STAMP_ROWS)*#TILE, #VIEW_TOP + (stampIndex MOD #STAMP_ROWS)*#TILE
+  Next
+  endLine = RasterLine{}
+  stampLines = endLine - startLine
+  If stampLines < 0 Then stampLines = stampLines + #LINES_PAL
+
+  If phaseFrame >= #SETTLE
+    bobFrames(config) = bobFrames(config) + 1
+    bobSum(config) = bobSum(config) + bobLines
+    If bobLines > bobMax(config) Then bobMax(config) = bobLines
+    stampSum(config) = stampSum(config) + stampLines
+    If stampLines > stampMax(config) Then stampMax(config) = stampLines
+  EndIf
+
+  VWait
+  DisplayBitMap config*2 + 1, drawBm, scrollX, #VIEW_TOP
+  If drawBm = #BM_A
+    drawBm = #BM_B
+    drawBuf = 1
+  Else
+    drawBm = #BM_A
+    drawBuf = 0
+  EndIf
+
+  phaseFrame = phaseFrame + 1
+  If phaseFrame >= #PHASE_FRAMES
+    phaseFrame = 0
+    phase = phase + 1
+    If phase >= #CONFIGS*#ROUNDS
+      quitFlag = True
+    Else
+      config = phase MOD #CONFIGS
+      scrollX = 0
+      scrollDir = scrollStep
+      DrawConfigBoxes{config}
+      VWait
+      ShowConfig{config}
+    EndIf
+  EndIf
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/fetch-mode-results.txt")
+  FileOutput 0
+  NPrint "fetch-mode: blitter time while the beam is in the world list (from line ", #WORK_LINE, ")"
+  NPrint #BOBS, " bobs (UnBuffer + cookie BBlit 16x16), ", #STAMPS, " tile Blocks (16x16), ", #PHASE_FRAMES, " frames a phase, ", #ROUNDS, " rounds"
+  NPrint "A raster line is about 63.5 microseconds. A PAL frame is ", #LINES_PAL, " lines."
+  NPrint ""
+  NPrint "config  flags  sprites  frames  bobs avg  bobs worst  stamps avg  stamps worst"
+  For configIndex.w = 0 To #CONFIGS - 1
+    If bobFrames(configIndex) > 0
+      Print configIndex, "  $", Hex$(configFlags(configIndex)), "  ", configSprites(configIndex), "  ", bobFrames(configIndex), "  "
+      Print bobSum(configIndex)/bobFrames(configIndex), "  ", bobMax(configIndex), "  "
+      NPrint stampSum(configIndex)/bobFrames(configIndex), "  ", stampMax(configIndex)
+    EndIf
+  Next
+  NPrint ""
+  NPrint "Averages are whole lines (integer division). Config 0 is the game today;"
+  NPrint "compare 2 and 3 against 1 for the fetch mode alone."
+  CloseFile 0
+EndIf
+End

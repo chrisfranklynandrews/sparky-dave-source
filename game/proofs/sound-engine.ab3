@@ -1,0 +1,246 @@
+;; sound-engine.ab3 -- the ported SMB sound engine on its own, played from the keyboard.
+;; Compile in UAE. Not part of the game. Proof for the sound plan (git history): it includes the real
+;; files (includes/sparkydave.sound.data.ab3, .sound.ab3, .sound.blitz.ab3) and nothing
+;; else, so what you hear is what the game will play.
+;;
+;; What it proves
+;;   1. The engine port and the virtual APU produce the cartridge's sounds: every
+;;      effect and song in 1-1 (and the others, for the port's sake).
+;;   2. The duck: an effect on a square channel takes it over and the music resumes.
+;;   3. The cost of a tick (the engine, four clocks, the Paula update), in raster lines.
+;;
+;; Keys (each plays once; effects go over the music):
+;;   Square 1:  1 small jump   2 big jump   3 bump   4 stomp   5 enemy smack
+;;              6 pipe / injury   7 fireball   8 flagpole slide
+;;   Square 2:  Q coin   W power-up appears   E vine grows   R fireworks   T timer tick
+;;              Y power-up grab   U 1-up   I Bowser falls
+;;   Noise:     A brick shatters   S Bowser's flame
+;;   Area music (loops):  Z ground   X underground   C water   V castle   B star power
+;;                        N silence
+;;   Event music:  D death   G game over   H victory   J end of level   K end of castle
+;;                 L time running out (faster; the ground music resumes after it)
+;;   Space  stop everything     Esc  quit
+;;
+;; What to listen for
+;;   - The ground theme: the lead-in, then the tune and its parts in order, then it loops.
+;;   - 1 2 3 4 Q W Y U A: the sounds you know from the game. The power-up grab and the 1-up
+;;     are the long melodic ones.
+;;   - Start the ground music and press 2 (jump) or Q (coin): the effect replaces that
+;;     voice, then the music's voice returns.
+;;   - L over the ground music: a faster, higher-pitched version, and the ground theme
+;;     comes back at the end.
+;;   - Anything harsh, wrong notes, a stuck note (a note that does not end), or silence.
+;;   The four boxes on the screen show each channel's loudness: pulse 1, pulse 2,
+;;   triangle, noise.
+;;
+;; The tick rate is the cartridge's 60 Hz (the display is 50 Hz, so a frame runs one or
+;; two ticks). On exit the proof writes sound-engine-results.txt: ticks run, and the cost
+;; of a tick in raster lines.
+
+WBStartup
+
+XINCLUDE "/includes/sparkydave.look.ab3"
+XINCLUDE "/includes/sparkydave.constants.ab3"
+XINCLUDE "/includes/sparkydave.physics.ab3"
+XINCLUDE "/includes/sparkydave.sound.data.ab3"
+XINCLUDE "/includes/sparkydave.sound.ab3"
+
+#RAW_KEY_ESC = $45
+
+#COPPER_FLAGS = $10014
+#HUD_YPOS  = 44
+#VIEW_H    = 200
+
+Dim keyHeld.w(127)
+;; What sound.blitz.ab3 reads from the game: the area (0 main, 1 bonus) and the cover on show.
+currentArea.w = #AREA_MAIN
+coverKind.w = #COVER_NONE
+quitFlag.w = False
+wavesOk.w = BuildSoundWaves{}
+tickCount.l = 0
+tickLineSum.l = 0
+tickLineWorst.l = 0
+loopCount.l = 0
+overBudgetCount.l = 0
+earlyLineSum.l = 0
+engineLineSum.l = 0
+lateLineSum.l = 0
+paulaLineSum.l = 0
+earlyLineWorst.l = 0
+engineLineWorst.l = 0
+lateLineWorst.l = 0
+paulaLineWorst.l = 0
+todStart.l = 0
+todEnd.l = 0
+
+BLITZ
+
+XINCLUDE "/includes/sparkydave.beam.blitz.ab3"
+XINCLUDE "/includes/sparkydave.sound.blitz.ab3"
+
+; RasterLine{} is in sparkydave.beam.blitz.ab3, included above.
+
+;; Raster lines from one mark to the next, corrected for one wrap of the beam.
+Function.l LinesBetween{lineBefore.l, lineAfter.l}
+  lineCount.l = lineAfter - lineBefore
+  If lineCount < 0 Then lineCount = lineCount + 312
+  Function Return lineCount
+End Function
+
+;; CIA-A's time-of-day counter, which counts the 50 or 60 Hz vertical sync (an
+;; experiment: the main project's TIMING note rejected CIA-B's, which counts line syncs). The high byte is
+;; read first, as that latches the other two.
+Function.l ReadTimeOfDay{}
+  highByte.l = Peek.b($bfea01) AND 255
+  middleByte.l = Peek.b($bfe901) AND 255
+  lowByte.l = Peek.b($bfe801) AND 255
+  Function Return highByte*65536 + middleByte*256 + lowByte
+End Function
+
+;; True once when a key goes down.
+Function.w KeyPressed{rawCode.w}
+  SHARED keyHeld()
+  If RawStatus(rawCode)
+    If keyHeld(rawCode) = False
+      keyHeld(rawCode) = True
+      Function Return True
+    EndIf
+  Else
+    keyHeld(rawCode) = False
+  EndIf
+  Function Return False
+End Function
+
+Statement PollKeys{}
+  SHARED soundState()
+  If KeyPressed{$01} Then SoundSquare1{#SFX_SMALL_JUMP}
+  If KeyPressed{$02} Then SoundSquare1{#SFX_BIG_JUMP}
+  If KeyPressed{$03} Then SoundSquare1{#SFX_BUMP}
+  If KeyPressed{$04} Then SoundSquare1{#SFX_ENEMY_STOMP}
+  If KeyPressed{$05} Then SoundSquare1{#SFX_ENEMY_SMACK}
+  If KeyPressed{$06} Then SoundSquare1{#SFX_PIPE_DOWN_INJURY}
+  If KeyPressed{$07} Then SoundSquare1{#SFX_FIREBALL}
+  If KeyPressed{$08} Then SoundSquare1{#SFX_FLAGPOLE}
+  If KeyPressed{$10} Then SoundSquare2{#SFX_COIN_GRAB}
+  If KeyPressed{$11} Then SoundSquare2{#SFX_GROW_POWER_UP}
+  If KeyPressed{$12} Then SoundSquare2{#SFX_GROW_VINE}
+  If KeyPressed{$13} Then SoundSquare2{#SFX_BLAST}
+  If KeyPressed{$14} Then SoundSquare2{#SFX_TIMER_TICK}
+  If KeyPressed{$15} Then SoundSquare2{#SFX_POWER_UP_GRAB}
+  If KeyPressed{$16} Then SoundSquare2{#SFX_EXTRA_LIFE}
+  If KeyPressed{$17} Then SoundSquare2{#SFX_BOWSER_FALL}
+  If KeyPressed{$20} Then SoundNoise{#SFX_BRICK_SHATTER}
+  If KeyPressed{$21} Then SoundNoise{#SFX_BOWSER_FLAME}
+  If KeyPressed{$31} Then SoundAreaMusic{#MUSIC_GROUND}
+  If KeyPressed{$32} Then SoundAreaMusic{#MUSIC_UNDERGROUND}
+  If KeyPressed{$33} Then SoundAreaMusic{#MUSIC_WATER}
+  If KeyPressed{$34} Then SoundAreaMusic{#MUSIC_CASTLE}
+  If KeyPressed{$35} Then SoundAreaMusic{#MUSIC_STAR_POWER}
+  If KeyPressed{$36} Then SoundAreaMusic{#MUSIC_SILENCE}
+  If KeyPressed{$22} Then SoundEventMusic{#MUSIC_DEATH}
+  If KeyPressed{$24} Then SoundEventMusic{#MUSIC_GAME_OVER}
+  If KeyPressed{$25} Then SoundEventMusic{#MUSIC_VICTORY}
+  If KeyPressed{$26} Then SoundEventMusic{#MUSIC_END_OF_LEVEL}
+  If KeyPressed{$27} Then SoundEventMusic{#MUSIC_END_OF_CASTLE}
+  If KeyPressed{$28} Then SoundEventMusic{#MUSIC_TIME_RUNNING_OUT}
+  If KeyPressed{$40}
+    SoundReset{}
+    soundState(#SS_ENABLED) = True
+  EndIf
+End Statement
+
+If wavesOk = True
+  BitMap 0, 320, #VIEW_H, 4
+  Use BitMap 0
+  InitCopList 0, #HUD_YPOS, #VIEW_H, #COPPER_FLAGS, 8, 16, 0
+  CreateDisplay 0
+  AGAPalRGB 0, 0, 0, 0, 0
+  AGAPalRGB 0, 1, 230, 90, 40
+  AGAPalRGB 0, 2, 40, 200, 80
+  AGAPalRGB 0, 3, 60, 120, 255
+  AGAPalRGB 0, 4, 220, 220, 220
+  DisplayPalette 0, 0
+  BlitzKeys On
+  DisplayBitMap 0, 0, 0, 0
+
+  SoundReset{}
+  soundState(#SS_ENABLED) = True
+  SoundStart{}
+
+  tickDebt.w = 0
+  todStart = ReadTimeOfDay{}
+  While quitFlag = False
+    If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+    VWait
+    loopStartLine.l = RasterLine{}
+    loopCount = loopCount + 1
+    PollKeys{}
+
+    ;; A frame's worth of ticks: 6 in 5 frames is 60 a second on a 50 Hz display. The
+    ;; four steps are SoundTick{}'s own, timed one by one.
+    tickDebt = tickDebt + 6
+    While tickDebt >= 5
+      markA.l = RasterLine{}
+      ApuClockEarly{}
+      markB.l = RasterLine{}
+      SoundEngine{}
+      markC.l = RasterLine{}
+      ApuClockLate{}
+      markD.l = RasterLine{}
+      UpdatePaula{}
+      markE.l = RasterLine{}
+      earlyLineSum = earlyLineSum + LinesBetween{markA, markB}
+      engineLineSum = engineLineSum + LinesBetween{markB, markC}
+      lateLineSum = lateLineSum + LinesBetween{markC, markD}
+      paulaLineSum = paulaLineSum + LinesBetween{markD, markE}
+      stepLines.l = LinesBetween{markA, markB}
+      If stepLines > earlyLineWorst Then earlyLineWorst = stepLines
+      stepLines = LinesBetween{markB, markC}
+      If stepLines > engineLineWorst Then engineLineWorst = stepLines
+      stepLines = LinesBetween{markC, markD}
+      If stepLines > lateLineWorst Then lateLineWorst = stepLines
+      stepLines = LinesBetween{markD, markE}
+      If stepLines > paulaLineWorst Then paulaLineWorst = stepLines
+      tickLines.l = LinesBetween{markA, markE}
+      tickCount = tickCount + 1
+      tickLineSum = tickLineSum + tickLines
+      If tickLines > tickLineWorst Then tickLineWorst = tickLines
+      tickDebt = tickDebt - 5
+    Wend
+
+    ;; The channels' loudness as bars (drawing is small on purpose).
+    Boxf 40, 100, 280, 160, 0
+    For channelIndex.w = 0 To 3
+      barHeight.w = apuState(channelIndex*16 + #AP_LEVEL)*4
+      Boxf 40 + channelIndex*60, 160 - barHeight, 80 + channelIndex*60, 160, channelIndex + 1
+    Next
+
+    ;; Over budget: the frame's work reached the next vertical blank.
+    workEndLine.l = RasterLine{}
+    If workEndLine < loopStartLine Then overBudgetCount = overBudgetCount + 1
+  Wend
+  todEnd = ReadTimeOfDay{}
+
+  SoundStop{}
+EndIf
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/results/sound-engine-results.txt")
+  FileOutput 0
+  NPrint "sound-engine"
+  If wavesOk = False
+    NPrint "BuildSoundWaves FAILED (no Chip RAM)"
+  Else
+    NPrint "loop iterations (display frames the loop ran): ", loopCount
+    NPrint "ticks run: ", tickCount, " (should be 1.2 per iteration: ", (loopCount*6)/5, ")"
+    NPrint "iterations whose work reached the next vertical blank (each costs a lost frame): ", overBudgetCount
+    NPrint "CIA-A time of day, start ", todStart, ", end ", todEnd, ", difference ", todEnd - todStart, " (if it counts the 50 Hz sync, this is the frames that really passed)"
+    If tickCount > 0
+      NPrint "cost of a tick in raster lines (a line is about 63.5 us): average ", tickLineSum/tickCount, ", worst ", tickLineWorst
+      NPrint "  by step, average: clock early ", earlyLineSum/tickCount, ", engine ", engineLineSum/tickCount, ", clock late ", lateLineSum/tickCount, ", Paula ", paulaLineSum/tickCount
+      NPrint "  by step, worst: clock early ", earlyLineWorst, ", engine ", engineLineWorst, ", clock late ", lateLineWorst, ", Paula ", paulaLineWorst
+    EndIf
+  EndIf
+  CloseFile 0
+EndIf
+End

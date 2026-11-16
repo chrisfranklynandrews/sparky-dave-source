@@ -1,0 +1,298 @@
+;; =======================================================
+;; FIREBALLS (BLITZ MODE)
+;; =======================================================
+;; Fire Mario's fireballs, from the cartridge (smbdis 6273-6380 ProcFireball_Bubble
+;; and FireballObjCore, 12726 FireballBGCollision, 11060 FireballEnemyCollision,
+;; 14229 DrawFireball).
+;;
+;;   throw     B pressed this tick and not last tick, Mario fiery. Two slots, used
+;;             in turn: the next slot (fireballCounter AND 1) must be free, so a
+;;             third throw while the first is still out does nothing even if the
+;;             other slot is free, as on the cartridge. The ball starts 4 px in
+;;             from Mario, moving 4 px a tick the way he faces and falling at 4.
+;;   flight    Gravity 80/256 a tick, capped at 3 px a tick. Every tick one probe at
+;;             the middle of its bottom edge: on something solid it bounces (up 3
+;;             px a tick, once); if it is already bouncing, or already moving up,
+;;             it explodes. So a wall it runs into acts as a floor first and
+;;             explodes the second time. Nothing below clears the bounce.
+;;   enemies   Every other tick the 8x8 box against every enemy that is not already
+;;             finished: it is knocked off as by a shell (KnockEnemy{}) with a 100
+;;             for a Goomba and a 200 for anything else, and the ball explodes. A
+;;             standing shell dies too.
+;;   explode   Three pictures of two ticks each, then gone. Offscreen and out of the
+;;             level it is simply freed.
+;; Not here: the cartridge's fireproof Buzzy Beetle and Bowser's hit points (neither is in 1-1).
+;; Where the ball starts vertically: the cartridge's Player_Y_Position (FireballObjCore,
+;; smbdis 6342), the top of its 32 px envelope, which is this game's playerY less 16
+;; (the main project's PLAYER_HITBOX note, 4.3): #FIREBALL_SPAWN_DY, so the ball comes from big
+;; Mario's head height and falls from there, not from his waist.
+
+;; B pressed now and not last tick, Mario fiery, the next slot free: start one.
+;; Called from UpdatePlayer{} after the buttons are read, before playerButtonsLast
+;; is updated.
+Statement TryThrowFireball{}
+  SHARED playerFire, playerButtons, playerButtonsLast, playerX, playerY, playerFacing
+  SHARED playerThrowTimer, playerAnimPeriod, fireballCounter, playerCrouching, playerClimbing
+  SHARED fireballActive(), fireballX(), fireballY(), fireballVelY(), fireballFractionY(), fireballFractionX()
+  SHARED fireballDirection(), fireballBounced(), fireballAge()
+  If playerFire = False Then Statement Return
+  ; Not on a vine (ProcFireball_Bubble, smbdis 6292).
+  If playerClimbing <> False Then Statement Return
+  ; Not while crouching (ProcFireball_Bubble, smbdis 6290).
+  If playerCrouching = True Then Statement Return
+  If (playerButtons AND #MARIO_BTN_FIRE) = 0 Then Statement Return
+  If (playerButtonsLast AND #MARIO_BTN_FIRE) <> 0 Then Statement Return
+  throwSlot.w = fireballCounter AND 1
+  If fireballActive(throwSlot) <> 0 Then Statement Return
+  fireballActive(throwSlot) = #FIREBALL_FLYING
+  fireballX(throwSlot) = playerX + #FIREBALL_SPAWN_DX
+  fireballY(throwSlot) = playerY + #FIREBALL_SPAWN_DY
+  fireballVelY(throwSlot) = #FIREBALL_START_VY
+  fireballFractionY(throwSlot) = 0
+  fireballFractionX(throwSlot) = 0
+  fireballBounced(throwSlot) = False
+  fireballAge(throwSlot) = 0
+  If playerFacing = #MARIO_FACE_LEFT
+    fireballDirection(throwSlot) = -1
+  Else
+    fireballDirection(throwSlot) = 1
+  EndIf
+  fireballCounter = fireballCounter + 1
+  SoundSquare1{#SFX_FIREBALL}
+  playerThrowTimer = playerAnimPeriod
+End Statement
+
+; Every enemy the ball overlaps, knocked off with its number, and the ball explodes.
+Statement FireballHitsEnemies{ball.w}
+  SHARED fireballX(), fireballY(), fireballActive(), fireballAge()
+  SHARED objActive(), objX(), objY(), objType(), objState()
+  SHARED enemyBoxLeft, enemyBoxTop, enemyBoxRight, enemyBoxBottom
+  For enemySlot = 0 To #MAX_OBJECTS - 1
+    If objActive(enemySlot) = True
+      ;; Bowser: each of his halves the ball meets is a hit (the cartridge's loop goes on past the first, so one ball can be two), the ball
+      ;; bursts and BowserHit{} takes a hit point (at none left he is beaten). Not once knocked by the Starman.
+      If objType(enemySlot) = #OBJ_BOWSER AND objState(enemySlot) = 0
+        For halfIndex.w = 0 To 1
+          If objType(enemySlot) = #OBJ_BOWSER
+            If BowserHalfBox{enemySlot, halfIndex} = True
+              If fireballX(ball) + #FIREBALL_SIZE - 1 >= enemyBoxLeft AND fireballX(ball) <= enemyBoxRight
+                If fireballY(ball) + #FIREBALL_SIZE - 1 >= enemyBoxTop AND fireballY(ball) <= enemyBoxBottom
+                  fireballActive(ball) = #FIREBALL_EXPLODING
+                  fireballAge(ball) = 0
+                  BowserHit{enemySlot}
+                EndIf
+              EndIf
+            EndIf
+          EndIf
+        Next
+      EndIf
+      ;; A Podoboo or Bowser's flame: the ball bursts on it and it is not touched (HandleEnemyFBallCol leaves for the Podoboo, as for the
+      ;; Buzzy Beetle, and for any id of $15 and up).
+      If (objType(enemySlot) = #OBJ_PODOBOO OR objType(enemySlot) = #OBJ_FLAME) AND fireballActive(ball) = #FIREBALL_FLYING
+        hitsFlameOrPodoboo.w = False
+        If objType(enemySlot) = #OBJ_PODOBOO
+          hitsFlameOrPodoboo = SmallBoxHitBox{enemySlot}
+        Else
+          hitsFlameOrPodoboo = FlameHitBox{enemySlot}
+        EndIf
+        If hitsFlameOrPodoboo = True
+          If fireballX(ball) + #FIREBALL_SIZE - 1 >= enemyBoxLeft AND fireballX(ball) <= enemyBoxRight
+            If fireballY(ball) + #FIREBALL_SIZE - 1 >= enemyBoxTop AND fireballY(ball) <= enemyBoxBottom
+              fireballActive(ball) = #FIREBALL_EXPLODING
+              fireballAge(ball) = 0
+            EndIf
+          EndIf
+        EndIf
+      EndIf
+      If objType(enemySlot) = #OBJ_GOOMBA OR objType(enemySlot) = #OBJ_KOOPA OR objType(enemySlot) = #OBJ_PIRANHA OR objType(enemySlot) = #OBJ_BLOOBER OR objType(enemySlot) = #OBJ_CHEEP OR objType(enemySlot) = #OBJ_FLY_CHEEP
+        boxFound.w = False
+        If objType(enemySlot) = #OBJ_PIRANHA OR objType(enemySlot) = #OBJ_BLOOBER OR objType(enemySlot) = #OBJ_CHEEP OR objType(enemySlot) = #OBJ_FLY_CHEEP
+          boxFound = SmallBoxHitBox{enemySlot}
+        Else
+          boxFound = EnemyHitBox{enemySlot}
+        EndIf
+        If boxFound = True
+          If fireballX(ball) + #FIREBALL_SIZE - 1 >= enemyBoxLeft AND fireballX(ball) <= enemyBoxRight
+            If fireballY(ball) + #FIREBALL_SIZE - 1 >= enemyBoxTop AND fireballY(ball) <= enemyBoxBottom
+              points.w = 2
+              If objType(enemySlot) = #OBJ_GOOMBA Then points = 1
+              KnockEnemy{enemySlot}
+              SpawnFloater{objX(enemySlot), objY(enemySlot), points}
+              fireballActive(ball) = #FIREBALL_EXPLODING
+              fireballAge(ball) = 0
+            EndIf
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+; No bubbles: at every arrival in an area and every restart, so none is carried into another place.
+Statement ClearBubbles{}
+  SHARED bubbleY(), airBubbleTimer
+  For bubbleIndex = 0 To #BUBBLE_SLOTS - 1
+    bubbleY(bubbleIndex) = -1
+  Next
+  airBubbleTimer = 0
+End Statement
+
+;; A bubble from Mario's mouth (SetupBubble, smbdis 6394): 9 px on when he faces right, at his x when left, 8 above his y; the shared
+;; timer set long or short by the random bit given.
+Statement SetupBubble{bubbleIndex.w, bubbleBit.w}
+  SHARED bubbleX(), bubbleY(), bubbleFraction(), airBubbleTimer, playerX, playerY, playerFacingDirection
+  bubbleX(bubbleIndex) = playerX
+  If playerFacingDirection = #MARIO_BTN_RIGHT Then bubbleX(bubbleIndex) = playerX + #BUBBLE_MOUTH_X
+  bubbleY(bubbleIndex) = playerY + #BUBBLE_MOUTH_Y
+  bubbleFraction(bubbleIndex) = 0
+  airBubbleTimer = #BUBBLE_TICKS_LONG
+  If bubbleBit <> 0 Then airBubbleTimer = #BUBBLE_TICKS_SHORT
+End Statement
+
+;; What every arrival in an area and every restart does for the water's and the castles' things: the Bloobers, firebars, Podoboos and
+;; Bowser, enemies of the enemy list, wait again but those the cartridge would not build (left of enemyEdgeX, the walkers' rule:
+;; ArmGoombas{}); the frenzy markers, level objects which the cartridge's area parser builds for the first screen too, but those
+;; behind markerEdgeX (the view's left); no frenzy is on and no bubble is left (both edges 0 for a new game); then, in a water area,
+;; the arrival's own bubble (ChkSwimE, smbdis 2886: SetupBubble as his start is set, into slot 0 for an area that starts him by its
+;; header's entrance control 0, as 2-2's does). Called after he is put where he arrives. In 2-2 he arrives at the top, so it is
+;; above the status bar's edge and goes on its first tick, as the cartridge's does.
+Statement ArmSwimmers{enemyEdgeX.w, markerEdgeX.w}
+  SHARED currentAreaType, randomBits()
+  ArmBloobers{enemyEdgeX}
+  ArmFirebars{enemyEdgeX}
+  ArmPodoboos{enemyEdgeX}
+  ArmBowsers{enemyEdgeX}
+  ArmFrenzies{markerEdgeX}
+  ClearBubbles{}
+  If currentAreaType = #AREA_TYPE_WATER Then SetupBubble{0, randomBits(1) AND 1}
+End Statement
+
+;; Once per sim tick, from timing.ab3, beside the fireballs (ProcAirBubbles comes after the cartridge's fireballs). Only in a water area;
+;; the timer counts down every tick (a frame timer).
+Statement UpdateBubbles{}
+  SHARED bubbleY(), bubbleFraction(), airBubbleTimer, randomBits(), currentAreaType
+  If airBubbleTimer > 0 Then airBubbleTimer = airBubbleTimer - 1
+  If currentAreaType <> #AREA_TYPE_WATER Then Statement Return
+  For bubbleIndex = #BUBBLE_SLOTS - 1 To 0 Step -1
+    bubbleBit.w = randomBits(1 + bubbleIndex) AND 1
+    ; An empty one, the timer out: from his mouth.
+    If bubbleY(bubbleIndex) < 0 AND airBubbleTimer = 0 Then SetupBubble{bubbleIndex, bubbleBit}
+    ; Up, by its random bit's speed, a pixel for each borrow; under the status bar's edge it pops (MoveBubl).
+    If bubbleY(bubbleIndex) >= 0
+      bubbleFraction(bubbleIndex) = bubbleFraction(bubbleIndex) - #BUBBLE_RISE_FAST
+      If bubbleBit <> 0 Then bubbleFraction(bubbleIndex) = bubbleFraction(bubbleIndex) + #BUBBLE_RISE_FAST - #BUBBLE_RISE_SLOW
+      While bubbleFraction(bubbleIndex) < 0
+        bubbleFraction(bubbleIndex) = bubbleFraction(bubbleIndex) + 256
+        bubbleY(bubbleIndex) = bubbleY(bubbleIndex) - 1
+      Wend
+      If bubbleY(bubbleIndex) < #BUBBLE_TOP_Y Then bubbleY(bubbleIndex) = -1
+    EndIf
+  Next
+End Statement
+
+; Once per sim tick, from timing.ab3.
+Statement UpdateFireballs{}
+  SHARED fireballActive(), fireballX(), fireballY(), fireballVelY(), fireballFractionY(), fireballFractionX()
+  SHARED fireballDirection(), fireballBounced(), fireballAge()
+  SHARED cameraX, simTickCounter, playerState
+  ; At the axe they hold where they are (victory mode runs no fireballs).
+  If playerState = #PLAYER_ST_AXE Then Statement Return
+  For ball = 0 To #FIREBALL_SLOTS - 1
+    If fireballActive(ball) = #FIREBALL_EXPLODING
+      fireballAge(ball) = fireballAge(ball) + 1
+      If fireballAge(ball) >= #FIREBALL_EXPLODE_TICKS Then fireballActive(ball) = 0
+    EndIf
+    If fireballActive(ball) = #FIREBALL_FLYING
+      ; Down first, then across, as the cartridge does.
+      fireballVelY(ball) = fireballVelY(ball) + #FIREBALL_GRAVITY
+      If fireballVelY(ball) > #FIREBALL_FALL_MAX Then fireballVelY(ball) = #FIREBALL_FALL_MAX
+      wholePx.w = fireballVelY(ball)/256
+      fireballFractionY(ball) = fireballFractionY(ball) + (fireballVelY(ball) - wholePx*256)
+      fireballY(ball) = fireballY(ball) + wholePx
+      If fireballFractionY(ball) >= 256
+        fireballY(ball) = fireballY(ball) + 1
+        fireballFractionY(ball) = fireballFractionY(ball) - 256
+      EndIf
+      If fireballFractionY(ball) < 0
+        fireballY(ball) = fireballY(ball) - 1
+        fireballFractionY(ball) = fireballFractionY(ball) + 256
+      EndIf
+      ; Across at #FIREBALL_SPEED_X sixteenths of a pixel a tick, the fraction carried.
+      acrossSum.w = fireballFractionX(ball) + #FIREBALL_SPEED_X
+      fireballX(ball) = fireballX(ball) + fireballDirection(ball)*(acrossSum/16)
+      fireballFractionX(ball) = acrossSum MOD 16
+      ; The probe: the middle of the bottom edge. Not in the top 24 px.
+      landed.w = False
+      If fireballY(ball) >= #FIREBALL_TOP_LIMIT
+        If MetatileAt{fireballX(ball) + #FIREBALL_SIZE/2, fireballY(ball) + #FIREBALL_SIZE} <> #MT_EMPTY Then landed = True
+      EndIf
+      If landed = True
+        If fireballVelY(ball) < 0 OR fireballBounced(ball) = True
+          fireballActive(ball) = #FIREBALL_EXPLODING
+          fireballAge(ball) = 0
+          SoundSquare1{#SFX_BUMP}
+        Else
+          fireballVelY(ball) = #FIREBALL_BOUNCE_VY
+          fireballFractionY(ball) = 0
+          fireballBounced(ball) = True
+          fireballY(ball) = ((fireballY(ball) + #FIREBALL_SIZE)/#TILE)*#TILE - #FIREBALL_SIZE
+        EndIf
+      Else
+        fireballBounced(ball) = False
+      EndIf
+      ; Gone when off either side of the screen or out of the bottom of the level.
+      If fireballX(ball) + #FIREBALL_SIZE < cameraX OR fireballX(ball) > cameraX + #VIEW_W OR fireballY(ball) > #MAP_H*#TILE
+        fireballActive(ball) = 0
+      EndIf
+      If fireballActive(ball) = #FIREBALL_FLYING
+        If (simTickCounter AND 1) = 0 Then FireballHitsEnemies{ball}
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The bubbles, in the view (DrawBubble), and only where the bitmap is: a bubble made while Mario falls out of the world (his y runs to
+;; #PIT_FALL_Y as he dies in a pit) starts far below it, and a blit there writes past the bitmap's memory (the cartridge draws none
+;; while he is off the screen, DrawBubble's Player_Y_HighPos test).
+Statement DrawBubbles{}
+  SHARED bubbleX(), bubbleY(), drawBitmap, drawBuffer, viewLeft, viewRight
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  For bubbleIndex = 0 To #BUBBLE_SLOTS - 1
+    If bubbleY(bubbleIndex) >= 0 AND bubbleY(bubbleIndex) + #BUBBLE_SIZE <= #SURFACE_H
+      If bubbleX(bubbleIndex) + #BUBBLE_SIZE > viewLeft - #VIEW_GUARD AND bubbleX(bubbleIndex) < viewRight + #VIEW_GUARD
+        BBlit drawBuffer, #PRE_BUBBLE, bubbleX(bubbleIndex), bubbleY(bubbleIndex)
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The ball spins through its four pictures, one every four ticks; the burst is
+;; three pictures, small to large, two ticks each. In the world bitmap, skipped
+;; outside the view.
+Statement DrawFireballs{}
+  SHARED fireballActive(), fireballX(), fireballY(), fireballAge()
+  SHARED drawBitmap, drawBuffer, viewLeft, viewRight, simTickCounter
+  BBlitMode CookieMode
+  Use BitMap drawBitmap
+  For ball = 0 To #FIREBALL_SLOTS - 1
+    ; Not above the bitmap's top (the blast is drawn 4 px up): a negative row writes before each plane.
+    If fireballActive(ball) <> 0 AND fireballY(ball) >= 4
+      If fireballX(ball) + #TILE > viewLeft - #VIEW_GUARD
+        If fireballX(ball) < viewRight + #VIEW_GUARD
+          If fireballActive(ball) = #FIREBALL_FLYING
+            ; AND 3, not MOD 4: the same for a count that is not negative, without MOD's 2.3 lines.
+            spinFrame.w = (simTickCounter/#FIREBALL_SPIN_TICKS) AND 3
+            BBlit drawBuffer, #PRE_FIREBALL + spinFrame, fireballX(ball), fireballY(ball)
+          Else
+            blastFrame.w = fireballAge(ball)/2
+            If blastFrame > 2 Then blastFrame = 2
+            BBlit drawBuffer, #PRE_BLAST + blastFrame, fireballX(ball) - 4, fireballY(ball) - 4
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; END OF FIREBALLS (BLITZ MODE)

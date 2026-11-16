@@ -1,0 +1,85 @@
+;; =======================================================
+;; INITIALISATION (BLITZ MODE)
+;; =======================================================
+
+InitTimingClock{}
+;; The NES palette the settings chose: the colour tables filled before the first UpdatePalette{} writes them. A
+;; choice a release does not offer (saved in debug mode, or dropped from the checklist since) is the default instead.
+If PaletteChoiceAllowed{paletteChoice} = False Then paletteChoice = #PALETTE_DEFAULT
+ApplyNesPalette{paletteChoice}
+
+;; List 0 is the fixed HUD band, list 1 the scrolling world. Only list 0 carries
+;; the palette. InitHud{}, below, draws into the band once the atlas palette is up.
+Use BitMap #HUD_BAND_BM
+Cls 0
+; The Blitz guide: always use the extended form with smooth scrolling set, even at 0,0.
+DisplayBitMap 0, #HUD_BAND_BM, #SCROLL_BIAS, 0
+;; Black from the first frame: the world slot shows the cover, with pen 0 black (the
+;; palette model), while everything loads and the playfields are stamped behind it.
+Use BitMap #COVER_BM
+Cls 0
+DisplayBitMap 1, #COVER_BM, #SCROLL_BIAS, #VIEW_TOP, #BACK_BM, #SCROLL_BIAS, #VIEW_TOP
+DisplayBitMap 2, #COVER_BM, #SCROLL_BIAS, #AWAY_TOP, #BACK_BM, #SCROLL_BIAS, #AWAY_TOP
+; The back's band split: its copper strings, at the cover's x (sparkydave.parallax.blitz.ab3).
+InitBand{}
+coverKind = #COVER_BLANK
+UpdatePalette{}
+; The All-Stars sky's strings off, and the fetch-off string at the world's end, before anything loads (SetAllStarsSky{}).
+ShowAllStarsSky{}
+BlitzKeys On
+
+LoadAtlas{}
+;; The back playfield: the start area's scenery, once (sparkydave.map.blitz.ab3); later areas of another scenery are
+;; stamped as they are entered (StampBothPlayfields{}).
+EnsureBackStrip{}
+;; Snapshot the initial level state so F1 can restore spent blocks. The full
+;; mapBuffer and metatileBuffer are copied once at startup; ResetLevel{} copies
+;; them back to undo any runtime cell changes (a bumped `?` block, a shattered
+;; brick, etc.) and then re-stamps the playfield.
+For copyCell = 0 To #MAP_CELLS - 1
+  mapBufferBackup(copyCell) = mapBuffer(copyCell)
+  metatileBufferBackup(copyCell) = metatileBuffer(copyCell)
+Next
+LoadMario{}
+LoadObjects{}
+CutActorShapes{}
+CutMarioSprites{}
+LoadPanel{}
+CutPanelShapes{}
+LoadLogo{}
+CutLogoShape{}
+InitHud{}
+;; The All-Stars look's tile set blocks, and the overground set, on the bitmaps now, kept in the first (sparkydave.tileset.blitz.ab3):
+;; no disk read for it later.
+AllocTileSetCache{}
+If tileSetCacheBlock(0) <> 0 Then StoreTileSet{0, -1}
+; Every shape is cut: the sheets only that needed go (sparkydave.objects.ab3).
+FreeStartupSheets{}
+ShowParallaxPreset{}
+InitPlayer{}
+PoolInit{}
+; Goombas wake as the screen reaches them (ActivateGoombas{}, from UpdatePlayer{}).
+ArmGoombas{0}
+ArmSwimmers{0, 0}
+ArmKoopas{0}
+ArmPlants{0}
+ArmLifts{0}
+ArmSprings{0}
+;; StampBothPlayfields{} stamps both bitmaps, pairs drawBuffer with
+;; drawBitmap, and re-seeds both bob buffers with fresh backgrounds.
+StampBothPlayfields{}
+drawBitmap = #PLAY_BM_A
+drawBuffer = #BOB_BUF_A
+DrawPlayer{}
+drawBitmap = #PLAY_BM_B
+drawBuffer = #BOB_BUF_B
+DrawPlayer{}
+drawBitmap = #PLAY_BM_B
+drawBuffer = #BOB_BUF_B
+
+; Sound: the engine cleared, the audio hardware started on silent waves.
+SoundReset{}
+If soundWavesOk = True Then SoundStart{}
+SoundApplySettings{}
+
+;; END OF INITIALISATION (BLITZ MODE)

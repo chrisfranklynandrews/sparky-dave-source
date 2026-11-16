@@ -1,0 +1,61 @@
+.KEY proof
+.BRA {
+.KET }
+.DEF proof "tile-cache"
+; Compile and run one proof with AmiBlitz 3.13.
+;
+; Usage
+;   execute sparky-dave:S/run-proof              runs the default proof, set on the .DEF line above
+;   execute sparky-dave:S/run-proof hud-band     runs game/proofs/hud-band.ab3 instead
+;
+; When you start a new proof, change the name on the .DEF line above and nothing else.
+; If the proof writes game/proofs/NAME-results.txt (NAME is the proof's file name
+; without .ab3), that file is typed after the run. Compile errors go to
+; game/compile-proof.log.
+
+FAILAT 21
+
+ECHO "Proof: {proof}"
+
+; Everything from the last run goes first: the program too, so a compile that fails cannot
+; leave the previous build behind to be run by mistake.
+DELETE sparky-dave:game/compile-proof.log QUIET
+DELETE sparky-dave:game/proofs/results/{proof}-results.txt QUIET
+DELETE RAM:Proof QUIET
+
+ECHO "Compiling Sparky Proof"
+
+Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/proofs/{proof}.ab3 -e RAM:Proof -v 2 > sparky-dave:game/compile-proof.log
+
+; The compiler does not always return an error code when it finds errors, so the three
+; checks are the return code, the log (a good build leaves it empty: an error is a
+; "Compiler Error" line) and the program itself.
+IF ERROR
+  ECHO "Compile failed"
+  TYPE sparky-dave:game/compile-proof.log
+  QUIT 20
+ENDIF
+
+SEARCH sparky-dave:game/compile-proof.log "Compiler Error" QUIET
+IF NOT WARN
+  ECHO "Compile failed"
+  TYPE sparky-dave:game/compile-proof.log
+  QUIT 20
+ENDIF
+
+IF NOT EXISTS RAM:Proof
+  ECHO "Compile failed: no program was made"
+  TYPE sparky-dave:game/compile-proof.log
+  QUIT 20
+ENDIF
+
+ECHO "Proof compiled, running"
+
+RAM:Proof
+
+IF EXISTS sparky-dave:game/proofs/results/{proof}-results.txt
+  ECHO "Results:"
+  TYPE sparky-dave:game/proofs/results/{proof}-results.txt
+ENDIF
+
+ECHO "Proof run, complete"

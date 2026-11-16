@@ -1,0 +1,44 @@
+;; =======================================================
+;; CHIP RAM REPORT (BLITZ MODE)
+;; =======================================================
+
+;; Samples free Chip RAM every #MEM_SAMPLE_FRAMES frames, from the main loop. The
+;; first sample is the live baseline with the display up. The report written at
+;; exit (see sparkydave.reports.ab3) gives launch, after init, the baseline, the last and
+;; the lowest sample: a steady drop between baseline and last on a long run is a
+;; leak, for example the per-frame GetaShape noted in the main project's AMIGA_RENDERER note.
+;; AvailMem_(2) is MEMF_CHIP, AvailMem_($20002) is the largest free Chip block; Fast RAM (AvailMem_(4) and ($20004)) is sampled
+;; alongside, for the code and the arrays (the main project's MEMORY note).
+;; It runs only in debug mode (the parameter debug).
+
+Statement SampleChipRam{}
+  SHARED chipRamFrames, chipRamSamples, chipRamLive, chipRamLast, chipRamLowest, chipRamLiveLargest, chipRamLowestLargest
+  SHARED debugMode, fastRamLive, fastRamLiveLargest, fastRamLast, fastRamLowest, fastRamLowestLargest
+  If debugMode = False Then Statement Return
+  chipRamFrames = chipRamFrames + 1
+  If chipRamFrames < #MEM_SAMPLE_FRAMES Then Statement Return
+  chipRamFrames = 0
+  free.l = AvailMem_(2)
+  largest.l = AvailMem_($20002)
+  fastFree.l = AvailMem_(4)
+  fastLargest.l = AvailMem_($20004)
+  If chipRamSamples = 0
+    chipRamLive = free
+    chipRamLiveLargest = largest
+    chipRamLowest = free
+    chipRamLowestLargest = largest
+    fastRamLive = fastFree
+    fastRamLiveLargest = fastLargest
+    fastRamLowest = fastFree
+    fastRamLowestLargest = fastLargest
+  EndIf
+  fastRamLast = fastFree
+  If fastFree < fastRamLowest Then fastRamLowest = fastFree
+  If fastLargest < fastRamLowestLargest Then fastRamLowestLargest = fastLargest
+  chipRamLast = free
+  If free < chipRamLowest Then chipRamLowest = free
+  If largest < chipRamLowestLargest Then chipRamLowestLargest = largest
+  chipRamSamples = chipRamSamples + 1
+End Statement
+
+;; END OF CHIP RAM REPORT (BLITZ MODE)

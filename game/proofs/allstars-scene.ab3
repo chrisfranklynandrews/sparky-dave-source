@@ -1,0 +1,467 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+
+;; =======================================================
+;; ALLSTARS-SCENE: THE ALL-STARS FRONT, THE COMPOSED BACK STRIP AND A COPPER SKY ON THE GAME'S DISPLAY
+;; =======================================================
+;; Compile in UAE (S/run-proof allstars-scene). Not part of the game. The all-stars branch (the all-stars plan, "Tiles" and "Back").
+;;
+;; The question. The look needs, together and before the engine is touched: (1) 1-1 in All-Stars tiles on the front playfield in the
+;; accepted 15 pens, with the five cycling pens running (the glint on the question block and the coin, six steps of 8 ticks; the hue
+;; pens on the flower and star row, four sets, 2 ticks a step); (2) the back playfield showing the user's composed 48 column strip
+;; (hills over clouds, one scroll speed, 8 pens) wrapping without a seam; (3) the sky, 15 colours, as a Copper gradient in colour 0
+;; (the backdrop both playfields show through), costing no back pens. The Copper writes are 24 bit: BPLCON3 with LOCT clear, the
+;; high nibbles into COLOR00, LOCT set, the low nibbles, LOCT clear again.
+;;
+;; The display is the game's two lists (a top list that loads the palette, the world list below) with a plain bar for the HUD: a dual playfield at fetch mode 1 (the game since 2026-10-31), DDF 0 and 0, window 31 and -33, lead-in bias -32, the
+;; back's colours at entries 16 to 31. The front is the whole level in one bitmap (3584 + 64 wide, tiles blocked in from the atlas), the back the strip drawn 1152 wide.
+;; Both come from `python tools/record/make_allstars_scene_proof.py` (run it first): allstars-scene/back-atlas.iff, shelf.iff and
+;; allstars-scene-data.ab3, with the game's own tiles-allstars-1-1.iff for the front. The enemies and items of the sheet stand on a shelf along the sky of the first two screens.
+;;
+;; Keys: Right and Left scroll while held, Space starts and stops a scroll back and forth, 1 to 3 the speed (1, 2 or 4 pixels a frame),
+;; 4 to 6 the back's rate (a quarter, a half or the front's), R back to 0, G the glint cycle on and off, H the hue cycle on and off,
+;; S the Copper sky on and off (off: colour 0 stays the top band's colour), Esc quits and writes allstars-scene-results.txt.
+;;
+;; What to look at and report
+;; 1. The front: do the ground, bricks, pipes, castle and the question blocks look like the screenshot? Wrong or missing pens anywhere?
+;; 2. The question blocks: the glint steps (bright, bright, bright, middle, dark, middle) without a flicker? G stops it.
+;; 3. The shelf (scroll to 0): the Koopa, plant, shells, Goomba, mushrooms, flower, star, coins and burst in the right colours?
+;;    The flower, star, coin spin and burst change hue every 2 ticks (orange, green, red, teal): look right, no pen out of place? H stops it.
+;; 4. The back: the hills and clouds, all 8 colours right, no black or transparent holes, front pen 0 showing them through? Scroll left to
+;;    right past 768 / rate (about 3000 pixels at a quarter): is there a seam where the strip wraps?
+;; 5. The sky: a smooth gradient dark at the top to light at the bottom, no tear or colour jump at the left or right of the window,
+;;    no flicker? S shows the flat colour for comparison.
+
+WBStartup
+
+XINCLUDE "allstars-scene-data.ab3"
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_SPACE = $40
+#RAW_KEY_R     = $13
+#RAW_KEY_G     = $24
+#RAW_KEY_H     = $25
+#RAW_KEY_S     = $21
+#COLOR00       = $180
+#BPLCON3       = $106
+#COPPER_NOP    = $1fe
+
+#HUD_YPOS_PAL  = 44
+#HUD_YPOS_NTSC = 32
+#HUD_H      = 16
+#LIST_GAP   = 3
+#SPRITE_HIDDEN_Y = 300
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#SCROLL_MAX = 3328
+#STRIP_W    = 768
+#SKY_SLOTS  = 7
+#SKY_MAX    = 30
+
+#PLAYFIELD2_OFFSET_16 = $1c00
+#FETCH_MODE_1         = $1000
+#SPRITE_FLAG          = $400
+#BM_FRONT      = 0
+#BM_BACK       = 1
+#BM_ATLAS      = 2
+#BM_BACK_ATLAS = 3
+#BM_SHELF      = 4
+#BM_HUD        = 5
+#BM_SPRITE     = 6
+#SHAPE_SPRITE  = 2
+#SPRITE_HIDE   = 0
+#SHAPE_TILE    = 0
+#SHAPE_SHELF   = 1
+#TILE          = 16
+#ATLAS_COLS    = 20
+#FRONT_COLS    = 224
+#FRONT_CELLS   = 3360
+#BACK_COLS     = 48
+#BACK_CELLS    = 720
+#FRONT_W       = 3648
+#BACK_W        = 1152
+#MAP_H         = 240
+#BITMAP_H      = 304
+#SHELF_X       = 40
+#SHELF_Y       = 40
+
+quitFlag.w = False
+;; The lists start higher on an NTSC machine, as the game's (SparkyDave.ab3): an NTSC window is 200 lines, not 256.
+videoIsNtsc.w = NTSC
+hudLine.w = #HUD_YPOS_PAL
+If videoIsNtsc = True Then hudLine = #HUD_YPOS_NTSC
+scrollX.l = 0
+autoScroll.w = False
+autoDir.w = 1
+scrollSpeed.w = 1
+backRateIndex.w = 1
+glintOn.w = True
+hueOn.w = True
+skyOn.w = True
+frameCount.l = 0
+glintStep.w = 0
+hueStep.w = 0
+lastGlintStep.w = -1
+lastHueStep.w = -1
+keySpace.w = False
+keyGlint.w = False
+keyHue.w = False
+keySky.w = False
+readValue.w = 0
+backAtlasHeight.w = 0
+shelfWidth.w = 0
+frontColumns.w = 0
+backPenCount.w = 0
+skyBandCount.w = 0
+
+Dim frontRGB.w(14, 2)
+Dim backRGB.w(14, 2)
+Dim glintRGB.w(5, 5)
+Dim hueRGB.w(3, 8)
+Dim skyLine.w(#SKY_MAX)
+Dim skyRGB.w(#SKY_MAX, 2)
+Dim sceneFrontGid.w(#FRONT_CELLS - 1)
+Dim sceneBackGid.w(#BACK_CELLS - 1)
+Dim backRate.q(2)
+backRate(0) = 0.25
+backRate(1) = 0.5
+backRate(2) = 1.0
+
+For penIndex.w = 0 To 14
+  For channelIndex.w = 0 To 2
+    Read readValue
+    frontRGB(penIndex, channelIndex) = readValue
+  Next
+Next
+Read backPenCount
+For penIndex.w = 0 To backPenCount - 1
+  For channelIndex.w = 0 To 2
+    Read readValue
+    backRGB(penIndex, channelIndex) = readValue
+  Next
+Next
+For stepIndex.w = 0 To 5
+  For valueIndex.w = 0 To 5
+    Read readValue
+    glintRGB(stepIndex, valueIndex) = readValue
+  Next
+Next
+For setIndex.w = 0 To 3
+  For valueIndex.w = 0 To 8
+    Read readValue
+    hueRGB(setIndex, valueIndex) = readValue
+  Next
+Next
+Read skyBandCount
+For bandIndex.w = 0 To skyBandCount - 1
+  Read readValue
+  skyLine(bandIndex) = readValue
+  For channelIndex.w = 0 To 2
+    Read readValue
+    skyRGB(bandIndex, channelIndex) = readValue
+  Next
+Next
+
+Read backAtlasHeight
+Read shelfWidth
+Read frontColumns
+For cellIndex.w = 0 To #FRONT_CELLS - 1
+  Read readValue
+  sceneFrontGid(cellIndex) = readValue
+Next
+For cellIndex.w = 0 To #BACK_CELLS - 1
+  Read readValue
+  sceneBackGid(cellIndex) = readValue
+Next
+
+;; The game's way: the display bitmaps are made here and the tiles blocked in (BuildFront{}, BuildBack{}). The three small atlases are
+;; loaded; the picture is never loaded into a display bitmap (the first try did, and the Amiga showed it sheared).
+;; 64 rows taller than the picture, left clear: after the world list ends the display goes on fetching rows until the window closes (and
+;; before the first list it still holds last frame's pointers), so the rows below row 240 are seen, and they must be blank, not memory.
+BitMap #BM_FRONT, #FRONT_W, #BITMAP_H, 4
+BitMap #BM_BACK, #BACK_W, #BITMAP_H, 4
+BitMap #BM_ATLAS, 320, 48, 4
+BitMap #BM_BACK_ATLAS, 320, backAtlasHeight, 4
+BitMap #BM_SHELF, shelfWidth, 32, 4
+BitMap #BM_HUD, 384, #HUD_H + 16, 4
+BitMap #BM_SPRITE, 16, 16, 2
+LoadBitMap #BM_ATLAS, "sparky-dave:game/assets/tiles-allstars-1-1.iff"
+LoadBitMap #BM_BACK_ATLAS, "sparky-dave:game/proofs/allstars-scene/back-atlas.iff"
+LoadBitMap #BM_SHELF, "sparky-dave:game/proofs/allstars-scene/shelf.iff"
+
+;; Entries 0 the sky's top band (the Copper changes it down the screen), 1 to 15 the front's, 17 up the back's (its pen 0 is clear).
+InitPalette 0, 32
+AGAPalRGB 0, 0, skyRGB(0, 0), skyRGB(0, 1), skyRGB(0, 2)
+For penIndex.w = 0 To 14
+  AGAPalRGB 0, penIndex + 1, frontRGB(penIndex, 0), frontRGB(penIndex, 1), frontRGB(penIndex, 2)
+Next
+For penIndex.w = 0 To backPenCount - 1
+  AGAPalRGB 0, 17 + penIndex, backRGB(penIndex, 0), backRGB(penIndex, 1), backRGB(penIndex, 2)
+Next
+
+BLITZ
+
+;; One 24 bit write of COLOR00 as five Copper moves: LOCT clear and the high nibbles, LOCT set and the low nibbles, LOCT clear again.
+;; BPLCON3 is $1000 in this list (the back's colours at 16: #PLAYFIELD2_OFFSET_16 on the library's $c00), LOCT is bit 9.
+Function.s ColourString{red.w, green.w, blue.w}
+  highPart.w = (red/16)*256 + (green/16)*16 + blue/16
+  lowPart.w = (red AND 15)*256 + (green AND 15)*16 + (blue AND 15)
+  Function Return Mki$(#BPLCON3) + Mki$($1000) + Mki$(#COLOR00) + Mki$(highPart) + Mki$(#BPLCON3) + Mki$($1200) + Mki$(#COLOR00) + Mki$(lowPart) + Mki$(#BPLCON3) + Mki$($1000)
+End Function
+
+;; The sky's bands 1 up, at their first line, each in its own seven slots; with the sky off the same slots hold no-ops.
+Statement SetSky{on.w}
+  SHARED skyBandCount, skyLine(), skyRGB()
+  nothing$ = Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0) + Mki$(#COPPER_NOP) + Mki$(0)
+  For bandIndex.w = 1 To skyBandCount - 1
+    If on = True
+      CustomString 1, (bandIndex - 1)*#SKY_SLOTS, skyLine(bandIndex), ColourString{skyRGB(bandIndex, 0), skyRGB(bandIndex, 1), skyRGB(bandIndex, 2)}
+    Else
+      CustomString 1, (bandIndex - 1)*#SKY_SLOTS, skyLine(bandIndex), nothing$
+    EndIf
+  Next
+  ;; The backdrop is left at the last band's colour when the frame ends, so the border above the next frame would show it: the last
+  ;; line puts the top band's colour back.
+  If on = True
+    CustomString 1, (skyBandCount - 1)*#SKY_SLOTS, #VIEW_H - 1, ColourString{skyRGB(0, 0), skyRGB(0, 1), skyRGB(0, 2)}
+  Else
+    CustomString 1, (skyBandCount - 1)*#SKY_SLOTS, #VIEW_H - 1, nothing$
+  EndIf
+End Statement
+
+;; Tiles from an atlas into a display bitmap as the game's StampPlayfield{} does: cut the tile into a shape, Block it into the cell.
+;; The front's pen 0 and the back's are clear, and a Block of it lays clear, which is the Cls's colour.
+Statement BuildFront{}
+  SHARED sceneFrontGid(), shelfWidth
+  Use BitMap #BM_FRONT
+  Cls 0
+  For cellIndex.w = 0 To #FRONT_CELLS - 1
+    tileNow.w = sceneFrontGid(cellIndex) - 1
+    If tileNow >= 0
+      Use BitMap #BM_ATLAS
+      GetaShape #SHAPE_TILE, (tileNow MOD #ATLAS_COLS)*#TILE, (tileNow/#ATLAS_COLS)*#TILE, #TILE, #TILE
+      Use BitMap #BM_FRONT
+      Block #SHAPE_TILE, (cellIndex MOD #FRONT_COLS)*#TILE, (cellIndex/#FRONT_COLS)*#TILE
+    EndIf
+  Next
+  ;; The shelf of enemies and items, one strip, on the sky of the first two screens.
+  Use BitMap #BM_SHELF
+  GetaShape #SHAPE_SHELF, 0, 0, shelfWidth, 32
+  Use BitMap #BM_FRONT
+  Block #SHAPE_SHELF, #SHELF_X, #SHELF_Y
+End Statement
+
+;; The strip: 48 columns of the back's own atlas (the Cloud Layer and the Background Layer flattened), then the first 24 columns again
+;; to the right so the fetch past the wrap finds the strip's start.
+Statement BuildBack{}
+  SHARED sceneBackGid()
+  Use BitMap #BM_BACK
+  Cls 0
+  For cellIndex.w = 0 To #BACK_CELLS - 1
+    tileNow.w = sceneBackGid(cellIndex) - 1
+    If tileNow >= 0
+      Use BitMap #BM_BACK_ATLAS
+      GetaShape #SHAPE_TILE, (tileNow MOD #ATLAS_COLS)*#TILE, (tileNow/#ATLAS_COLS)*#TILE, #TILE, #TILE
+      Use BitMap #BM_BACK
+      columnNow.w = cellIndex MOD #BACK_COLS
+      rowNow.w = cellIndex/#BACK_COLS
+      Block #SHAPE_TILE, columnNow*#TILE, rowNow*#TILE
+      If columnNow < 24 Then Block #SHAPE_TILE, (columnNow + #BACK_COLS)*#TILE, rowNow*#TILE
+    EndIf
+  Next
+End Statement
+
+Use BitMap #BM_SPRITE
+Cls 0
+GetaShape #SHAPE_SPRITE, 0, 0, 16, 16
+GetaSprite #SPRITE_HIDE, #SHAPE_SPRITE
+InitShape #SHAPE_TILE, #TILE, #TILE, 4
+InitShape #SHAPE_SHELF, shelfWidth, 32, 4
+BuildFront{}
+BuildBack{}
+
+;; The game's two lists (SparkyDave.ab3): a small top list that loads the 32 colours, then the dual playfield world list with no colour
+;; instructions, whose Copper holds the sky's strings. An earlier try put the palette and the dual playfield in one list and the
+;; Amiga showed garbage; the game never does that, and neither does proofs/scroll-256-sprite.ab3, which worked. The world list declares
+;; the 8 sprite channels and is given a blank sprite parked below the screen every frame, as the game does for a hidden Mario: a list
+;; with no sprite set left the hardware sprites reading memory past the last list (a band of garbage below the picture; the game has none).
+InitCopList 0, hudLine, #HUD_H, $10014 + #FETCH_MODE_1 + #SPRITE_FLAG, 0, 32, 0
+InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, $10038 + #FETCH_MODE_1 + #SPRITE_FLAG, 8, 0, #SKY_MAX*#SKY_SLOTS
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, 0
+DisplayAdjust 0, 0, 0, 0, 31, -33
+DisplayAdjust 1, 0, 0, 0, 31, -33
+Use BitMap #BM_HUD
+Cls 0
+Boxf 0, #HUD_H - 2, 383, #HUD_H - 1, 1
+CreateDisplay 0, 1
+DisplayPalette 0, 0
+SetSky{skyOn}
+DisplayBitMap 0, #BM_HUD, -32, 0
+DisplaySprite 1, #SPRITE_HIDE, 0, #SPRITE_HIDDEN_Y, 0
+DisplayBitMap 1, #BM_FRONT, -32, #VIEW_TOP, #BM_BACK, -32, #VIEW_TOP
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_SPACE)
+    If keySpace = False Then autoScroll = NOT autoScroll
+    keySpace = True
+  Else
+    keySpace = False
+  EndIf
+  If RawStatus(#RAW_KEY_G)
+    If keyGlint = False Then glintOn = NOT glintOn
+    keyGlint = True
+  Else
+    keyGlint = False
+  EndIf
+  If RawStatus(#RAW_KEY_H)
+    If keyHue = False Then hueOn = NOT hueOn
+    keyHue = True
+  Else
+    keyHue = False
+  EndIf
+  If RawStatus(#RAW_KEY_S)
+    If keySky = False
+      skyOn = NOT skyOn
+      SetSky{skyOn}
+    EndIf
+    keySky = True
+  Else
+    keySky = False
+  EndIf
+  If RawStatus(#RAW_KEY_R) Then scrollX = 0
+  If RawStatus(1) Then scrollSpeed = 1
+  If RawStatus(2) Then scrollSpeed = 2
+  If RawStatus(3) Then scrollSpeed = 4
+  If RawStatus(4) Then backRateIndex = 0
+  If RawStatus(5) Then backRateIndex = 1
+  If RawStatus(6) Then backRateIndex = 2
+
+  If autoScroll = True
+    scrollX = scrollX + autoDir*scrollSpeed
+    If scrollX >= #SCROLL_MAX Then autoDir = -1
+    If scrollX <= 0 Then autoDir = 1
+  Else
+    If RawStatus(#RAW_KEY_RIGHT) AND scrollX < #SCROLL_MAX Then scrollX = scrollX + scrollSpeed
+    If RawStatus(#RAW_KEY_LEFT) AND scrollX > 0 Then scrollX = scrollX - scrollSpeed
+  EndIf
+  If scrollX < 0 Then scrollX = 0
+  If scrollX > #SCROLL_MAX Then scrollX = #SCROLL_MAX
+
+  glintStep = 0
+  If glintOn = True Then glintStep = (frameCount/8) MOD 6
+  hueStep = 0
+  If hueOn = True Then hueStep = (frameCount/2) MOD 4
+
+  VWait
+  ;; The back moves at one rate (one band, the user's strip), wrapped at the strip's width.
+  backPixels.q = scrollX*backRate(backRateIndex)
+  While backPixels >= #STRIP_W
+    backPixels = backPixels - #STRIP_W
+  Wend
+  DisplaySprite 1, #SPRITE_HIDE, 0, #SPRITE_HIDDEN_Y, 0
+  DisplayBitMap 1, #BM_FRONT, scrollX - 32, #VIEW_TOP, #BM_BACK, backPixels - 32, #VIEW_TOP
+  If glintStep <> lastGlintStep OR hueStep <> lastHueStep
+    AGAPalRGB 0, 1, glintRGB(glintStep, 0), glintRGB(glintStep, 1), glintRGB(glintStep, 2)
+    AGAPalRGB 0, 2, glintRGB(glintStep, 3), glintRGB(glintStep, 4), glintRGB(glintStep, 5)
+    AGAPalRGB 0, 3, hueRGB(hueStep, 0), hueRGB(hueStep, 1), hueRGB(hueStep, 2)
+    AGAPalRGB 0, 4, hueRGB(hueStep, 3), hueRGB(hueStep, 4), hueRGB(hueStep, 5)
+    AGAPalRGB 0, 5, hueRGB(hueStep, 6), hueRGB(hueStep, 7), hueRGB(hueStep, 8)
+    DisplayPalette 0, 0
+    lastGlintStep = glintStep
+    lastHueStep = hueStep
+  EndIf
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/allstars-scene-results.txt")
+  FileOutput 0
+  NPrint "allstars-scene: 1-1 in All-Stars tiles, the composed back strip and a Copper sky, 15 front pens with 5 cycling"
+  NPrint "scroll ", scrollX, ", speed ", scrollSpeed, ", back rate index ", backRateIndex, ", frames ", frameCount
+  NPrint "video ", videoIsNtsc, " (True is NTSC), lists from line ", hudLine
+  NPrint "glint ", glintOn, ", hue ", hueOn, ", sky ", skyOn, " (", skyBandCount, " bands)"
+  CloseFile 0
+EndIf
+End

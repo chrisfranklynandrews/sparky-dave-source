@@ -1,0 +1,15 @@
+;; Start Sparky Dave in the All-Stars look: the second icon in the drawer runs this, as the first
+;; runs SparkyDave (the NES look). It is the SparkyDave launcher with allstars, so everything else
+;; is the same, and the launcher's other words still work:
+;;
+;;   execute SparkyDave-AllStars             the build for this machine's video standard
+;;   execute SparkyDave-AllStars pal debug   as SparkyDave allstars pal debug
+;;
+;; Run it from the drawer it is in, as SparkyDave (a double-click from Workbench does).
+.KEY first,second
+.BRA {
+.KET }
+.DEF first ""
+.DEF second ""
+
+execute SparkyDave allstars {first} {second}

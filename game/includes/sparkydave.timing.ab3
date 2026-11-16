@@ -1,0 +1,68 @@
+;; =======================================================
+;; TIMING (BLITZ MODE)
+;; =======================================================
+;; One sim tick is one console frame. Vblank only displays.
+;; The sim's rate is #SIM_HZ (the physics variant: 60 NTSC, 50 PAL); the sound runs at #SOUND_HZ.
+;; See the main project's TIMING note.
+
+Statement InitTimingClock{}
+  SHARED videoIsNtsc, simStepNumerator, simStepDenominator, simAccumulator
+  SHARED soundStepDenominator, soundAccumulator
+  ; The display's rate: 50 Hz, or 60 Hz on an NTSC machine.
+  displayHz.w = #SIM_HZ_PAL
+  If videoIsNtsc = True Then displayHz = #SIM_HZ_PAL + #SIM_HZ_STEP
+  ; The sim runs #SIM_HZ ticks a second (the physics variant) on a display of displayHz frames.
+  simStepNumerator = #SIM_HZ
+  simStepDenominator = displayHz
+  simAccumulator = 0
+  soundStepDenominator = displayHz
+  soundAccumulator = 0
+End Statement
+
+;; Once a frame, after the sim: the sound engine's ticks, #SOUND_HZ a second whatever the display
+;; and the sim's rate are (on a 50 Hz display that is two ticks in one frame out of five, which is
+;; inaudible, and the music and the effects keep the NES's tempo and pitch).
+Statement RunSoundTicks{}
+  SHARED soundAccumulator, soundStepDenominator, soundTicksLast
+  soundAccumulator = soundAccumulator + #SOUND_HZ
+  soundTicksThisFrame.w = 0
+  While soundAccumulator >= soundStepDenominator
+    If soundTicksThisFrame < #SIM_MAX_TICKS Then SoundFrame{}
+    soundTicksThisFrame = soundTicksThisFrame + 1
+    soundAccumulator = soundAccumulator - soundStepDenominator
+  Wend
+  soundTicksLast = soundTicksThisFrame
+End Statement
+
+Statement RunSimTicks{}
+  SHARED simAccumulator, simStepNumerator, simStepDenominator, simTickCounter, lifeEvent, coverKind, simTicksLast, gamePaused
+  simTicksThisFrame.w = 0
+  simAccumulator = simAccumulator + simStepNumerator
+  While simAccumulator >= simStepDenominator
+    If simTicksThisFrame < #SIM_MAX_TICKS
+      UpdatePause{PauseDown{}}
+      ;; The course-clear screen holds the world still, as the cartridge's next screen
+      ;; would; everything else, game over included, keeps running.
+      If coverKind <> #COVER_NONE
+        UpdateCover{}
+      EndIf
+      If coverKind = #COVER_NONE AND lifeEvent <> #LIFE_COMPLETE AND gamePaused = False
+        UpdatePlayer{}
+        simTickCounter = simTickCounter + 1
+        StepRandomBits{}
+        TickHudTimer{}
+        UpdateBrickDebris{}
+        UpdateFloaters{}
+        UpdateFireballs{}
+        UpdateBubbles{}
+        UpdateLevelEnd{}
+        UpdateIntervalTimers{}
+      EndIf
+      simTicksThisFrame = simTicksThisFrame + 1
+    EndIf
+    simAccumulator = simAccumulator - simStepDenominator
+  Wend
+  simTicksLast = simTicksThisFrame
+End Statement
+
+;; END OF TIMING (BLITZ MODE)

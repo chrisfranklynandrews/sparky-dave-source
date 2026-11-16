@@ -1,0 +1,285 @@
+;; =======================================================
+;; MARIO AS A HARDWARE SPRITE (BLITZ MODE)
+;; =======================================================
+;; With #MARIO_SPRITE at 1 (set in the look files) Mario is not blitted into the playfield but shown as a hardware sprite: one
+;; 3 colour sprite on channel 0, 16 wide, 16 or 32 high, in front of both playfields. At 0 nothing here does anything.
+;;
+;; With #MARIO_SPRITE_COLOURS 15 (the All-Stars look) he is an attached pair, cut from his own sheets (CutMarioAttachedSet{}), his 13 colours the
+;; bank's entries 33 to 45, written by UpdatePalette{} from marioSpriteRGB(); MarioSpriteFrame{} (player-state) maps the engine's picture number to
+;; the sheet's. The rest of this header is the 3 colour sprite (the NES look).
+;;
+;; His colours are the sprite bank's entries 33 to 35, the low two bits of his pens 13, 14 and 15 (skin, brown, red), which
+;; UpdatePalette{} keeps current for Fire Mario and the Starman exactly as it does the pens. Each picture of his is cut once
+;; at start into its own sprite: small right-facing 0 to 13, small left-facing 14 to 27, big right-facing 28 to 46, big
+;; left-facing 47 to 65 (the sheets' cells, the same numbering as the bobs' #PRE_SMALL_R and the rest).
+;;
+;; DrawPlayer{} decides which sprite, where and whether (marioSpriteShape, marioSpriteX, marioSpriteRow: the bitmap row of
+;; the sprite's top, possibly above the world list), and ShowMarioSprite{} puts it on the lists right after the picture
+;; changes, with the same scroll, so it moves on the same frame. The sprite is given to both world lists (list 1, the HUD and
+;; world, and list 2, the tall list shown while he is above the world's top), each at its own top, so the frame the lists
+;; switch is right. A sprite is clipped to the list it is given, so no cut shapes are needed above the top.
+
+;; One sheet's frames, each as a right-facing and a left-facing sprite. The sheet's pens 13 to 15 are his; the low two bits
+;; are the sprite's colours 1 to 3 and any other pen is clear.
+Statement CutMarioSpriteSet{sheetBitmap.w, frameCount.w, frameHeight.w, firstSprite.w}
+  SHARED marioSpritePens()
+  For frameIndex.w = 0 To frameCount - 1
+    Use BitMap sheetBitmap
+    For pixelY.w = 0 To frameHeight - 1
+      For pixelX.w = 0 To #TILE - 1
+        penValue.w = Point(frameIndex*#TILE + pixelX, pixelY)
+        If penValue >= 13
+          marioSpritePens(pixelY, pixelX) = penValue AND 3
+        Else
+          marioSpritePens(pixelY, pixelX) = 0
+        EndIf
+      Next
+    Next
+    Use BitMap #SPRITE_TMP_BM
+    Cls 0
+    For pixelY.w = 0 To frameHeight - 1
+      For pixelX.w = 0 To #TILE - 1
+        If marioSpritePens(pixelY, pixelX) <> 0 Then Plot pixelX, pixelY, marioSpritePens(pixelY, pixelX)
+      Next
+    Next
+    GetaShape #SPRITE_SCRATCH_SHAPE, 0, 0, #TILE, frameHeight
+    GetaSprite firstSprite + frameIndex, #SPRITE_SCRATCH_SHAPE
+    XFlip #SPRITE_SCRATCH_SHAPE
+    GetaSprite firstSprite + frameCount + frameIndex, #SPRITE_SCRATCH_SHAPE
+  Next
+End Statement
+
+;; One of the All-Stars sheets' frames (#MARIO_SPRITE_COLOURS 15), each as a right-facing and a left-facing sprite: the sheet is 4 planes and its
+;; pens are his colours (0 clear, 1 to 13), so the frame is cut as it is: a 4 plane shape makes an attached pair, channels 0 and 1, whose
+;; colours 1 to 15 are the sprite bank's entries 33 to 47.
+Statement CutMarioAttachedSet{sheetBitmap.w, frameCount.w, frameHeight.w, firstSprite.w}
+  SHARED marioSpritePens()
+  For frameIndex.w = 0 To frameCount - 1
+    ;; Through the 4 plane scratch bitmap, as the 3 colour cut does through its 2 plane one: GetaSprite makes an attached pair only
+    ;; from a shape of depth 4, and a shape cut straight from the loaded sheet shows pens 1 to 3 only.
+    Use BitMap sheetBitmap
+    For pixelY.w = 0 To frameHeight - 1
+      For pixelX.w = 0 To #TILE - 1
+        marioSpritePens(pixelY, pixelX) = Point(frameIndex*#TILE + pixelX, pixelY)
+      Next
+    Next
+    Use BitMap #SPRITE_TMP_BM
+    Cls 0
+    For pixelY.w = 0 To frameHeight - 1
+      For pixelX.w = 0 To #TILE - 1
+        If marioSpritePens(pixelY, pixelX) <> 0 Then Plot pixelX, pixelY, marioSpritePens(pixelY, pixelX)
+      Next
+    Next
+    GetaShape #SPRITE_SCRATCH_SHAPE, 0, 0, #TILE, frameHeight
+    GetaSprite firstSprite + frameIndex, #SPRITE_SCRATCH_SHAPE
+    XFlip #SPRITE_SCRATCH_SHAPE
+    GetaSprite firstSprite + frameCount + frameIndex, #SPRITE_SCRATCH_SHAPE
+  Next
+End Statement
+
+;; Big Mario's swim poses 32 wide (the 15 colour look; #SPRITE_SWIM in sparkydave.constants.ab3 says why and how they are numbered): each pose's
+;; two 16 wide halves cut as CutMarioAttachedSet{} cuts a frame, through the scratch bitmap, and each flipped for facing left, where the
+;; halves swap sides (the left-facing left half is the right half flipped).
+Statement CutMarioSwimPairs{}
+  SHARED marioSpritePens()
+  For poseIndex.w = 0 To #SWIM_POSES - 1
+    For halfIndex.w = 0 To 1
+      Use BitMap #SPRITE_SWIM_BM
+      For pixelY.w = 0 To #MARIO_BIG_H - 1
+        For pixelX.w = 0 To #SWIM_HALF_W - 1
+          marioSpritePens(pixelY, pixelX) = Point(poseIndex*2*#SWIM_HALF_W + halfIndex*#SWIM_HALF_W + pixelX, pixelY)
+        Next
+      Next
+      Use BitMap #SPRITE_TMP_BM
+      Cls 0
+      For pixelY.w = 0 To #MARIO_BIG_H - 1
+        For pixelX.w = 0 To #SWIM_HALF_W - 1
+          If marioSpritePens(pixelY, pixelX) <> 0 Then Plot pixelX, pixelY, marioSpritePens(pixelY, pixelX)
+        Next
+      Next
+      GetaShape #SPRITE_SCRATCH_SHAPE, 0, 0, #SWIM_HALF_W, #MARIO_BIG_H
+      GetaSprite #SPRITE_SWIM + poseIndex*4 + halfIndex, #SPRITE_SCRATCH_SHAPE
+      XFlip #SPRITE_SCRATCH_SHAPE
+      GetaSprite #SPRITE_SWIM + poseIndex*4 + 3 - halfIndex, #SPRITE_SCRATCH_SHAPE
+    Next
+  Next
+End Statement
+
+; All of Mario's sprites, once, from init.blitz after the sheets are loaded.
+Statement CutMarioSprites{}
+  If #MARIO_SPRITE = 0 Then Statement Return
+  If #MARIO_SPRITE_COLOURS = 15
+    CutMarioAttachedSet{#SPRITE_SMALL_BM, #SPRITE_SMALL_FRAMES, #TILE, 0}
+    CutMarioAttachedSet{#SPRITE_BIG_BM, #SPRITE_BIG_FRAMES, #MARIO_BIG_H, 2*#SPRITE_SMALL_FRAMES}
+    CutMarioSwimPairs{}
+    Statement Return
+  EndIf
+  CutMarioSpriteSet{#MARIO_BM, #PRE_SMALL_FRAMES, #TILE, 0}
+  CutMarioSpriteSet{#MARIO_BIG_BM, #PRE_BIG_FRAMES, #MARIO_BIG_H, 2*#PRE_SMALL_FRAMES}
+End Statement
+
+;; One of his sprites cut short for the list's bottom: its top keepRows rows, in sprite slot clipSprite. The library clips a sprite at
+;; the bottom of a list by moving the end line up and leaving the rest of the data in memory, and the hardware then reads those rows as
+;; the next sprite's header: a stack of garbage sprites (going into and rising out of a pipe, or falling down a hole). A shape that ends
+;; where the list does has its own end marker. spriteNumber is as CutMarioSprites{} numbered them (small right, small left, big right,
+;; big left), cut as the sets are.
+;; GetaSprite frees the slot's old data before it makes the new, and the cut runs on past the world list's header, which still points
+;; at the sprite last given: cutting into the slot on show makes the hardware read freed memory, and the garbage stack shows for a frame.
+;; So ShowMarioSprite{} keeps two slots and cuts into the one not on show.
+Statement CutMarioClipSprite{spriteNumber.w, keepRows.w, clipSprite.w}
+  localNumber.w = spriteNumber
+  frameCount.w = #SPRITE_SMALL_FRAMES
+  sheetBitmap.w = #MARIO_BM
+  If #MARIO_SPRITE_COLOURS = 15 Then sheetBitmap = #SPRITE_SMALL_BM
+  If spriteNumber >= 2*#SPRITE_SMALL_FRAMES
+    localNumber = spriteNumber - 2*#SPRITE_SMALL_FRAMES
+    frameCount = #SPRITE_BIG_FRAMES
+    sheetBitmap = #MARIO_BIG_BM
+    If #MARIO_SPRITE_COLOURS = 15 Then sheetBitmap = #SPRITE_BIG_BM
+  EndIf
+  frameIndex.w = localNumber
+  facingLeft.w = False
+  If localNumber >= frameCount
+    frameIndex = localNumber - frameCount
+    facingLeft = True
+  EndIf
+  ;; His rows into the scratch bitmap a word at a time: a frame is 16 wide, so each of its rows in a plane is one word (the frame's
+  ;; word frameIndex of the sheet's row). The cut runs every frame as he rises out of a pipe, and a Point and a Plot a pixel would cost
+  ;; 450 to 580 lines a cut, one and a half to two frames. The 15 colour look's pens are
+  ;; his colours as they are (its sheets and the scratch bitmap are 4 planes); the 3 colour look's are pens 13 to 15 alone, the low two
+  ;; bits: a bit set in planes 3 and 2 and in plane 1 or 0 (pen 12 has neither), and the sprite's two planes its planes 0 and 1 there.
+  WaitBlitter
+  sheetStruct.l = Addr BitMap(sheetBitmap)
+  sheetBytesPerRow.l = Peek.w(sheetStruct)
+  scratchStruct.l = Addr BitMap(#SPRITE_TMP_BM)
+  scratchBytesPerRow.l = Peek.w(scratchStruct)
+  For pixelY.w = 0 To keepRows - 1
+    sheetOffset.l = pixelY*sheetBytesPerRow + frameIndex*2
+    scratchOffset.l = pixelY*scratchBytesPerRow
+    If #MARIO_SPRITE_COLOURS = 15
+      For planeIndex.w = 0 To 3
+        Poke.w Peek.l(scratchStruct + 8 + planeIndex*4) + scratchOffset, Peek.w(Peek.l(sheetStruct + 8 + planeIndex*4) + sheetOffset)
+      Next
+    Else
+      planeWord0.w = Peek.w(Peek.l(sheetStruct + 8) + sheetOffset)
+      planeWord1.w = Peek.w(Peek.l(sheetStruct + 12) + sheetOffset)
+      planeWord2.w = Peek.w(Peek.l(sheetStruct + 16) + sheetOffset)
+      planeWord3.w = Peek.w(Peek.l(sheetStruct + 20) + sheetOffset)
+      hisMask.w = planeWord3 AND planeWord2 AND (planeWord1 OR planeWord0)
+      Poke.w Peek.l(scratchStruct + 8) + scratchOffset, planeWord0 AND hisMask
+      Poke.w Peek.l(scratchStruct + 12) + scratchOffset, planeWord1 AND hisMask
+    EndIf
+  Next
+  GetaShape #SPRITE_SCRATCH_SHAPE, 0, 0, #TILE, keepRows
+  If facingLeft = True Then XFlip #SPRITE_SCRATCH_SHAPE
+  GetaSprite clipSprite, #SPRITE_SCRATCH_SHAPE
+End Statement
+
+;; Whether he is to be behind the front playfield this frame: the two places the bob version draws scenery over him (DrawPipeOcclusion{}: the
+;; pipe move's cells; DrawVineEntryOcclusion{}: the cloud floor he climbs up through). The castle is not here: he is hidden then.
+Function.w MarioBehindWanted{}
+  SHARED pipeOccludeCols, playerState, vineWalkOut
+  If #MARIO_SPRITE = 0 Then Function Return False
+  If pipeOccludeCols <> 0 Then Function Return True
+  If playerState = #PLAYER_ST_VINE_ENTRY Then Function Return True
+  If vineWalkOut <> False Then Function Return True
+  Function Return False
+End Function
+
+;; Him between the playfields (wanted True) or in front of both. DisplayControls XORs with the list's present BPLCON2, so each call flips,
+;; and it is called only when the state changes, marioBehindShown remembering which way round it is (as SetOverlayFront{} does for the title).
+;; Both world lists, the one on show and the other, so the frame the HUD-away list is switched is right.
+Statement SetMarioBehind{wanted.w}
+  SHARED marioBehindShown
+  If wanted = marioBehindShown Then Statement Return
+  DisplayControls 1, #MARIO_BEHIND_XOR, 0, 0
+  DisplayControls 2, #MARIO_BEHIND_XOR, 0, 0
+  marioBehindShown = wanted
+End Statement
+
+;; Once a frame, right after the vertical blank and the picture's change (the main loop, after ShowWorldLists{}): the sprite
+;; DrawPlayer{} chose, on both world lists, or out of the way when there is none (a frame DrawPlayer{} drew nothing, a cover,
+;; the title or an overlay). What DrawPlayer{} left is used once.
+Statement ShowMarioSprite{}
+  SHARED marioSpriteShape, marioSpriteX, marioSpriteRow, scrollX, coverKind, marioClipKey, marioClipSlot, overlayScreenShown, jukeboxMarioX, jukeboxMarioY, jukeboxMarioJump
+  SHARED swimPairShown, clipCutsNow
+  If #MARIO_SPRITE = 0 Then Statement Return
+  SetMarioBehind{MarioBehindWanted{}}
+  hideNow.w = False
+  spriteX.w = marioSpriteX - scrollX - #SCROLL_BIAS
+  spriteRowNow.w = marioSpriteRow
+  spriteShown.w = marioSpriteShape
+  ; The lives cover's small Mario (the 15 colour look): the sprite at the cartridge's place for him (DrawCoverScreen{}, the cover's x 96 and row 104 as the cover list shows them).
+  coverMario.w = False
+  If coverKind = #COVER_LIVES AND #MARIO_SPRITE_COLOURS = 15 Then coverMario = True
+  If coverMario = True
+    spriteShown = MarioSpriteFrame{#MARIO_F_IDLE, #SPRITE_SMALL_FRAMES}
+    spriteX = #COVER_MARIO_X - #SCROLL_BIAS
+    spriteRowNow = #COVER_MARIO_Y
+  Else
+    If marioSpriteShape < 0 Then hideNow = True
+    If coverKind <> #COVER_NONE Then hideNow = True
+  EndIf
+  If OverlayOverWorld{} = True Then hideNow = True
+  If OverlayOverCover{} = True Then hideNow = True
+  ; The jukebox page's Mario (the 15 colour look): the sprite, at the place and in the frame the page's stage gave him.
+  If OverlayOverCover{} = True AND overlayScreenShown = #SCREEN_JUKEBOX AND #MARIO_SPRITE_COLOURS = 15
+    hideNow = False
+    spriteShown = MarioSpriteFrame{#MARIO_F_IDLE, #SPRITE_SMALL_FRAMES}
+    If jukeboxMarioJump <> False Then spriteShown = MarioSpriteFrame{#MARIO_F_JUMP, #SPRITE_SMALL_FRAMES}
+    spriteX = jukeboxMarioX - #SCROLL_BIAS
+    spriteRowNow = jukeboxMarioY
+  EndIf
+  ;; Big Mario's swim poses (the 15 colour look): the first of the pose's two halves, shown side by side below (#SPRITE_SWIM), or -1. The
+  ;; big sheet's swim frames, right-facing from 2*#SPRITE_SMALL_FRAMES + #MARIO_F_SWIM1, left-facing #SPRITE_BIG_FRAMES after.
+  swimFirst.w = -1
+  If #MARIO_SPRITE_COLOURS = 15 AND hideNow = False
+    swimRight.w = 2*#SPRITE_SMALL_FRAMES + #MARIO_F_SWIM1
+    swimLeft.w = swimRight + #SPRITE_BIG_FRAMES
+    If spriteShown >= swimRight AND spriteShown < swimRight + #SWIM_POSES Then swimFirst = #SPRITE_SWIM + (spriteShown - swimRight)*4
+    If spriteShown >= swimLeft AND spriteShown < swimLeft + #SWIM_POSES Then swimFirst = #SPRITE_SWIM + (spriteShown - swimLeft)*4 + 2
+  EndIf
+  ; The rows of him above the lists' bottom (row #VIEW_TOP + #VIEW_H, both lists'): all of him, or the shorter sprite of his top rows, or none.
+  If hideNow = False
+    spriteHeight.w = #TILE
+    If spriteShown >= 2*#SPRITE_SMALL_FRAMES Then spriteHeight = #MARIO_BIG_H
+    visibleRows.w = #VIEW_TOP + #VIEW_H - spriteRowNow
+    If visibleRows <= 0
+      hideNow = True
+    Else
+      If visibleRows < spriteHeight
+        clipKey.w = spriteShown*64 + visibleRows
+        If clipKey <> marioClipKey
+          marioClipSlot = 1 - marioClipSlot
+          CutMarioClipSprite{spriteShown, visibleRows, #SPRITE_CLIP + marioClipSlot}
+          ; Counted for the frame time report's display stretch (FrameTimeAfterDisplay{}).
+          clipCutsNow = clipCutsNow + 1
+          marioClipKey = clipKey
+        EndIf
+        spriteShown = #SPRITE_CLIP + marioClipSlot
+        ; Cut short at the bottom: the ordinary 16 wide clip (a swim pose there is rare, and its pair would need a clip of its own).
+        swimFirst = -1
+      EndIf
+    EndIf
+  EndIf
+  If hideNow = True
+    ParkMarioSprite{}
+  Else
+    For listIndex.w = 1 To 2
+      listTop.w = #VIEW_TOP
+      If listIndex = 2 Then listTop = #AWAY_TOP
+      If swimFirst >= 0
+        DisplaySprite listIndex, swimFirst, spriteX - #SWIM_WINDOW_X, spriteRowNow - listTop, 0
+        DisplaySprite listIndex, swimFirst + 1, spriteX - #SWIM_WINDOW_X + #SWIM_HALF_W, spriteRowNow - listTop, #SWIM_CHANNEL
+      Else
+        DisplaySprite listIndex, spriteShown, spriteX, spriteRowNow - listTop, 0
+      EndIf
+    Next
+    If swimFirst >= 0 Then swimPairShown = True
+    ; The second pair parked again the first frame he is not in a swim pose.
+    If swimFirst < 0 AND swimPairShown = True Then ParkSwimPair{}
+  EndIf
+  marioSpriteShape = -1
+End Statement
+
+;; END OF MARIO SPRITE (BLITZ MODE)

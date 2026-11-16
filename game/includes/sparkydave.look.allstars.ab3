@@ -1,0 +1,59 @@
+;; =======================================================
+;; LOOK CONSTANTS -- ALL-STARS
+;; =======================================================
+;; The numbers that differ between the two looks of the game: the NES art (sparkydave.look.nes.ab3) and the All-Stars art (this file). The look is a second axis next to the
+;; physics variant (NTSC or PAL): any look builds with either. It is the art only: the width is the same in both (#VIEW_W, in
+;; sparkydave.constants.ab3). What each constant is, and why, is in the main project's LOOK_VARIANTS note.
+;; tools/build_variant.py look nes (or allstars) copies one of the two files over sparkydave.look.ab3, which is the one the game
+;; includes: edit the look files, never the copy.
+
+; 0 for the NES art, 1 for the All-Stars art.
+#LOOK_ALLSTARS = 1
+
+;; 1 to draw Mario as a hardware sprite (sparkydave.mario-sprite.blitz.ab3: the sprite, in front of the playfields, its colours the
+;; sprite bank's; the world lists carry the sprite channels, the HUD-away list shows him over the HUD), 0 to blit him into the
+;; playfield. Set it in the look files and run python tools/build_variant.py look ..., which copies one over the one the game includes.
+#MARIO_SPRITE = 1
+
+;; How many colours Mario's sprite has: 3 (one channel, his pens 13 to 15, the NES art) or 15 (an attached pair, the colours of
+;; his own sheets mario-small-all-stars.iff and mario-big-all-stars.iff, pens 1 to 13: the real All-Stars colours, in the sprite
+;; bank, none of the playfield's). With 15 the sprites are cut from those sheets, whose frames are not the NES sheets': the frame
+;; counts and the throw below are the sprite sheets', and MarioSpriteFrame{} turns the engine's picture number (the NES sheets'
+;; order, which the bobs on the covers and pages still use) into the sprite sheet's.
+#MARIO_SPRITE_COLOURS = 15
+#SPRITE_SMALL_FRAMES  = 15
+#SPRITE_F_THROW       = 15
+#SPRITE_BIG_FRAMES    = 16
+
+;; The tile atlas of the look (the file loaded is chosen in sparkydave.map.ab3): its size in pixels, its columns, how many tiles it holds (a GID above
+;; that has no picture: the draw routines leave it out), how many of them the front uses, the GID a `?` block becomes when it is spent, and the GID of a
+;; floating coin.
+;; The pen the course clear's two lines of text are set on (a dark bar, so the white letters read over a cloud; 0 is no bar, the cartridge's look).
+;; The sky's Copper strings are in line order with the band's own two (the Copper runs a list in order): #SKY_EARLY_BANDS of the sky's bands start above the band's line
+;; and go before them (python tools/make_allstars_palette_data.py checks the number).
+;; Under the All-Stars look the first #LOOK_FRONT_TILES are the front's and the rest the back strip's cells. The All-Stars numbers are those
+;; of tools/build_allstars_1_1.py, build_allstars_underground.py, build_allstars_water.py and build_allstars_castle.py (every set has this layout); the NES ones repeat the generated level meta's and the manifest's (tools/build_assets.py checks them).
+;; The pen of the title and menu panel's body (title-panel-allstars.iff, pen 10 in every set), which a row is cleared to before it is drawn again.
+#TEXT_BACKING_PEN = 6
+#SKY_EARLY_BANDS  = 7
+#PANEL_CENTRE_PEN = 10
+; The options page's last rows (no PALETTE row under this look: #OPT_PALETTE is a row that does not exist), its row count, and the menu mushroom's column (a gap before the labels).
+#MENU_CURSOR_X    = 0
+#OPT_DEFAULTS     = 7
+#OPT_BACK         = 8
+#OPTIONS_ROWS     = 9
+#LOOK_ATLAS_COLS  = 20
+#OPT_PALETTE      = 99
+#SPENT_BLOCK_GID  = 139
+#LOOK_FRONT_TILES = 140
+#COIN_TILE_GID    = 140
+#LOOK_ATLAS_H     = 224
+#LOOK_ATLAS_TILES = 276
+#LOOK_ATLAS_W     = 320
+
+;; Where the castle's doorway starts, from the CastleDoor object's left edge (CheckCastleDoor{} hides him as his left edge reaches it): the
+;; All-Stars castle's doorway is 8 px right of the NES one (1-1: x 3272 to 3287 against the object's 3264; tiles-1-1-built.png): with 0
+;; he would go in half a block early, his front half still over the wall.
+#LOOK_DOOR_DX = 8
+
+;; END OF LOOK CONSTANTS -- ALL-STARS (BLITZ MODE)

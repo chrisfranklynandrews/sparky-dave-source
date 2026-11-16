@@ -1,0 +1,348 @@
+;; =======================================================
+;; LEVEL META -- GENERATED
+;; =======================================================
+;; python tools/build_assets.py
+
+#TILE_SHAPE        = 0
+#MAX_BOWSERS       = 2
+#ATLAS_BM          = 3
+#MAX_MULTI_COINS   = 4
+#MAX_SPRINGS       = 4
+#MAX_WHIRLPOOLS    = 5
+#MAX_HIDDEN_BLOCKS = 8
+#MAX_PIRANHAS      = 8
+#MAX_LIFTS         = 8
+#MAX_FRENZIES      = 8
+#MAX_PODOBOOS      = 8
+#MAX_KOOPAS        = 12
+#MAP_H             = 15
+#TILE              = 16
+#MAX_GOOMBAS       = 16
+#MAX_BLOOBERS      = 16
+#MAX_FIREBARS      = 16
+#VIEW_TILES_W      = 20
+#ATLAS_COLS        = 29
+#MAX_BLOCK_ITEMS   = 32
+#ATLAS_H           = 96
+#MAP_W             = 240
+#WORLD_H           = 240
+#ATLAS_W           = 464
+#MAP_CELLS         = 3600
+
+;; Level objects from the map's object group, in pixels. Geometry is
+;; _X/_Y/_W/_H; _SPRITE is the tile index on the object sheet, chosen per
+;; placement by the object's `palette` property. Declared in
+;; tools/manifest.py LEVEL_OBJECTS and OBJECT_PALETTES.
+
+#FLAGPOLE_W    = 8
+#MARIO_START_W = 16
+#MARIO_START_H = 16
+#CASTLE_DOOR_W = 16
+#CASTLE_DOOR_H = 16
+#STAR_FLAG_W   = 16
+#STAR_FLAG_H   = 16
+#AREA_RETURN_W = 16
+#AREA_RETURN_H = 16
+#PIPE_ENTRY_W  = 32
+#FLAGPOLE_Y    = 40
+#MARIO_START_X = 40
+#PIPE_ENTRY_H  = 64
+#STAR_FLAG_Y   = 114
+#PIPE_ENTRY_Y  = 144
+#FLAGPOLE_H    = 152
+#AREA_RETURN_Y = 176
+#MARIO_START_Y = 192
+#CASTLE_DOOR_Y = 192
+#PIPE_ENTRY_X  = 912
+#AREA_RETURN_X = 2616
+#FLAGPOLE_X    = 3172
+#CASTLE_DOOR_X = 3264
+#STAR_FLAG_X   = 3264
+
+;; The same boxes as variables: the defaults the engine starts with. The game replaces them with the
+;; loaded area's (sparkydave.areaload.ab3); the harness and the proofs keep these.
+
+areaFlagpoleX.w = 3172
+areaFlagpoleY.w = 40
+areaFlagpoleW.w = 8
+areaFlagpoleH.w = 152
+areaMarioStartX.w = 40
+areaMarioStartY.w = 192
+areaMarioStartW.w = 16
+areaMarioStartH.w = 16
+areaCastleDoorX.w = 3264
+areaCastleDoorY.w = 192
+areaCastleDoorW.w = 16
+areaCastleDoorH.w = 16
+areaStarFlagX.w = 3264
+areaStarFlagY.w = 114
+areaStarFlagW.w = 16
+areaStarFlagH.w = 16
+areaPipeEntryX.w = 912
+areaPipeEntryY.w = 144
+areaPipeEntryW.w = 32
+areaPipeEntryH.w = 64
+areaReturnX.w = 2616
+areaReturnY.w = 176
+areaReturnW.w = 16
+areaReturnH.w = 16
+
+;; Block-item table: `?` blocks that award an item when bumped.
+;; #BLOCK_ITEM_COUNT is the number of entries; the arrays are fixed at
+;; #MAX_BLOCK_ITEMS so the table never needs resizing. Dim here so it
+;; travels with the assignments and include order is irrelevant.
+
+Dim blockItemCell.w(#MAX_BLOCK_ITEMS - 1)
+Dim blockItemSprite.w(#MAX_BLOCK_ITEMS - 1)
+#BLOCK_ITEM_COUNT = 15
+blockItemCount.w = 15
+blockItemCell(0) = 2181
+blockItemSprite(0) = 29
+blockItemCell(1) = 2183
+blockItemSprite(1) = 42
+blockItemCell(2) = 2176
+blockItemSprite(2) = 42
+blockItemCell(3) = 1222
+blockItemSprite(3) = 42
+blockItemCell(4) = 1294
+blockItemSprite(4) = 42
+blockItemCell(5) = 2266
+blockItemSprite(5) = 42
+blockItemCell(6) = 2269
+blockItemSprite(6) = 42
+blockItemCell(7) = 2272
+blockItemSprite(7) = 42
+blockItemCell(8) = 2330
+blockItemSprite(8) = 42
+blockItemCell(9) = 1329
+blockItemSprite(9) = 42
+blockItemCell(10) = 1330
+blockItemSprite(10) = 42
+blockItemCell(11) = 2238
+blockItemSprite(11) = 29
+blockItemCell(12) = 1309
+blockItemSprite(12) = 29
+blockItemCell(13) = 1984
+blockItemSprite(13) = 30
+blockItemCell(14) = 2261
+blockItemSprite(14) = 32
+
+;; Multi-coin brick table: bricks that pay a coin on every bump until a
+;; timer runs out, then become the used block. #MULTI_COIN_COUNT is the
+;; number of entries; the array is fixed at #MAX_MULTI_COINS. Dim here so
+;; it travels with the assignments and include order is irrelevant.
+
+Dim multiCoinCell.w(#MAX_MULTI_COINS - 1)
+; Runtime state, one entry per brick: started flag and intervals left.
+Dim multiCoinStarted.w(#MAX_MULTI_COINS - 1)
+Dim multiCoinIntervals.w(#MAX_MULTI_COINS - 1)
+#MULTI_COIN_COUNT = 1
+multiCoinCount.w = 1
+multiCoinCell(0) = 2254
+
+;; Hidden block table: empty cells that are invisible and not solid until a
+;; head hit from below makes them the used block and releases a 1-UP (the
+;; item is in the block-item table). #HIDDEN_BLOCK_COUNT is the number of
+;; entries; the arrays are fixed at #MAX_HIDDEN_BLOCKS. Dim here so they
+;; travel with the assignments and include order is irrelevant.
+
+Dim hiddenBlockCell.w(#MAX_HIDDEN_BLOCKS - 1)
+; Runtime state, one entry per block: set once the screen has reached it.
+Dim hiddenBlockLive.w(#MAX_HIDDEN_BLOCKS - 1)
+#HIDDEN_BLOCK_COUNT = 1
+hiddenBlockCount.w = 1
+hiddenBlockCell(0) = 1984
+
+;; Goomba spawn table: world positions for each Goomba in the level.
+;; #GOOMBA_COUNT is the number of entries; the arrays are fixed at
+;; #MAX_GOOMBAS so the table never needs resizing. Dim here so it
+;; travels with the assignments and include order is irrelevant.
+
+Dim goombaSpawnX.w(#MAX_GOOMBAS - 1)
+Dim goombaSpawnY.w(#MAX_GOOMBAS - 1)
+;; Runtime state: set once the entry has been woken, or passed.
+Dim goombaSpawned.w(#MAX_GOOMBAS - 1)
+#GOOMBA_COUNT = 16
+goombaSpawnCount.w = 16
+goombaSpawnX(0) = 352
+goombaSpawnY(0) = 192
+goombaSpawnX(1) = 640
+goombaSpawnY(1) = 192
+goombaSpawnX(2) = 816
+goombaSpawnY(2) = 192
+goombaSpawnX(3) = 840
+goombaSpawnY(3) = 192
+goombaSpawnX(4) = 1280
+goombaSpawnY(4) = 64
+goombaSpawnX(5) = 1312
+goombaSpawnY(5) = 64
+goombaSpawnX(6) = 1552
+goombaSpawnY(6) = 192
+goombaSpawnX(7) = 1576
+goombaSpawnY(7) = 192
+goombaSpawnX(8) = 1824
+goombaSpawnY(8) = 192
+goombaSpawnX(9) = 1848
+goombaSpawnY(9) = 192
+goombaSpawnX(10) = 1984
+goombaSpawnY(10) = 192
+goombaSpawnX(11) = 2008
+goombaSpawnY(11) = 192
+goombaSpawnX(12) = 2048
+goombaSpawnY(12) = 192
+goombaSpawnX(13) = 2072
+goombaSpawnY(13) = 192
+goombaSpawnX(14) = 2784
+goombaSpawnY(14) = 192
+goombaSpawnX(15) = 2808
+goombaSpawnY(15) = 192
+
+;; The tile atlas's 16 pens as RGB (the IFF's colour map): the base the palette
+;; model starts from (sparkydave.palette.blitz.ab3).
+
+Dim atlasPalette.w(47)
+atlasPalette(0) = 193
+atlasPalette(1) = 224
+atlasPalette(2) = 254
+atlasPalette(3) = 156
+atlasPalette(4) = 74
+atlasPalette(5) = 0
+atlasPalette(6) = 254
+atlasPalette(7) = 205
+atlasPalette(8) = 198
+atlasPalette(9) = 0
+atlasPalette(10) = 0
+atlasPalette(11) = 0
+atlasPalette(12) = 230
+atlasPalette(13) = 156
+atlasPalette(14) = 33
+atlasPalette(15) = 82
+atlasPalette(16) = 33
+atlasPalette(17) = 0
+atlasPalette(18) = 140
+atlasPalette(19) = 214
+atlasPalette(20) = 0
+atlasPalette(21) = 16
+atlasPalette(22) = 148
+atlasPalette(23) = 0
+atlasPalette(24) = 255
+atlasPalette(25) = 255
+atlasPalette(26) = 255
+atlasPalette(27) = 99
+atlasPalette(28) = 173
+atlasPalette(29) = 255
+atlasPalette(30) = 108
+atlasPalette(31) = 110
+atlasPalette(32) = 0
+atlasPalette(33) = 181
+atlasPalette(34) = 50
+atlasPalette(35) = 32
+atlasPalette(36) = 230
+atlasPalette(37) = 156
+atlasPalette(38) = 33
+atlasPalette(39) = 254
+atlasPalette(40) = 205
+atlasPalette(41) = 198
+atlasPalette(42) = 108
+atlasPalette(43) = 110
+atlasPalette(44) = 0
+atlasPalette(45) = 181
+atlasPalette(46) = 50
+atlasPalette(47) = 32
+
+;; Koopa Troopa spawn table: world positions (the top of the 16x24 sprite).
+;; #KOOPA_COUNT is the number of entries; the arrays are fixed at
+;; #MAX_KOOPAS. Dim here so it travels with the assignments.
+
+Dim koopaSpawnX.w(#MAX_KOOPAS - 1)
+Dim koopaSpawnY.w(#MAX_KOOPAS - 1)
+;; 1 for a Red Koopa (it turns at a ledge), else 0.
+Dim koopaSpawnKind.w(#MAX_KOOPAS - 1)
+;; Runtime state: set once the entry has been woken, or passed.
+Dim koopaSpawned.w(#MAX_KOOPAS - 1)
+#KOOPA_COUNT = 1
+koopaSpawnCount.w = 1
+koopaSpawnX(0) = 1712
+koopaSpawnY(0) = 184
+
+;; Large lift table: the area's lifts (x, y of the platform's top, direction 1 up or 2 down). The compiled-in 1-1 has
+;; none; ApplyAreaObjects{} fills these from an area's objects.
+
+Dim liftSpawnX.w(#MAX_LIFTS - 1)
+Dim liftSpawnY.w(#MAX_LIFTS - 1)
+Dim liftSpawnDir.w(#MAX_LIFTS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim liftSpawned.w(#MAX_LIFTS - 1)
+liftSpawnCount.w = 0
+
+;; Jumpspring table: the area's springs (x, and y of the top of the two tile rows they stand in).
+;; ApplyAreaObjects{} fills these from an area's objects.
+
+Dim springSpawnX.w(#MAX_SPRINGS - 1)
+Dim springSpawnY.w(#MAX_SPRINGS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim springSpawned.w(#MAX_SPRINGS - 1)
+springSpawnCount.w = 0
+
+;; Whirlpool table: a water area's (the left edge of each one's pull and its width; a pit's, a block left of it and
+;; two blocks wider). ApplyAreaObjects{} fills these from an area's objects; ProcessWhirlpools{} reads them.
+
+Dim whirlpoolLeftX.w(#MAX_WHIRLPOOLS - 1)
+Dim whirlpoolWidth.w(#MAX_WHIRLPOOLS - 1)
+whirlpoolCount.w = 0
+
+;; Bloober table: the area's Bloobers (x, and y of the top of the 24 px sprite, the cartridge's Enemy_Y_Position).
+;; ApplyAreaObjects{} fills these from an area's objects, leaving out those for hard mode only.
+
+Dim blooberSpawnX.w(#MAX_BLOOBERS - 1)
+Dim blooberSpawnY.w(#MAX_BLOOBERS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim blooberSpawned.w(#MAX_BLOOBERS - 1)
+blooberSpawnCount.w = 0
+
+;; Bowser table: the area's Bowser (x, and y: his front's top, the cartridge's Enemy_Y_Position). ApplyAreaObjects{} fills
+;; these from an area's objects, leaving out one for hard mode only; ActivateBowsers{} builds him.
+
+Dim bowserSpawnX.w(#MAX_BOWSERS - 1)
+Dim bowserSpawnY.w(#MAX_BOWSERS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim bowserSpawned.w(#MAX_BOWSERS - 1)
+bowserSpawnCount.w = 0
+
+;; Podoboo table: the area's Podoboos (x: each waits below the screen and leaps from there). ApplyAreaObjects{} fills these
+;; from an area's objects, leaving out those for hard mode only; ActivatePodoboos{} builds them.
+
+Dim podobooSpawnX.w(#MAX_PODOBOOS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim podobooSpawned.w(#MAX_PODOBOOS - 1)
+podobooSpawnCount.w = 0
+
+;; Firebar table: the area's firebars (x and y of the block each turns about, and its kind: 0 slow and 1 fast clockwise, 2
+;; slow and 3 fast counter-clockwise, 4 long). ApplyAreaObjects{} fills these from an area's objects; ActivateFirebars{} builds them.
+
+Dim firebarSpawnX.w(#MAX_FIREBARS - 1)
+Dim firebarSpawnY.w(#MAX_FIREBARS - 1)
+Dim firebarSpawnKind.w(#MAX_FIREBARS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim firebarSpawned.w(#MAX_FIREBARS - 1)
+firebarSpawnCount.w = 0
+
+;; Frenzy markers: the area's AreaFrenzy objects (x, and the kind: 0 stop, 1 swimming Cheep-Cheeps, 2 flying, 3 Bullet
+;; Bills). ApplyAreaObjects{} fills these from an area's objects; UpdateFrenzy{} fires each as the view reaches it.
+
+Dim frenzyMarkX.w(#MAX_FRENZIES - 1)
+Dim frenzyMarkKind.w(#MAX_FRENZIES - 1)
+;; Runtime state: set once the marker has fired, or passed.
+Dim frenzyMarkPassed.w(#MAX_FRENZIES - 1)
+frenzyMarkCount.w = 0
+
+;; Piranha Plant table: the area's plants (x, and y of the pipe's top). The level's start area is the compiled-in
+;; 1-1, which has none; ApplyAreaObjects{} fills these from an area's objects.
+
+Dim plantSpawnX.w(#MAX_PIRANHAS - 1)
+Dim plantSpawnY.w(#MAX_PIRANHAS - 1)
+;; Runtime state: set once the entry has been built, or passed.
+Dim plantSpawned.w(#MAX_PIRANHAS - 1)
+plantSpawnCount.w = 0
+
+;; END OF LEVEL META -- GENERATED

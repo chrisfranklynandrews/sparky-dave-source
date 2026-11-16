@@ -1,0 +1,19 @@
+# Amiga sources: keep the bytes as committed. Do not guess CRLF.
+*.ab3 text eol=lf
+
+# AmigaDOS scripts
+compile-sparky text eol=lf
+compile-sparky-bin text eol=lf
+compile-sparky-one text eol=lf
+run-sparky text eol=lf
+run-proof text eol=lf
+run-tests text eol=lf
+run-tests-one text eol=lf
+stage-data text eol=lf
+get-graphics text eol=lf
+script-properties text eol=lf
+SparkyDave text eol=lf
+SparkyDave-AllStars text eol=lf
+
+# Git hooks run under sh
+tools/hooks/* text eol=lf

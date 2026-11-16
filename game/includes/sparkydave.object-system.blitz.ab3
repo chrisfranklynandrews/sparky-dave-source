@@ -1,0 +1,995 @@
+;; =======================================================
+;; OBJECT SYSTEM (BLITZ MODE)
+;; =======================================================
+;; Fixed-capacity object pool for block-spawned items and future enemies.
+;; Capacity: #MAX_OBJECTS = 12 slots.
+;; Types: #OBJ_NONE (0), #OBJ_MUSHROOM (1), #OBJ_COIN (2), #OBJ_GOOMBA (3), #OBJ_KOOPA (4).
+;; Flagpole and block-bump animation remain special cases outside the pool.
+;; See the main project's OBJECT_SYSTEM note for the pool contract.
+
+;; ---------------------------------------------------------------
+;; Score and coins
+;; ---------------------------------------------------------------
+;; Game values the HUD reads. Here, not in the HUD include, so the event sites
+;; (coin collected, stomp, mushroom) and the test harness can call them.
+Statement AddScore{points.l}
+  SHARED hudScore
+  hudScore = hudScore + points
+  If hudScore > #HUD_SCORE_MAX Then hudScore = #HUD_SCORE_MAX
+End Statement
+
+;; One coin and its points. The counter wraps at 100 and the hundredth coin gives
+;; an extra life (GiveOneCoin, smbdis 7090-7098).
+Statement AddCoin{}
+  SHARED hudCoins, playerLives
+  hudCoins = hudCoins + 1
+  SoundSquare2{#SFX_COIN_GRAB}
+  If hudCoins >= 100
+    hudCoins = 0
+    playerLives = playerLives + 1
+    ; The 1-up replaces the coin's sound (the cartridge queues it after).
+    SoundSquare2{#SFX_EXTRA_LIFE}
+  EndIf
+  AddScore{#SCORE_COIN}
+End Statement
+
+;; ---------------------------------------------------------------
+;; Pool Initialization
+;; ---------------------------------------------------------------
+Statement PoolInit{}
+  SHARED jumpspringAnimCtrl
+  jumpspringAnimCtrl = 0
+  SHARED objType(), objState(), objActive(), objX(), objY()
+  SHARED objVelX(), objVelY(), objDir(), objSprite()
+  SHARED objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget()
+  SHARED objFractionY(), objSourceCell(), objPopTimer(), objStartY()
+  SHARED objFractionX(), objTouch(), enemyPairTouch(), objFlipped(), objRed(), objGrounded(), objWinged()
+  For i = 0 To #MAX_OBJECTS*#MAX_OBJECTS - 1
+    enemyPairTouch(i) = False
+  Next
+  For i = 0 To #MAX_OBJECTS - 1
+    objFractionX(i) = 0
+    objTouch(i) = False
+    objFlipped(i) = False
+    objRed(i) = 0
+    objGrounded(i) = False
+    objWinged(i) = 0
+    objActive(i) = False
+    objType(i) = #OBJ_NONE
+    objState(i) = 0
+    objX(i) = 0
+    objY(i) = 0
+    objVelX(i) = 0
+    objVelY(i) = 0
+    objDir(i) = 0
+    objSprite(i) = 0
+    objAnimTimer(i) = 0
+    objAnimFrame(i) = 0
+    objAux(i) = 0
+    objRiseRemaining(i) = 0
+    objRiseStep(i) = 0
+    objRiseTarget(i) = 0
+    objFractionY(i) = 0
+    objSourceCell(i) = 0
+    objPopTimer(i) = 0
+    objStartY(i) = 0
+  Next
+End Statement
+
+;; ---------------------------------------------------------------
+;; Pool Helpers
+;; ---------------------------------------------------------------
+
+; Find a free slot. Returns index (0..#MAX_OBJECTS-1) or -1 if full.
+Function.w PoolAlloc{}
+  SHARED objActive(), objType(), objRed(), objGrounded(), objWinged()
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = False
+      objActive(i) = True
+      objType(i) = #OBJ_NONE
+      ; The Red Koopa's flags are not a plant's or a Goomba's to inherit from the slot's last occupant.
+      objRed(i) = 0
+      objGrounded(i) = False
+      objWinged(i) = 0
+      Function Return i
+    EndIf
+  Next
+  Function Return -1
+End Function
+
+; Release a slot back to the pool
+Statement PoolFree{slot.w}
+  SHARED objActive(), objType(), enemyPairTouch()
+  If slot >= 0 AND slot < #MAX_OBJECTS
+    objActive(slot) = False
+    objType(slot) = #OBJ_NONE
+    For pairSlot = 0 To #MAX_OBJECTS - 1
+      enemyPairTouch(slot*#MAX_OBJECTS + pairSlot) = False
+      enemyPairTouch(pairSlot*#MAX_OBJECTS + slot) = False
+    Next
+  EndIf
+End Statement
+
+; Test if any object of given type is active. Returns slot index or -1.
+Function.w PoolTypeActive{type.w}
+  SHARED objActive(), objType()
+  For i = 0 To #MAX_OBJECTS - 1
+    If objActive(i) = True AND objType(i) = type
+      Function Return i
+    EndIf
+  Next
+  Function Return -1
+End Function
+
+;; Initialize a block-spawned item slot as a mushroom. A caller spawning a flower or
+;; star sets objType(slot) after this call (SpawnBlockItem does).
+Statement PoolInitBlockItem{slot.w, x.w, y.w, sprite.w, sourceCell.w, simStepNum.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY()
+  objType(slot) = #OBJ_MUSHROOM
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = #MARIO_BTN_RIGHT
+  objSprite(slot) = sprite
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = simStepNum
+  objRiseStep(slot) = (#ITEM_H*256)/simStepNum
+  objRiseTarget(slot) = y - #ITEM_H
+  objFractionY(slot) = 0
+  objSourceCell(slot) = sourceCell
+  objPopTimer(slot) = 0
+  objStartY(slot) = 0
+End Statement
+
+; Initialize a coin slot
+Statement PoolInitCoin{slot.w, x.w, y.w, startY.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY()
+  objType(slot) = #OBJ_COIN
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = 0
+  objSprite(slot) = #COIN_SPRITE_TURN_BASE
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = #COIN_POP_FRAMES
+  objStartY(slot) = startY
+End Statement
+
+; Initialize a Goomba slot
+Statement PoolInitGoomba{slot.w, x.w, y.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch()
+  objFractionX(slot) = 0
+  objTouch(slot) = False
+  objType(slot) = #OBJ_GOOMBA
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = #MARIO_BTN_LEFT
+  objSprite(slot) = #GOOMBA_F_WALK1
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = 0
+End Statement
+
+;; A Koopa Troopa, walking left. Its y is the top of its 24 px sprite. objAux is the
+;; revive count in intervals while it is a shell, objPopTimer a sliding shell's
+;; kill chain.
+Statement PoolInitKoopa{slot.w, x.w, y.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch(), objFlipped(), objRed(), objGrounded()
+  objFlipped(slot) = False
+  objRed(slot) = 0
+  objGrounded(slot) = False
+  objType(slot) = #OBJ_KOOPA
+  objState(slot) = #KOOPA_ST_WALK
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = #MARIO_BTN_LEFT
+  objSprite(slot) = 0
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objFractionX(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = 0
+  objTouch(slot) = False
+End Statement
+
+;; A large lift (InitVertPlatform and PlatLiftUp or PlatLiftDown, smbdis 8914, 8956): x the platform's left, y its top. objVelY is
+;; its direction (-1 up, 1 down), objFractionY the carried movement in 256ths of a pixel, objTouch whether Mario stood on it this
+;; tick. Direction 3 is the platform that goes right (RightPlatform, smbdis 10950): objVelY 0, and objState 0 until Mario has stood
+;; on it, then 1 and it goes right at #LIFT_RIGHT_SPEED, objFractionX the carried movement in 256ths. Direction 7 is the platform that
+;; moves up and down: objVelY its speed (whole pixels, signed), objFractionY its 256ths and objRiseStep the y's own (StepSwing{}).
+Statement PoolInitLift{slot.w, x.w, y.w, liftDirection.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch(), objFlipped()
+  objFlipped(slot) = False
+  objType(slot) = #OBJ_LIFT
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 1
+  If liftDirection = 1 OR liftDirection = 4 Then objVelY(slot) = -1
+  If liftDirection = 3 OR liftDirection = 6 OR liftDirection = 7 Then objVelY(slot) = 0
+  objDir(slot) = 0
+  objSprite(slot) = 0
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objFractionX(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = y
+  objTouch(slot) = False
+  ;; A lift going up or down, large (1, 2) or small (4, 5), is 12 px right of its data's x (PosPlatform, through PlatLiftUp and
+  ;; PlatLiftDown); the swaying platform (6) starts still, its counters 0.
+  If liftDirection = 1 OR liftDirection = 2 OR liftDirection = 4 OR liftDirection = 5 Then objX(slot) = x + #LIFT_SHIFT
+  If liftDirection = 4 OR liftDirection = 5 Then objAux(slot) = #LIFT_KIND_SMALL
+  If liftDirection = 6 Then objAux(slot) = #LIFT_KIND_SWAY
+  ;; The platform that moves up and down (7, InitVertPlatform) starts still: its top (objStartY) is its y and its centre (objRiseTarget)
+  ;; 64 px below; from y 128 on, its top is the y's two's complement and its centre 64 above, as the cartridge's bytes.
+  If liftDirection = 7
+    objAux(slot) = #LIFT_KIND_VERT
+    If y < 128
+      objRiseTarget(slot) = (y + 64) AND 255
+    Else
+      objStartY(slot) = (256 - y) AND 255
+      objRiseTarget(slot) = (y + 192) AND 255
+    EndIf
+  EndIf
+End Statement
+
+;; A jumpspring (the Jumpspring object, smbdis 4147): x its left, y the top of its two tile rows. objAux is its step (the
+;; cartridge's JumpspringAnimCtrl for this one, 0 at rest), objAnimTimer its frame timer, objVelY the speed it will give Mario.
+Statement PoolInitSpring{slot.w, x.w, y.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch(), objFlipped()
+  objFlipped(slot) = False
+  objType(slot) = #OBJ_SPRING
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = 0
+  objSprite(slot) = 0
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objFractionX(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = y
+  objTouch(slot) = False
+End Statement
+
+;; A Red Koopa (InitRedKoopa, smbdis 8177): a Koopa that turns round at a ledge instead of walking off it, once it has landed (it
+;; starts in the cartridge's falling state, which does not turn).
+Statement PoolInitRedKoopa{slot.w, x.w, y.w}
+  SHARED objRed()
+  PoolInitKoopa{slot, x, y}
+  objRed(slot) = #RED_TURNS
+End Statement
+
+; A Green Paratroopa (InitJumpGPTroopa, smbdis 8868): a Koopa with wings, walking left, that hops until it is stomped.
+Statement PoolInitParatroopa{slot.w, x.w, y.w}
+  SHARED objWinged()
+  PoolInitKoopa{slot, x, y}
+  objWinged(slot) = #WINGS_HOP
+End Statement
+
+;; A Red Paratroopa (InitRedPTroopa, smbdis 8214): a winged red Koopa facing left, still, that swings about a centre (StepSwing{}): its
+;; top (objStartY) is its y and its centre (objRiseTarget) 48 px below; from y 128 on, 32 above. Stomped it is a red Koopa that walks off
+;; ledges (#RED_WALKS_OFF: the cartridge's demoted id $01, not the Red Koopa's $03).
+Statement PoolInitRedParatroopa{slot.w, x.w, y.w}
+  SHARED objWinged(), objRed(), objStartY(), objRiseTarget()
+  PoolInitKoopa{slot, x, y}
+  objWinged(slot) = #WINGS_FLY
+  objRed(slot) = #RED_WALKS_OFF
+  objStartY(slot) = y
+  If y < 128
+    objRiseTarget(slot) = (y + 48) AND 255
+  Else
+    objRiseTarget(slot) = (y + 224) AND 255
+  EndIf
+End Statement
+
+;; One tick of the cartridge's pseudorandom register (smbdis 803 to 815): bit 1 of its first two bytes, exclusive-or'd, is
+;; rotated in at the top of the first byte and every byte's low bit on into the next.
+Statement StepRandomBits{}
+  SHARED randomBits()
+  randomCarry.w = 0
+  If (randomBits(0) AND 2) <> (randomBits(1) AND 2) Then randomCarry = 128
+  For randomIndex = 0 To 6
+    lowBit.w = randomBits(randomIndex) AND 1
+    randomBits(randomIndex) = randomBits(randomIndex)/2 + randomCarry
+    randomCarry = lowBit*128
+  Next
+End Statement
+
+;; A Bloober (InitBloober, smbdis 8206): at rest, facing left (its moving direction starts 0, which MoveBloober's swim takes
+;; as left). objAux is its BlooperMoveCounter (the swim's phase: 0 faster, 1 slower, 2 floating down), objVelY its
+;; Enemy_Y_MoveForce (the climb in whole pixels a tick), objVelX its BlooperMoveSpeed (the same, sideways), objPopTimer its
+;; EnemyIntervalTimer (intervals left of the float down), objDir its moving direction.
+Statement PoolInitBloober{slot.w, x.w, y.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch(), objFlipped()
+  objFlipped(slot) = False
+  objType(slot) = #OBJ_BLOOBER
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+  objDir(slot) = #MARIO_BTN_LEFT
+  objSprite(slot) = 0
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objFractionX(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = y
+  objTouch(slot) = False
+End Statement
+
+;; A swimming Cheep-Cheep (InitCheepCheep, smbdis 8243): objRed its colour, objAux whether it bobs (its cartridge slot was 2 or more),
+;; objVelY the bob's way (0 up, 1 down, the cartridge's CheepCheepMoveMFlag: from the random byte's d4), objStartY where it came in
+;; (CheepCheepOrigYPos), objFractionX and objFractionY the swim's and the bob's 256ths carried.
+Statement PoolInitCheep{slot.w, x.w, y.w, red.w, bobs.w, downward.w}
+  SHARED objType(), objVelY(), objAux(), objRed()
+  PoolInitBloober{slot, x, y}
+  objType(slot) = #OBJ_CHEEP
+  objVelY(slot) = downward
+  objAux(slot) = bobs
+  objRed(slot) = red
+End Statement
+
+;; A flying Cheep-Cheep (InitFlyingCheepCheep, smbdis 8419), red, below the screen and rising: objAux the cartridge's enemy slot it
+;; holds (its random bytes are that slot's), objVelX its sideways speed in sixteenths (Enemy_X_Speed) and objFractionX the sixteenths
+;; carried, objVelY its vertical speed in whole pixels (Enemy_Y_Speed), objFractionY that speed's 256ths (Enemy_Y_MoveForce),
+;; objRiseStep the y's own 256ths (Enemy_YMF_Dummy), objDir its way, objPopTimer 1 on the tick it comes (it does not move until the
+;; next: the cartridge fills an empty slot after the slots before it have moved).
+Statement PoolInitFlyCheep{slot.w, x.w, speedSixteenths.w, cartSlot.w}
+  SHARED objType(), objVelX(), objVelY(), objAux(), objRed(), objDir(), objPopTimer(), objRiseStep()
+  PoolInitBloober{slot, x, #FLY_CHEEP_SPAWN_Y}
+  objType(slot) = #OBJ_FLY_CHEEP
+  objAux(slot) = cartSlot
+  objRed(slot) = 1
+  objVelX(slot) = speedSixteenths
+  objVelY(slot) = #FLY_CHEEP_LAUNCH
+  objRiseStep(slot) = 0
+  objPopTimer(slot) = 1
+  objDir(slot) = #MARIO_BTN_RIGHT
+  If speedSixteenths < 0 Then objDir(slot) = #MARIO_BTN_LEFT
+End Statement
+
+;; A Piranha Plant, down in its pipe (InitPiranhaPlant, smbdis 8814). x is the sprite's left, y the top of the pipe, where
+;; the 24 px sprite sits when it is down; it rises #PLANT_RISE above that. objStartY is the down position, objVelY its
+;; direction (1 down, -1 up), objTouch the movement flag (moving between the ends), objAux the pause at an end in
+;; ticks, objFractionY the step carried in sixteenths of a pixel. It starts able to rise at once, if Mario is not near.
+Statement PoolInitPiranha{slot.w, x.w, y.w}
+  SHARED objType(), objState(), objX(), objY(), objVelX(), objVelY()
+  SHARED objDir(), objSprite(), objAnimTimer(), objAnimFrame(), objAux()
+  SHARED objRiseRemaining(), objRiseStep(), objRiseTarget(), objFractionY()
+  SHARED objSourceCell(), objPopTimer(), objStartY(), objFractionX(), objTouch(), objFlipped()
+  objFlipped(slot) = False
+  objType(slot) = #OBJ_PIRANHA
+  objState(slot) = 0
+  objX(slot) = x
+  objY(slot) = y
+  objVelX(slot) = 0
+  objVelY(slot) = 1
+  objDir(slot) = #MARIO_BTN_LEFT
+  objSprite(slot) = 0
+  objAnimTimer(slot) = 0
+  objAnimFrame(slot) = 0
+  objAux(slot) = 0
+  objRiseRemaining(slot) = 0
+  objRiseStep(slot) = 0
+  objRiseTarget(slot) = 0
+  objFractionY(slot) = 0
+  objFractionX(slot) = 0
+  objSourceCell(slot) = 0
+  objPopTimer(slot) = 0
+  objStartY(slot) = y
+  objTouch(slot) = False
+End Statement
+
+;; Goombas wake when the screen arrives (an enemy is built when the right edge of the view reaches its
+;; column), not before. goombaSpawned() marks the entries already woken, or passed. A Goomba that dies or
+;; leaves the pool is not woken again.
+
+;; The x the cartridge decides a Goomba on (PositionEnemyObj): its own, or, for a member of a group, the group's entry: its first
+;; member's x plus #ENEMY_GROUP_LEAD. A group is spawns on the same row #ENEMY_GROUP_SPACING apart (singles are on the 16 px grid).
+Function.w GoombaEntryX{goombaIndex.w}
+  SHARED goombaSpawnCount, goombaSpawnX(), goombaSpawnY()
+  rowY.w = goombaSpawnY(goombaIndex)
+  firstX.w = goombaSpawnX(goombaIndex)
+  inGroup.w = False
+  stepping.w = True
+  While stepping = True
+    stepping = False
+    For otherIndex.w = 0 To goombaSpawnCount - 1
+      If goombaSpawnY(otherIndex) = rowY
+        If goombaSpawnX(otherIndex) = firstX - #ENEMY_GROUP_SPACING
+          firstX = goombaSpawnX(otherIndex)
+          inGroup = True
+          stepping = True
+        EndIf
+        If goombaSpawnX(otherIndex) = goombaSpawnX(goombaIndex) + #ENEMY_GROUP_SPACING Then inGroup = True
+      EndIf
+    Next
+  Wend
+  If inGroup = True Then Function Return firstX + #ENEMY_GROUP_LEAD
+  Function Return goombaSpawnX(goombaIndex)
+End Function
+
+;; Every entry waiting again, except those the cartridge would not build, which count as passed. Its enemy list is read from the
+;; top, and an entry whose x is left of the screen's right edge is skipped, never built (PositionEnemyObj, smbdis 7942: `jmp
+;; CheckThreeBytes`); so on arriving, or after a death, nothing on the first screen of the cartridge's 256 appears, only what is
+;; at or past its right edge: passedX is the view's left plus #NES_VIEW_W. A group is judged by its entry (GoombaEntryX{}). A new
+;; game passes none.
+Statement ArmGoombas{passedX.w}
+  SHARED goombaSpawnCount
+  SHARED goombaSpawnX(), goombaSpawned()
+  For goombaIndex = 0 To goombaSpawnCount - 1
+    goombaSpawned(goombaIndex) = False
+    If GoombaEntryX{goombaIndex} < passedX Then goombaSpawned(goombaIndex) = True
+  Next
+End Statement
+
+;; Once per sim tick, before UpdateObjects{}. A full pool leaves the entry waiting
+;; for the next tick.
+Statement ActivateGoombas{}
+  SHARED goombaSpawnCount
+  SHARED goombaSpawnX(), goombaSpawnY(), goombaSpawned(), cameraX
+  For goombaIndex = 0 To goombaSpawnCount - 1
+    If goombaSpawned(goombaIndex) = False
+      If goombaSpawnX(goombaIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitGoomba{wakeSlot, goombaSpawnX(goombaIndex), goombaSpawnY(goombaIndex)}
+          goombaSpawned(goombaIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+; A Koopa's entry, as GoombaEntryX{} (green Koopas come in groups too: 1-2's pair).
+Function.w KoopaEntryX{koopaIndex.w}
+  SHARED koopaSpawnCount, koopaSpawnX(), koopaSpawnY()
+  rowY.w = koopaSpawnY(koopaIndex)
+  firstX.w = koopaSpawnX(koopaIndex)
+  inGroup.w = False
+  stepping.w = True
+  While stepping = True
+    stepping = False
+    For otherIndex.w = 0 To koopaSpawnCount - 1
+      If koopaSpawnY(otherIndex) = rowY
+        If koopaSpawnX(otherIndex) = firstX - #ENEMY_GROUP_SPACING
+          firstX = koopaSpawnX(otherIndex)
+          inGroup = True
+          stepping = True
+        EndIf
+        If koopaSpawnX(otherIndex) = koopaSpawnX(koopaIndex) + #ENEMY_GROUP_SPACING Then inGroup = True
+      EndIf
+    Next
+  Wend
+  If inGroup = True Then Function Return firstX + #ENEMY_GROUP_LEAD
+  Function Return koopaSpawnX(koopaIndex)
+End Function
+
+; The Koopas wake the same way from koopaSpawn*(), and are passed by the same rule, as the Goombas are.
+Statement ArmKoopas{passedX.w}
+  SHARED koopaSpawnCount
+  SHARED koopaSpawnX(), koopaSpawned()
+  For koopaIndex = 0 To koopaSpawnCount - 1
+    koopaSpawned(koopaIndex) = False
+    If KoopaEntryX{koopaIndex} < passedX Then koopaSpawned(koopaIndex) = True
+  Next
+End Statement
+
+Statement ActivateKoopas{}
+  SHARED koopaSpawnCount
+  SHARED koopaSpawnX(), koopaSpawnY(), koopaSpawnKind(), koopaSpawned(), cameraX
+  For koopaIndex = 0 To koopaSpawnCount - 1
+    If koopaSpawned(koopaIndex) = False
+      If koopaSpawnX(koopaIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          If koopaSpawnKind(koopaIndex) = #KOOPA_KIND_RED
+            PoolInitRedKoopa{wakeSlot, koopaSpawnX(koopaIndex), koopaSpawnY(koopaIndex)}
+          EndIf
+          If koopaSpawnKind(koopaIndex) = #KOOPA_KIND_WINGED
+            PoolInitParatroopa{wakeSlot, koopaSpawnX(koopaIndex), koopaSpawnY(koopaIndex)}
+          EndIf
+          If koopaSpawnKind(koopaIndex) = #KOOPA_KIND_RED_FLYING
+            PoolInitRedParatroopa{wakeSlot, koopaSpawnX(koopaIndex), koopaSpawnY(koopaIndex)}
+          EndIf
+          If koopaSpawnKind(koopaIndex) = #KOOPA_KIND_GREEN
+            PoolInitKoopa{wakeSlot, koopaSpawnX(koopaIndex), koopaSpawnY(koopaIndex)}
+          EndIf
+          koopaSpawned(koopaIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The Piranha Plants are built as their pipes come into view, the cartridge's way (a pipe grows its plant when its column is
+;; decoded), but, unlike a walker, one in view after a restart is built too: the area is decoded afresh from the halfway page
+;; and the plants with it. So an entry is passed only when it is wholly left of the view; passedX is the view's right edge
+;; (cameraX + #VIEW_W) as the others' is, or 0 for a new game that passes none. A plant that was killed is not built again
+;; until the next ArmPlants{}.
+Statement ArmPlants{passedX.w}
+  SHARED plantSpawnCount
+  SHARED plantSpawnX(), plantSpawned()
+  For plantIndex = 0 To plantSpawnCount - 1
+    plantSpawned(plantIndex) = False
+    If passedX > 0
+      If plantSpawnX(plantIndex) + #PLANT_W <= passedX - #VIEW_W Then plantSpawned(plantIndex) = True
+    EndIf
+  Next
+End Statement
+
+; Once per sim tick, before UpdateObjects{}, as ActivateGoombas{}.
+Statement ActivatePlants{}
+  SHARED plantSpawnCount
+  SHARED plantSpawnX(), plantSpawnY(), plantSpawned(), cameraX
+  For plantIndex = 0 To plantSpawnCount - 1
+    If plantSpawned(plantIndex) = False
+      If plantSpawnX(plantIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitPiranha{wakeSlot, plantSpawnX(plantIndex), plantSpawnY(plantIndex)}
+          plantSpawned(plantIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The Bloobers are built as their column reaches the view's right edge, and passed as the walkers are: a restart passes those
+;; in or behind the view (the cartridge's enemies are all built the same way).
+Statement ArmBloobers{passedX.w}
+  SHARED blooberSpawnCount
+  SHARED blooberSpawnX(), blooberSpawned()
+  For blooberIndex = 0 To blooberSpawnCount - 1
+    blooberSpawned(blooberIndex) = False
+    If blooberSpawnX(blooberIndex) < passedX Then blooberSpawned(blooberIndex) = True
+  Next
+End Statement
+
+; Once per sim tick, before UpdateObjects{}, as ActivateGoombas{}.
+Statement ActivateBloobers{}
+  SHARED blooberSpawnCount
+  SHARED blooberSpawnX(), blooberSpawnY(), blooberSpawned(), cameraX
+  For blooberIndex = 0 To blooberSpawnCount - 1
+    If blooberSpawned(blooberIndex) = False
+      If blooberSpawnX(blooberIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitBloober{wakeSlot, blooberSpawnX(blooberIndex), blooberSpawnY(blooberIndex)}
+          blooberSpawned(blooberIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; A firebar about the block at (blockX, blockY) (InitShortFirebar, smbdis 8378): its centre ball 4 px in and down, its spin state 0
+;; (straight up), its kind.
+Statement PoolInitFirebar{slot.w, blockX.w, blockY.w, kind.w}
+  SHARED objType(), objAux(), objVelX(), objVelY()
+  PoolInitBloober{slot, blockX + 4, blockY + 4}
+  objType(slot) = #OBJ_FIREBAR
+  objAux(slot) = kind
+  objVelX(slot) = 0
+  objVelY(slot) = 0
+End Statement
+
+; The firebars wait again, but those behind the view (as the Bloobers).
+Statement ArmFirebars{passedX.w}
+  SHARED firebarSpawnCount, firebarSpawnX(), firebarSpawned()
+  For firebarIndex = 0 To firebarSpawnCount - 1
+    firebarSpawned(firebarIndex) = False
+    If firebarSpawnX(firebarIndex) < passedX Then firebarSpawned(firebarIndex) = True
+  Next
+End Statement
+
+;; Once per sim tick, before UpdateObjects{}: a firebar is built as its block comes within #FIREBAR_WAKE_MARGIN of the view's right (the
+;; cartridge's extended boundary). Its spin starts then: the cartridge's turns only while it is near the screen, so the angle it is first
+;; seen at may differ from the cartridge's.
+Statement ActivateFirebars{}
+  SHARED firebarSpawnCount, firebarSpawnX(), firebarSpawnY(), firebarSpawnKind(), firebarSpawned(), cameraX
+  For firebarIndex = 0 To firebarSpawnCount - 1
+    If firebarSpawned(firebarIndex) = False
+      If firebarSpawnX(firebarIndex) <= cameraX + #VIEW_W + #FIREBAR_WAKE_MARGIN
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitFirebar{wakeSlot, firebarSpawnX(firebarIndex), firebarSpawnY(firebarIndex), firebarSpawnKind(firebarIndex)}
+          firebarSpawned(firebarIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+; A Podoboo (InitPodoboo, smbdis 8144): below the screen, its interval timer 1, so it leaps an interval after it is built.
+Statement PoolInitPodoboo{slot.w, x.w}
+  SHARED objType(), objPopTimer()
+  PoolInitBloober{slot, x, #PODOBOO_WAIT_Y}
+  objType(slot) = #OBJ_PODOBOO
+  objPopTimer(slot) = 1
+End Statement
+
+; The Podoboos wait again, but those behind the view (as the Bloobers).
+Statement ArmPodoboos{passedX.w}
+  SHARED podobooSpawnCount, podobooSpawnX(), podobooSpawned()
+  For podobooIndex = 0 To podobooSpawnCount - 1
+    podobooSpawned(podobooIndex) = False
+    If podobooSpawnX(podobooIndex) < passedX Then podobooSpawned(podobooIndex) = True
+  Next
+End Statement
+
+; Once per sim tick, before UpdateObjects{}: a Podoboo is built as its x comes into view (as the Bloobers).
+Statement ActivatePodoboos{}
+  SHARED podobooSpawnCount, podobooSpawnX(), podobooSpawned(), cameraX
+  For podobooIndex = 0 To podobooSpawnCount - 1
+    If podobooSpawned(podobooIndex) = False
+      If podobooSpawnX(podobooIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitPodoboo{wakeSlot, podobooSpawnX(podobooIndex)}
+          podobooSpawned(podobooIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; Bowser (InitBowser, smbdis 8504): where he starts is remembered, his feet's and frame timers are set, the fire breath's first wait,
+;; 5 hit points, speed 2, facing right (the cartridge's $df, odd), his mouth shut.
+Statement PoolInitBowser{slot.w, x.w, y.w}
+  SHARED objType(), objAux(), objDir(), objPopTimer()
+  SHARED bowserOrigX, bowserFeetCounter, bowserBodyControls, bowserFireBreathTimer, bowserHitPoints
+  PoolInitBloober{slot, x, y}
+  objType(slot) = #OBJ_BOWSER
+  objAux(slot) = 2
+  objDir(slot) = #MARIO_BTN_RIGHT
+  objPopTimer(slot) = #BOWSER_CHASE_TICKS
+  bowserOrigX = x
+  bowserFeetCounter = #BOWSER_FEET_TICKS
+  bowserBodyControls = 0
+  bowserFireBreathTimer = #BOWSER_FIRE_FIRST
+  bowserHitPoints = #BOWSER_HIT_POINTS
+End Statement
+
+; Bowser waits again, but one behind the view (as the Bloobers).
+Statement ArmBowsers{passedX.w}
+  SHARED bowserSpawnCount, bowserSpawnX(), bowserSpawned()
+  For bowserIndex = 0 To bowserSpawnCount - 1
+    bowserSpawned(bowserIndex) = False
+    If bowserSpawnX(bowserIndex) < passedX Then bowserSpawned(bowserIndex) = True
+  Next
+End Statement
+
+; Once per sim tick, before UpdateObjects{}: Bowser is built as he comes into view.
+Statement ActivateBowsers{}
+  SHARED bowserSpawnCount, bowserSpawnX(), bowserSpawnY(), bowserSpawned(), cameraX
+  For bowserIndex = 0 To bowserSpawnCount - 1
+    If bowserSpawned(bowserIndex) = False
+      If bowserSpawnX(bowserIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitBowser{wakeSlot, bowserSpawnX(bowserIndex), bowserSpawnY(bowserIndex)}
+          bowserSpawned(bowserIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; The frenzy markers wait again, but those behind the view, and no frenzy is on: an area's frenzy starts from its markers (the
+;; cartridge's area start clears EnemyFrenzyBuffer, and its renderer meets the markers of the screen it starts on).
+Statement ArmFrenzies{passedX.w}
+  SHARED frenzyMarkCount, frenzyMarkX(), frenzyMarkPassed(), frenzyKind, frenzyTimer, frenzyHeightFilter
+  For frenzyIndex = 0 To frenzyMarkCount - 1
+    frenzyMarkPassed(frenzyIndex) = False
+    If frenzyMarkX(frenzyIndex) < passedX Then frenzyMarkPassed(frenzyIndex) = True
+  Next
+  frenzyKind = #FRENZY_KIND_STOP
+  frenzyTimer = 0
+  frenzyHeightFilter = 0
+End Statement
+
+; Every object goes and the frenzy is over (KillAllEnemies, smbdis 10142: every enemy slot erased, EnemyFrenzyBuffer emptied).
+Statement KillAllEnemies{}
+  SHARED objActive(), frenzyKind
+  For poolIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(poolIndex) = True Then PoolFree{poolIndex}
+  Next
+  frenzyKind = #FRENZY_KIND_STOP
+End Statement
+
+; The next flame wait (SetFlameTimer): FlameTimerData's entry for the counter, which goes on round its eight.
+Function.w NextFlameWait{}
+  SHARED bowserFlameWait(), bowserFlameTimerCtrl
+  flameWait.w = bowserFlameWait(bowserFlameTimerCtrl)
+  bowserFlameTimerCtrl = (bowserFlameTimerCtrl + 1) AND 7
+  Function Return flameWait
+End Function
+
+;; A flame into slot (InitBowserFlame's FinishFlame): at x and y, going to flameHeights(heightIndex), a step a tick toward it from y
+;; (SetMF: up when the height is above y, else down), or none when it starts there.
+Statement PoolInitFlame{slot.w, x.w, y.w, heightIndex.w}
+  SHARED objType(), objAux(), objVelY(), flameHeights()
+  PoolInitBloober{slot, x, y}
+  objType(slot) = #OBJ_FLAME
+  objAux(slot) = flameHeights(heightIndex)
+  objVelY(slot) = 1
+  If objAux(slot) < y Then objVelY(slot) = -1
+  If objAux(slot) = y Then objVelY(slot) = 0
+End Statement
+
+;; The fire's tick (CheckFrenzyBuffer, InitBowserFlame): the timer counts down; once out, a flame into a free slot with the flame's sound.
+;; With Bowser in the pool it comes from his mouth (SpawnFromMouth) and the kind clears until his mouth shuts again; with none it is the
+;; fire frenzy's, from past the view's right edge, and the timer starts again.
+Statement UpdateFlameFrenzy{}
+  SHARED frenzyKind, frenzyTimer, randomBits(), objActive(), objType(), objX(), objY(), cameraX, flameHeights()
+  If frenzyTimer > 0 Then frenzyTimer = frenzyTimer - 1
+  If frenzyTimer <> 0 Then Statement Return
+  flameSlot.w = PoolAlloc{}
+  If flameSlot = -1 Then Statement Return
+  SoundNoise{#SFX_BOWSER_FLAME}
+  heightIndex.w = randomBits(flameSlot AND 3) AND 3
+  bowserSlot.w = -1
+  For poolIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(poolIndex) = True AND objType(poolIndex) = #OBJ_BOWSER Then bowserSlot = poolIndex
+  Next
+  If bowserSlot <> -1
+    PoolInitFlame{flameSlot, objX(bowserSlot) - #FLAME_MOUTH_X, objY(bowserSlot) + #FLAME_MOUTH_Y, heightIndex}
+    frenzyKind = #FRENZY_KIND_STOP
+  Else
+    frenzyTimer = NextFlameWait{} + #FLAME_FRENZY_EXTRA
+    PoolInitFlame{flameSlot, cameraX + #VIEW_W + #FLAME_SPAWN_GAP, flameHeights(heightIndex), heightIndex}
+  EndIf
+End Statement
+
+;; A flyer into pool slot poolSlot, holding the cartridge's enemy slot cartSlot (InitFlyingCheepCheep, smbdis 8419, after the timer): its
+;; sideways speed from two random bits and Mario's speed (none, walking, or past walking; the cartridge compares his speed unsigned, so
+;; any speed left counts as past), its x Mario's plus or minus a distance (FlyCCXPositionData), and, standing still, a random bit may send
+;; it left instead of right. tools/record/fly_cheep_model.py checks the arithmetic.
+Statement LaunchFlyCheep{poolSlot.w, cartSlot.w}
+  SHARED randomBits(), flyCheepSpeed(), flyCheepPosition(), playerX, playerSpeedX
+  lowBits.w = randomBits(cartSlot) AND 3
+  speedGroup.w = 0
+  If playerSpeedX <> 0
+    speedGroup = 4
+    If playerSpeedX < 0 OR playerSpeedX > #MARIO_MAX_WALK Then speedGroup = 8
+  EndIf
+  speedIndex.w = speedGroup + lowBits
+  sideIndex.w = speedIndex
+  If (randomBits(cartSlot + 1) AND 3) <> 0 Then sideIndex = randomBits(cartSlot + 2) AND 15
+  launchSpeed.w = flyCheepSpeed(speedIndex)
+  If playerSpeedX = 0
+    If (sideIndex AND 2) <> 0 Then launchSpeed = -launchSpeed
+  Else
+    sideIndex = speedIndex
+  EndIf
+  launchX.w = playerX - flyCheepPosition(sideIndex)
+  If (sideIndex AND 2) <> 0 Then launchX = playerX + flyCheepPosition(sideIndex)
+  PoolInitFlyCheep{poolSlot, launchX, launchSpeed, cartSlot}
+End Statement
+
+;; A flying frenzy's tick (CheckFrenzyBuffer, then InitFlyingCheepCheep): its timer counts down (a frame timer, before the enemies), and
+;; once out the lowest of the cartridge's enemy slots a flyer does not hold takes the next; the timer starts again from that slot's next
+;; random byte even when slots 0 to #FLY_CHEEP_SLOTS - 1 are all held (an empty slot after them reloads it, with no flyer).
+Statement UpdateFlyFrenzy{}
+  SHARED frenzyTimer, randomBits(), flyCheepTimer(), objActive(), objType(), objAux()
+  If frenzyTimer > 0 Then frenzyTimer = frenzyTimer - 1
+  If frenzyTimer <> 0 Then Statement Return
+  cartSlot.w = 0
+  slotHeld.w = True
+  While slotHeld = True AND cartSlot < #FLY_CHEEP_SLOTS
+    slotHeld = False
+    For poolIndex = 0 To #MAX_OBJECTS - 1
+      If objActive(poolIndex) = True AND objType(poolIndex) = #OBJ_FLY_CHEEP
+        If objAux(poolIndex) = cartSlot Then slotHeld = True
+      EndIf
+    Next
+    If slotHeld = True Then cartSlot = cartSlot + 1
+  Wend
+  frenzyTimer = flyCheepTimer(randomBits(cartSlot + 1) AND 3)
+  If cartSlot >= #FLY_CHEEP_SLOTS Then Statement Return
+  flySlot.w = PoolAlloc{}
+  If flySlot = -1 Then Statement Return
+  LaunchFlyCheep{flySlot, cartSlot}
+End Statement
+
+;; Once per sim tick in the main area, after the enemies are built, unless the world is held. A marker fires as the view's right edge
+;; reaches it (AreaFrenzy). A swimming frenzy in a water area sends a Cheep-Cheep when its timer is out and fewer than #FRENZY_SWIMMERS
+;; swimmers are alive (BulletBillCheepCheep: only the cartridge's slots 0 to 2 take one); a flying frenzy is UpdateFlyFrenzy{}'s, Bowser's
+;; fire UpdateFlameFrenzy{}'s; the Bullet Bills are not built.
+Statement UpdateFrenzy{}
+  SHARED frenzyMarkCount, frenzyMarkX(), frenzyMarkKind(), frenzyMarkPassed(), frenzyKind, frenzyTimer, frenzyHeightFilter
+  SHARED frenzyHeights(), randomBits(), cameraX, currentAreaType, worldFreezeTicks, objActive(), objType()
+  SHARED tableLevelWorld(), currentLevel
+  If worldFreezeTicks > 0 Then Statement Return
+  For frenzyIndex = 0 To frenzyMarkCount - 1
+    If frenzyMarkPassed(frenzyIndex) = False AND frenzyMarkX(frenzyIndex) <= cameraX + #VIEW_W
+      frenzyMarkPassed(frenzyIndex) = True
+      frenzyKind = frenzyMarkKind(frenzyIndex)
+    EndIf
+  Next
+  If frenzyKind = #FRENZY_KIND_FLYING
+    UpdateFlyFrenzy{}
+    Statement Return
+  EndIf
+  If frenzyKind = #FRENZY_KIND_FLAME
+    UpdateFlameFrenzy{}
+    Statement Return
+  EndIf
+  ; FrenzyEnemyTimer is a frame timer: it runs down with no flame queued too (Bowser empties the buffer every frame).
+  If frenzyKind = #FRENZY_KIND_STOP AND frenzyTimer > 0 Then frenzyTimer = frenzyTimer - 1
+  If frenzyKind <> #FRENZY_KIND_SWIMMING OR currentAreaType <> #AREA_TYPE_WATER Then Statement Return
+  If frenzyTimer > 0
+    frenzyTimer = frenzyTimer - 1
+    Statement Return
+  EndIf
+  swimmers.w = 0
+  For poolIndex = 0 To #MAX_OBJECTS - 1
+    If objActive(poolIndex) = True AND (objType(poolIndex) = #OBJ_BLOOBER OR objType(poolIndex) = #OBJ_CHEEP) Then swimmers = swimmers + 1
+  Next
+  If swimmers >= #FRENZY_SWIMMERS Then Statement Return
+  cheepSlot.w = PoolAlloc{}
+  If cheepSlot = -1 Then Statement Return
+  randomByte.w = randomBits(cheepSlot AND 3)
+  ; The colour: SwimCC_IDData's grey or red, by the random byte and the world.
+  colourIndex.w = 0
+  If randomByte >= #CHEEP_RED_LIMIT Then colourIndex = 1
+  If tableLevelWorld(currentLevel) <> 2 Then colourIndex = colourIndex + 1
+  ; The height: from the random byte's three low bits, on to the next unused one (the filter starts again once all eight are used).
+  If frenzyHeightFilter = $ff Then frenzyHeightFilter = 0
+  heightIndex.w = randomByte AND 7
+  heightBit.w = 1
+  shiftCount.w = 0
+  While shiftCount < heightIndex
+    heightBit = heightBit*2
+    shiftCount = shiftCount + 1
+  Wend
+  While (frenzyHeightFilter AND heightBit) <> 0
+    heightIndex = (heightIndex + 1) AND 7
+    heightBit = heightBit*2
+    If heightBit > 128 Then heightBit = 1
+  Wend
+  frenzyHeightFilter = frenzyHeightFilter + heightBit
+  bobs.w = 0
+  If swimmers >= 2 Then bobs = 1
+  downward.w = 0
+  If (randomByte AND $10) <> 0 Then downward = 1
+  PoolInitCheep{cheepSlot, cameraX + #VIEW_W + #CHEEP_SPAWN_GAP, frenzyHeights(heightIndex), colourIndex AND 1, bobs, downward}
+  frenzyTimer = #FRENZY_TICKS
+End Statement
+
+;; The lifts are built as their column comes into view. Unlike the plants and springs (area objects, which the cartridge's area
+;; parser builds for the first screen too) they are entries of the enemy list, so the walkers' rule (ArmGoombas{}): on an arrival or
+;; a restart one whose data x is left of the cartridge's screen's right edge is skipped (PositionEnemyObj, smbdis 7942); passedX is
+;; the view's left plus #NES_VIEW_W, or 0 for a new game. They start at the y the area gives them, so the columns' phase is the
+;; cartridge's from the moment they are built.
+Statement ArmLifts{passedX.w}
+  SHARED liftSpawnCount
+  SHARED liftSpawnX(), liftSpawned()
+  For liftIndex = 0 To liftSpawnCount - 1
+    liftSpawned(liftIndex) = False
+    If liftSpawnX(liftIndex) < passedX Then liftSpawned(liftIndex) = True
+  Next
+End Statement
+
+; The springs are built as their column comes into view, as the lifts are (a spring left of the view is passed).
+Statement ArmSprings{passedX.w}
+  SHARED springSpawnCount
+  SHARED springSpawnX(), springSpawned()
+  For springIndex = 0 To springSpawnCount - 1
+    springSpawned(springIndex) = False
+    If passedX > 0
+      If springSpawnX(springIndex) + #TILE <= passedX - #VIEW_W Then springSpawned(springIndex) = True
+    EndIf
+  Next
+End Statement
+
+Statement ActivateSprings{}
+  SHARED springSpawnCount
+  SHARED springSpawnX(), springSpawnY(), springSpawned(), cameraX
+  For springIndex = 0 To springSpawnCount - 1
+    If springSpawned(springIndex) = False
+      If springSpawnX(springIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitSpring{wakeSlot, springSpawnX(springIndex), springSpawnY(springIndex)}
+          springSpawned(springIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+Statement ActivateLifts{}
+  SHARED liftSpawnCount
+  SHARED liftSpawnX(), liftSpawnY(), liftSpawnDir(), liftSpawned(), cameraX
+  For liftIndex = 0 To liftSpawnCount - 1
+    If liftSpawned(liftIndex) = False
+      If liftSpawnX(liftIndex) <= cameraX + #VIEW_W
+        wakeSlot.w = PoolAlloc{}
+        If wakeSlot <> -1
+          PoolInitLift{wakeSlot, liftSpawnX(liftIndex), liftSpawnY(liftIndex), liftSpawnDir(liftIndex)}
+          liftSpawned(liftIndex) = True
+        EndIf
+      EndIf
+    EndIf
+  Next
+End Statement
+
+;; END OF OBJECT SYSTEM (BLITZ MODE)

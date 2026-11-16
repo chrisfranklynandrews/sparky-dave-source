@@ -1,0 +1,469 @@
+; XTRA
+; Embedded .xtra Header
+;
+; General Info
+; -------------------------------------------------------
+; ExePath         = "RAM:"
+; ExeFile         = "Prog.exe"
+; CreateIcon      = 0
+; Residents       = ""
+;
+; Compiler
+; -------------------------------------------------------
+; StringBuffer    = 10240
+; MakeSmallest    = 0
+; FuncOptimize    = 0
+; Version         = 0.0.0
+; NumberOfBuilds  = 0
+;
+; Debugger
+; -------------------------------------------------------
+; CliArgs         = ""
+; StackSize       = 32768
+; RuntimeDebug    = 0
+; DebugInfo       = 0
+; CreateDbgFile   = 0
+; OverflowCheck   = 1
+; AssemblerCheck  = 0
+; InterruptCheck  = 1
+; AutoRun         = 1
+;
+; Editor
+; -------------------------------------------------------
+; CursorLine      = 1
+; CursorColumn    = 1
+; LabelSearch     = ""
+; LabelRemark     = 0
+; LabelAll        = 0
+; LabelCase       = 0
+; LabelPosition   = 0
+;
+; Blitz Objects
+; -------------------------------------------------------
+; Max File        = 5
+; Max GadgetList  = 5
+; Max Shape       = 192
+; Max MenuList    = 5
+; Max IntuiFont   = 5
+; Max BlitzFont   = 4
+; Max Bank        = 5
+; Max GTList      = 20
+; Max IconInfo    = 1
+; Max MUIObject   = 50
+; Max AsyncReq    = 4
+; Max GTMenuList  = 5
+; Max Console     = 5
+; Max TCPSock     = 5
+; Max Tape        = 5
+; Max TagList     = 5
+; Max Database    = 16
+; Max Window      = 20
+; Max BitMap      = 10
+; Max Screen      = 5
+; Max Palette     = 32
+; Max Sound       = 10
+; Max MedModule   = 8
+; Max Buffer      = 10
+; Max Queue       = 10
+; Max Sprite      = 20
+; Max Module      = 5
+; Max Slice       = 10
+; Max CopList     = 10
+; Max PTModule    = 5
+; Max Anim        = 10
+; Max NChunky     = 50
+; Max Chunky      = 20
+; Max Stencil     = 5
+; Max XBSound     = 10
+; Max Page        = 4
+; /XTRA
+;; sprite-attach.ab3 -- can All-Stars Mario be a 15 colour hardware sprite on a 256 wide display?
+;; Compile in UAE (S/run-proof sprite-attach). Not part of the game. The all-stars branch
+;; (the all-stars plan). The decision of 2026-10-28: the All-Stars build is 256 wide, which gives
+;; fetch mode 3 four sprite channels (proofs/sprite-width.ab3, config 2: 256 centred). Mario has 13
+;; colours and Fire and the Starman change 6 to 13 of them, which the playfield's pens cannot spare, so
+;; he is tried as a sprite.
+;;
+;; This is the SIMPLE version: a single playfield of 4 planes (the HUD list and the world list alike),
+;; nothing but the new sprite code on top of the display proofs/sprite-width.ab3 already ran. The first
+;; run of the dual playfield version (now proofs/sprite-attach-dual.ab3) crashed the machine (an Exec
+;; "corrupt memory list" alert, then a hang with a grey screen and no keys). So this one writes
+;; sprite-attach-progress.txt during start-up: its last line is the last stage reached, which says
+;; whether a hang is in the start-up (the data, the bitmaps, the IFF, the palette) or later (the
+;; display, the sprite). If it runs, the dual version (layering between the playfields) is the next run.
+;;
+;; A 15 colour sprite is an attached pair: it needs an even channel and takes the odd one after it (the
+;; Blitz guide, "Sprite handling"). Its colours are registers 17 to 31 of the sprite bank; the game's bank
+;; is 2 (entries 32 to 47, BPLCON4 xor $33 as proofs/sprite-over-hud.ab3), so Mario's pens 1 to 15 are
+;; entries 33 to 47. Changing his colours is writing those 15 entries: no art, no blit.
+;;
+;; The display: a 16 line HUD list over a 208 line world list, both 4 planes, fetch mode 3, the lores
+;; sprite flag ($400), centred DisplayAdjust for 256 wide (fetchwid -8, ddfstrt +16, ddfstop -16, diwstrt
+;; +31, diwstop -33), smooth scroll. Ground, a green pipe, bricks.
+;;
+;; Mario is the real All-Stars picture (game-data/downloaded/all-stars/mario-colors.png, cut by
+;; tools/make_sprite_mario.py into sprite-attach-data.ab3 (the pixels are data, drawn with Plot into a bitmap this program makes)): 16x32, 13
+;; colours, five palettes (normal, Fire, Starman 1 to 3).
+;;
+;; Keys: arrows move Mario; 1 to 5 normal, Fire, Starman 1, 2, 3; C auto-cycle of the three Starman
+;; palettes every 4 frames (the game's step) on and off; Esc quits and writes sprite-attach-results.txt.
+;;
+;; What to look at and report
+;; 1. Does it run at all? If not, the last line of sprite-attach-progress.txt.
+;; 2. Is Mario shown, the right way up, with his 13 colours as in the picture? 16 wide, 32 high, nothing
+;;    cut off or smeared (a sprite can show junk after its last line)?
+;; 3. 1 to 5: do the palettes change his colours and nothing else (the pipe, the ground, the HUD)? Does C
+;;    cycle him without a flicker or a tear?
+;; 4. The picture: still 256 wide and centred, no wrapping HUD, random dots or jump, while scrolling.
+;; 5. Does the sprite's x line up (he is where the arrows put him) and move smoothly?
+;; The results file has what it cost in raster lines (a line is about 63.5 microseconds; a PAL frame is 312
+;; lines): DisplaySprite each frame, and a palette change (15 AGAPalRGB and DisplayPalette).
+
+WBStartup
+
+XINCLUDE "sprite-attach-data.ab3"
+
+;; =======================================================
+;; CONSTANTS
+;; =======================================================
+
+#RAW_KEY_ESC   = $45
+#RAW_KEY_LEFT  = $4f
+#RAW_KEY_RIGHT = $4e
+#RAW_KEY_UP    = $4c
+#RAW_KEY_DOWN  = $4d
+#RAW_KEY_C     = $33
+
+#HUD_YPOS   = 44
+#HUD_H      = 16
+#LIST_GAP   = 3
+#VIEW_H     = 208
+#VIEW_TOP   = 32
+#WORLD_W    = 384
+#WORLD_H    = 256
+#HUD_W      = 384
+
+#SPRITE_FLAG = $400
+#LIST_FLAGS  = $13014
+#BANK_XOR    = $33
+
+;; The five DisplayAdjust numbers for 256 wide, centred (proofs/sprite-width.ab3, config 2).
+#ADJUST_FETCHWID  = -8
+#ADJUST_DDFSTART  = 16
+#ADJUST_DDFSTOP   = -16
+#ADJUST_DIWSTART  = 31
+#ADJUST_DIWSTOP   = -33
+
+#BM_FRONT  = 0
+#BM_HUD    = 1
+#BM_MARIO  = 2
+
+#SPRITE_OBJ   = 0
+#SPRITE_SHAPE = 0
+#MARIO_W      = 16
+#MARIO_H      = 32
+#VARIANTS     = 5
+#SCROLL_MAX   = 60
+#LINES_PAL    = 312
+#STAR_STEP    = 4
+
+;; =======================================================
+;; GLOBALS
+;; =======================================================
+
+quitFlag.w = False
+variant.w = 0
+starCycle.w = False
+frameCount.l = 0
+marioX.w = 100
+marioY.w = 144
+scrollX.q = 0
+scrollDir.q = 0.25
+keyC.w = False
+startLine.l = 0
+endLine.l = 0
+spriteLines.l = 0
+spriteFrames.l = 0
+spriteSum.l = 0
+spriteMax.l = 0
+paletteWrites.l = 0
+paletteSum.l = 0
+paletteMax.l = 0
+paletteLines.l = 0
+chipBeforeSprite.l = 0
+chipAfterSprite.l = 0
+progress$ = ""
+logResult.w = 0
+
+;; Mario's five palettes: variant, pen 1 to 15, r g b.
+Dim marioRGB.w(#VARIANTS - 1, 15, 2)
+Dim marioPixel.w(#MARIO_H - 1, #MARIO_W - 1)
+readPixel.w = 0
+readRed.w = 0
+readGreen.w = 0
+readBlue.w = 0
+
+;; Append a stage to the progress log and write the whole file again (a hang loses nothing before it).
+Function.w LogStage{stageText$}
+  SHARED progress$
+  progress$ = progress$ + stageText$ + Chr$(10)
+  If WriteFile(0, "sparky-dave:game/proofs/sprite-attach-progress.txt")
+    FileOutput 0
+    Print progress$
+    CloseFile 0
+    DefaultOutput
+  EndIf
+  Function Return 0
+End Function
+
+logResult = LogStage{"1 started"}
+
+For variantIndex.w = 0 To #VARIANTS - 1
+  For penIndex.w = 1 To 15
+    Read readRed
+    Read readGreen
+    Read readBlue
+    marioRGB(variantIndex, penIndex, 0) = readRed
+    marioRGB(variantIndex, penIndex, 1) = readGreen
+    marioRGB(variantIndex, penIndex, 2) = readBlue
+  Next
+Next
+For rowIndex.w = 0 To #MARIO_H - 1
+  For columnIndex.w = 0 To #MARIO_W - 1
+    Read readPixel
+    marioPixel(rowIndex, columnIndex) = readPixel
+  Next
+Next
+logResult = LogStage{"2 palettes read from the data"}
+
+;; =======================================================
+;; ALLOC (AMIGA MODE)
+;; =======================================================
+
+BitMap #BM_FRONT, #WORLD_W, #WORLD_H, 4
+BitMap #BM_HUD, #HUD_W, #HUD_H, 4
+logResult = LogStage{"3 front and HUD bitmaps allocated"}
+BitMap #BM_MARIO, #MARIO_W, #MARIO_H, 4
+logResult = LogStage{"4 Mario's bitmap allocated"}
+
+;; Entries 0 to 15 the world's, 33 to 47 Mario's (sprite bank 2).
+InitPalette 0, 48
+AGAPalRGB 0, 0, 92, 148, 252
+AGAPalRGB 0, 1, 156, 74, 0
+AGAPalRGB 0, 2, 254, 205, 198
+AGAPalRGB 0, 3, 0, 0, 0
+AGAPalRGB 0, 4, 230, 156, 33
+AGAPalRGB 0, 5, 82, 33, 0
+AGAPalRGB 0, 6, 140, 214, 0
+AGAPalRGB 0, 7, 16, 148, 0
+AGAPalRGB 0, 8, 255, 255, 255
+AGAPalRGB 0, 9, 99, 173, 255
+AGAPalRGB 0, 10, 108, 110, 0
+AGAPalRGB 0, 11, 255, 0, 0
+AGAPalRGB 0, 12, 0, 255, 0
+AGAPalRGB 0, 13, 76, 105, 192
+AGAPalRGB 0, 14, 238, 195, 154
+AGAPalRGB 0, 15, 40, 40, 40
+For penIndex.w = 1 To 15
+  AGAPalRGB 0, 32 + penIndex, marioRGB(0, penIndex, 0), marioRGB(0, penIndex, 1), marioRGB(0, penIndex, 2)
+Next
+logResult = LogStage{"5 palette set"}
+
+;; =======================================================
+;; DISPLAY (BLITZ MODE)
+;; =======================================================
+
+BLITZ
+
+;; Beam line: VPOSR bit 0 is V8, VHPOSR high byte V0 to V7. Masked before dividing
+;; because bit 31 is a flag and the long is negative.
+Function.l RasterLine{}
+  rawPosition.l = Peek.l($dff004)
+  Function Return (rawPosition AND $1ff00)/256
+End Function
+
+;; CopList 0 the HUD, 1 the world (the sprites, 8 channels).
+Statement BuildLists{}
+  InitCopList 0, #HUD_YPOS, #HUD_H, #LIST_FLAGS + #SPRITE_FLAG, 0, 48, 0
+  InitCopList 1, #HUD_YPOS + #HUD_H + #LIST_GAP, #VIEW_H, #LIST_FLAGS + #SPRITE_FLAG, 8, 0, 0
+  DisplayControls 0, 0, 0, #BANK_XOR
+  DisplayControls 1, 0, 0, #BANK_XOR
+  DisplayAdjust 0, #ADJUST_FETCHWID, #ADJUST_DDFSTART, #ADJUST_DDFSTOP, #ADJUST_DIWSTART, #ADJUST_DIWSTOP
+  DisplayAdjust 1, #ADJUST_FETCHWID, #ADJUST_DDFSTART, #ADJUST_DDFSTOP, #ADJUST_DIWSTART, #ADJUST_DIWSTOP
+End Statement
+
+Statement ShowDisplay{}
+  CreateDisplay 0, 1
+  DisplayPalette 0, 0
+  DisplayBitMap 0, #BM_HUD, 0, 0
+  DisplayBitMap 1, #BM_FRONT, 0, #VIEW_TOP
+End Statement
+
+;; Ground, a pipe (green, 32 wide, 64 high), a row of bricks, and ruler lines every 32 pixels; red on
+;; column 0 and green on column 255 mark the edges of the window.
+Statement DrawFront{}
+  Use BitMap #BM_FRONT
+  Cls 0
+  For columnIndex.w = 0 To #WORLD_W/16 - 1
+    penIndex.w = 6
+    If columnIndex MOD 2 = 1 Then penIndex = 7
+    Boxf columnIndex*16, 208, columnIndex*16 + 15, 239, penIndex
+  Next
+  Boxf 112, 144, 143, 207, 7
+  Boxf 112, 144, 143, 151, 6
+  Boxf 114, 152, 119, 207, 6
+  For brickIndex.w = 0 To 5
+    Boxf 20 + brickIndex*16, 112, 35 + brickIndex*16, 127, 1
+    Boxf 20 + brickIndex*16, 112, 35 + brickIndex*16, 112, 3
+    Boxf 20 + brickIndex*16, 127, 35 + brickIndex*16, 127, 3
+  Next
+  For rulerX.w = 32 To #WORLD_W - 32 Step 32
+    Boxf rulerX, 32, rulerX, 40, 3
+  Next
+  Boxf 0, 32, 1, 239, 11
+  Boxf 254, 32, 255, 239, 12
+End Statement
+
+;; The HUD band: ticks every 16 pixels so a wrap or a shift shows.
+Statement DrawHud{}
+  Use BitMap #BM_HUD
+  Cls 1
+  For tickX.w = 0 To #HUD_W - 16 Step 16
+    Boxf tickX, 0, tickX, 3, 8
+  Next
+  Boxf 2, 6, 9, 13, 8
+End Statement
+
+;; The 15 colour sprite from the picture: a 4 plane shape, then the sprite made from it (an even channel
+;; shows it). Two statements so the progress log can say which of the two hangs.
+Statement MakeMarioShape{}
+  SHARED marioPixel()
+  Use BitMap #BM_MARIO
+  Cls 0
+  For rowIndex.w = 0 To #MARIO_H - 1
+    For columnIndex.w = 0 To #MARIO_W - 1
+      Plot columnIndex, rowIndex, marioPixel(rowIndex, columnIndex)
+    Next
+  Next
+  GetaShape #SPRITE_SHAPE, 0, 0, #MARIO_W, #MARIO_H
+End Statement
+
+Statement MakeMarioSprite{}
+  GetaSprite #SPRITE_OBJ, #SPRITE_SHAPE
+End Statement
+
+;; Mario's 15 entries (33 to 47) set to a variant and the HUD list's colours rewritten. Timed in lines.
+Statement SetVariant{newVariant.w}
+  SHARED marioRGB(), paletteLines
+  beginLine.l = RasterLine{}
+  For penIndex.w = 1 To 15
+    AGAPalRGB 0, 32 + penIndex, marioRGB(newVariant, penIndex, 0), marioRGB(newVariant, penIndex, 1), marioRGB(newVariant, penIndex, 2)
+  Next
+  DisplayPalette 0, 0
+  finishLine.l = RasterLine{}
+  paletteLines = finishLine - beginLine
+  If paletteLines < 0 Then paletteLines = paletteLines + #LINES_PAL
+End Statement
+
+;; The progress log from inside Blitz mode, the way the game writes files in the middle of a display
+;; (the main project's BLITZ_CONVENTIONS note, "File I/O in the middle of a Blitz display"): QAMIGA, the function
+;; defined above BLITZ, a wait, BLITZ.
+Statement LogBlitz{stageText$}
+  SHARED logResult
+  QAMIGA
+  logResult = LogStage{stageText$}
+  VWait 25
+  BLITZ
+End Statement
+
+LogBlitz{"6 in Blitz mode"}
+chipBeforeSprite = AvailMem_(2)
+LogBlitz{"6b AvailMem_ read in Blitz mode"}
+MakeMarioShape{}
+LogBlitz{"7a Mario's shape cut (GetaShape from the loaded 4 plane bitmap)"}
+MakeMarioSprite{}
+chipAfterSprite = AvailMem_(2)
+LogBlitz{"7b Mario's sprite made (GetaSprite from the 4 plane shape)"}
+DrawFront{}
+DrawHud{}
+LogBlitz{"8 world and HUD drawn"}
+BuildLists{}
+LogBlitz{"9 copper lists built (InitCopList, DisplayControls, DisplayAdjust)"}
+ShowDisplay{}
+LogBlitz{"10 display created and shown (CreateDisplay, DisplayPalette, DisplayBitMap)"}
+BlitzKeys On
+
+While quitFlag = False
+  If RawStatus(#RAW_KEY_ESC) Then quitFlag = True
+
+  If RawStatus(#RAW_KEY_LEFT) AND marioX > 0 Then marioX = marioX - 1
+  If RawStatus(#RAW_KEY_RIGHT) AND marioX < 239 Then marioX = marioX + 1
+  If RawStatus(#RAW_KEY_UP) AND marioY > 0 Then marioY = marioY - 1
+  If RawStatus(#RAW_KEY_DOWN) AND marioY < 176 Then marioY = marioY + 1
+
+  For variantKey.w = 1 To #VARIANTS
+    If RawStatus(variantKey)
+      If variant <> variantKey - 1
+        variant = variantKey - 1
+        SetVariant{variant}
+        paletteWrites = paletteWrites + 1
+        paletteSum = paletteSum + paletteLines
+        If paletteLines > paletteMax Then paletteMax = paletteLines
+      EndIf
+    EndIf
+  Next
+
+  If RawStatus(#RAW_KEY_C)
+    If keyC = False Then starCycle = NOT starCycle
+    keyC = True
+  Else
+    keyC = False
+  EndIf
+  If starCycle = True
+    If frameCount MOD #STAR_STEP = 0
+      variant = 2 + (frameCount/#STAR_STEP) MOD 3
+      SetVariant{variant}
+      paletteWrites = paletteWrites + 1
+      paletteSum = paletteSum + paletteLines
+      If paletteLines > paletteMax Then paletteMax = paletteLines
+    EndIf
+  EndIf
+
+  scrollX = scrollX + scrollDir
+  If scrollX >= #SCROLL_MAX Then scrollDir = -0.25
+  If scrollX <= 0
+    scrollX = 0
+    scrollDir = 0.25
+  EndIf
+
+  VWait
+  DisplayBitMap 1, #BM_FRONT, scrollX, #VIEW_TOP
+
+  startLine = RasterLine{}
+  DisplaySprite 1, #SPRITE_OBJ, marioX, marioY, 0
+  endLine = RasterLine{}
+  spriteLines = endLine - startLine
+  If spriteLines < 0 Then spriteLines = spriteLines + #LINES_PAL
+  If frameCount >= 10
+    spriteFrames = spriteFrames + 1
+    spriteSum = spriteSum + spriteLines
+    If spriteLines > spriteMax Then spriteMax = spriteLines
+  EndIf
+  If frameCount = 1 Then LogBlitz{"11 first frame done (VWait, DisplayBitMap, DisplaySprite)"}
+  If frameCount = 100 Then LogBlitz{"12 frame 100, running"}
+  frameCount = frameCount + 1
+Wend
+
+AMIGA
+If WriteFile(0, "sparky-dave:game/proofs/sprite-attach-results.txt")
+  FileOutput 0
+  NPrint "sprite-attach: All-Stars Mario as a 15 colour attached hardware sprite, 256 wide, single playfield"
+  NPrint "A raster line is about 63.5 microseconds. A PAL frame is ", #LINES_PAL, " lines."
+  NPrint ""
+  NPrint "DisplaySprite each frame: ", spriteFrames, " frames, average ", spriteSum/(spriteFrames + 1), " lines, worst ", spriteMax
+  NPrint "A palette change (15 AGAPalRGB and DisplayPalette of 48 colours): ", paletteWrites, " changes, average ", paletteSum/(paletteWrites + 1), " lines, worst ", paletteMax
+  NPrint "Chip RAM of the shape and the sprite: ", chipBeforeSprite - chipAfterSprite, " bytes"
+  NPrint "Last variant ", variant
+  CloseFile 0
+EndIf
+End

@@ -1,0 +1,45 @@
+; Run Sparky Dave with AmiBlitz 3.13.
+
+FAILAT 21
+
+ECHO "Deleting previous compile.log"
+
+DELETE sparky-dave:game/compile.log QUIET
+DELETE sparky-dave:compiled/SparkyDaveDev QUIET
+
+execute sparky-dave:S/stage-data
+IF ERROR
+  QUIT 20
+ENDIF
+
+ECHO "Compiling Sparky Dave"
+
+Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/SparkyDave.ab3 -e sparky-dave:compiled/SparkyDaveDev -v 2 > sparky-dave:game/compile.log
+
+; The compiler does not always return an error code when it finds errors, so the three
+; checks are the return code, the log (a good build leaves it empty: an error is a
+; "Compiler Error" line) and the program itself, which was deleted above.
+IF ERROR
+  ECHO "Compile failed"
+  TYPE sparky-dave:game/compile.log
+  QUIT 20
+ENDIF
+
+SEARCH sparky-dave:game/compile.log "Compiler Error" QUIET
+IF NOT WARN
+  ECHO "Compile failed"
+  TYPE sparky-dave:game/compile.log
+  QUIT 20
+ENDIF
+
+IF NOT EXISTS sparky-dave:compiled/SparkyDaveDev
+  ECHO "Compile failed: no program was made"
+  TYPE sparky-dave:game/compile.log
+  QUIT 20
+ENDIF
+
+ECHO "Sparky compiled, running"
+
+sparky-dave:compiled/SparkyDaveDev debug
+
+ECHO "Sparky run, complete"
