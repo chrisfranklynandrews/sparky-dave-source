@@ -96,7 +96,7 @@ Statement BuildBandStrings{frontX.q, cloudX.q, hillX.q}
     cloud3.l = CloudPlanePointer{3, cloudQuarter}
     hudSecond$ = Mki$(#BPL6PTH) + Mki$(SignedWord{cloud2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{cloud2})
     hudSecond$ = hudSecond$ + Mki$(#BPL8PTH) + Mki$(SignedWord{cloud3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{cloud3})
-    hudSecond$ = hudSecond$ + Mki$(#BPLCON1) + Mki$(SignedWord{hudControl}) + Mki$(#BPLCON3) + Mki$(SignedWord{#BPLCON3_BACK})
+    hudSecond$ = hudSecond$ + Mki$(#BPLCON1) + Mki$(SignedWord{hudControl}) + Mki$(#BPLCON3) + Mki$(SignedWord{#BPLCON3_BACK + #BORDER_BLANK})
     CustomString 2, #START_SLOTS, #HUD_END_LINE - 2, hudFirst$
     CustomString 2, #START_SLOTS + #BAND_STRING_B_SLOT, #HUD_END_LINE - 1, hudSecond$
   EndIf
@@ -183,6 +183,7 @@ Statement InitBand{}
   Next
   ; The border blank's start strings (palette.blitz.ab3).
   ShowHudStart{}
+  InitHudRestore{}
   BuildBandStrings{0, 0, 0}
   ; The NES look's only other string, after the band's (the All-Stars look writes it with the sky's).
   If #LOOK_ALLSTARS = 0 Then ShowWorldEnd{#BAND_CUSTOMS}

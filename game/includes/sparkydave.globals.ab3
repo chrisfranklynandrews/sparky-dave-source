@@ -1102,6 +1102,12 @@ hueStepShown.w = -1
 allstarsSkyShown.w = -1
 ; The sky the last palette update wanted (0 off, 1 the overground's, 2 the water's), written after the next VWait (ShowAllStarsSky{}).
 allstarsSkyWanted.w = -1
+;; Pen 0's colour as the last whole palette update worked it out (0 to 255 a component), for the string that puts the sky back after the HUD's black
+;; (PokeHudRestore{}); hudRestoreWanted is True until the strings have been written, after the next VWait (ShowAllStarsSky{}).
+hudRestoreRed.w = 0
+hudRestoreGreen.w = 0
+hudRestoreBlue.w = 0
+hudRestoreWanted.w = False
 allstarsHueStep.w = 0
 ;; The All-Stars look's palette zones of the area on show (PaletteZone objects, ApplyAreaObjects{}): where each starts (the view's right edge reaching x)
 ;; and its kind (1 up). allstarsZone is the kind the pens are worked out for (0 none), zoneShown the one on screen, -1 until the first update.
