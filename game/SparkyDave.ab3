@@ -175,10 +175,10 @@ InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, worldFlags, spriteCount, 0
 ;; (the main project's AMIGA_RENDERER note, "The HUD goes away"). Unlike list 1 it loads the palette (#COPPER_COLORS), as list 0 does, because
 ;; list 0's colour load does not run while list 2 is shown; UpdatePalette{} keeps list 2's colours current. It is not shown until needed.
 InitCopList 2, hudLine, #AWAY_H, worldFlags, spriteCount, paletteColours, #AWAY_CUSTOMS + skyCustoms
-;; List 1 puts the back playfield's colours at entries 16 to 31 (#PLAYFIELD2_OFFSET_16). The HUD list and list 2 set the border blank
-;; bit (#BORDER_BLANK: the library leaves it clear in BPLCON3, so the XOR sets it). List 1 does not, so the gap above it shows pen 0.
+;; List 1 puts the back playfield's colours at entries 16 to 31 (#PLAYFIELD2_OFFSET_16). All three lists set the border blank bit
+;; (#BORDER_BLANK: the library leaves it clear in BPLCON3, so the XOR sets it), so the frame is black all round and the 3 line gap is black.
 DisplayControls 0, 0, #BORDER_BLANK, spriteBank
-DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16, spriteBank
+DisplayControls 1, 0, #PLAYFIELD2_OFFSET_16 + #BORDER_BLANK, spriteBank
 ;; List 2 can show the HUD in the back playfield on its first lines, in the front playfield's colours (back colour offset 0); its
 ;; second string switches the offset to 16 (#PLAYFIELD2_OFFSET_16) from the clouds down. Without the HUD in it the offset is 16 throughout.
 If #HUD_OVER_WORLD = 1
@@ -191,7 +191,7 @@ EndIf
 ;; The window's top and bottom go in the high bytes of DIWSTRT and DIWSTOP, so it covers the picture's lines only, hudLine to
 ;; hudLine + #AWAY_H (DIWSTOP holds the low 8 bits of its line; the hardware supplies the ninth). The library's own window covers the
 ;; whole frame, which would show pen 0 above the HUD and below the world, and with it the HUD list's palette load as a lighter line at
-;; the top in PAL. Outside the window is border, black with #BORDER_BLANK (set above; the world's end string sets it again).
+;; the top in PAL. Outside the window is border, black with #BORDER_BLANK (set above, and kept by every string that writes BPLCON3).
 windowStart.l = #DISPLAY_DIWSTART + hudLine*256
 windowStop.l = #DISPLAY_DIWSTOP + (((hudLine + #AWAY_H) AND 255) - #LIBRARY_DIWSTOP_LINE)*256
 DisplayAdjust 0, #DISPLAY_FETCHWID, #DISPLAY_DDFSTART, #DISPLAY_DDFSTOP, windowStart, windowStop

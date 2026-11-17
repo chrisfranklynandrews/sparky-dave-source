@@ -240,7 +240,10 @@ End Function
 Function.s SkyColourString{skyRed.w, skyGreen.w, skyBlue.w}
   highPart.w = (skyRed/16)*256 + (skyGreen/16)*16 + skyBlue/16
   lowPart.w = (skyRed AND 15)*256 + (skyGreen AND 15)*16 + (skyBlue AND 15)
-  Function Return Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK) + Mki$(#COLOR00) + Mki$(highPart) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + $200) + Mki$(#COLOR00) + Mki$(lowPart) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK)
+  ; The border blank stays on through these writes (each BPLCON3 write sets all its bits), so the world's sides stay black.
+  highString$ = Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + #BORDER_BLANK) + Mki$(#COLOR00) + Mki$(highPart)
+  lowString$ = Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + #BORDER_BLANK + $200) + Mki$(#COLOR00) + Mki$(lowPart)
+  Function Return highString$ + lowString$ + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + #BORDER_BLANK)
 End Function
 
 ;; The world's last line: no bitplanes after it (the display goes on fetching rows until its window closes, and under the front bitmap,
@@ -250,14 +253,53 @@ Function.s WorldEndString{}
   Function Return Mki$(#BPLCON0) + Mki$($201) + Mki$(#BPLCON3) + Mki$(#BPLCON3_BACK + #BORDER_BLANK)
 End Function
 
-;; The HUD list's and list 2's start strings: the border blank off at their first line (a wait for the line before, which the Copper has
-;; passed, so the move is made at once, in the line's blank), each with its header's own BPLCON3 less #BORDER_BLANK: the HUD list's the
-;; library's $0c00, list 2's that XOR its DisplayControls (#PLAYFIELD2_OFFSET_HUD with #HUD_OVER_WORLD: 0). Written once (InitBand{}).
+;; COLOR00 black, written 24 bit as the sky's is (SkyColourString{}): BPLCON3 with LOCT clear, LOCT set, LOCT clear again, each given the
+;; list's own BPLCON3 (the back's colour offset and the border blank) as base. The HUD's background, black in every level and look.
+Function.s HudBlackString{base.w}
+  Function Return Mki$(#BPLCON3) + Mki$(base) + Mki$(#COLOR00) + Mki$(0) + Mki$(#BPLCON3) + Mki$(base + $200) + Mki$(#COLOR00) + Mki$(0) + Mki$(#BPLCON3) + Mki$(base)
+End Function
+
+;; The HUD list's and list 2's start strings: COLOR00 black at their first line, after the palette load (a wait for the line before, which the
+;; Copper has passed, so the moves are made at once, in the line's blank), each with its header's own BPLCON3 (the border blank on): the HUD
+;; list's the library's $0c00 XOR the blank, list 2's that XOR its DisplayControls (#PLAYFIELD2_OFFSET_HUD with #HUD_OVER_WORLD: 0).
+;; Written once (InitBand{}); the sky comes back from InitHudRestore{} and PokeHudRestore{}.
 Statement ShowHudStart{}
-  CustomString 0, 0, -1, Mki$(#BPLCON3) + Mki$(#PLAYFIELD2_OFFSET_HUD)
-  awayStart.w = #BPLCON3_BACK
-  If #HUD_OVER_WORLD = 1 Then awayStart = 0
-  CustomString 2, 0, -1, Mki$(#BPLCON3) + Mki$(awayStart)
+  CustomString 0, 0, -1, HudBlackString{#PLAYFIELD2_OFFSET_HUD + #BORDER_BLANK}
+  awayStart.w = #BPLCON3_BACK + #BORDER_BLANK
+  If #HUD_OVER_WORLD = 1 Then awayStart = #BORDER_BLANK
+  CustomString 2, 0, -1, HudBlackString{awayStart}
+End Statement
+
+;; The sky's colour back after the HUD: pen 0's, written by UpdatePalette{} (hudRestoreRed, Green and Blue). A string runs at the END of its line
+;; (its wait is for the line's end: displaylib.ab3, _customstring), so list 0's is at its line #HUD_H - 1, the HUD's last (the gap after it is black by
+;; the blank, so the colour shows from the world's first line); list 2's at #HUD_H + #LIST_GAP - 1, the last line of the gap's place, so the black is 19
+;; lines in both and nothing moves when the lists swap. The strings are written once with CustomString, in
+;; InitBand{} before the world's end strings, and after that only their two colour words are poked (PokeHudRestore{}): CustomString keeps the line
+;; after the last string written as the list's bottom (displaylib.ab3, _customstring: the `bot` it sets), so a string written later, as a colour changed,
+;; would move list 2's bottom up to line 20. List 0's string also moves its bottom (to the line after the HUD), so it ends with BPLCON0 with no
+;; planes, as WorldEndString{} does: the fetch stops at the HUD's last line, and no line of the HUD bitmap's memory shows under it (the first run,
+;; with the string a line late, showed one).
+Statement InitHudRestore{}
+  SHARED hudRestoreRed, hudRestoreGreen, hudRestoreBlue
+  restoreString$ = SkyColourString{hudRestoreRed, hudRestoreGreen, hudRestoreBlue}
+  CustomString 0, #START_SLOTS, #HUD_H - 1, restoreString$ + Mki$(#BPLCON0) + Mki$($201)
+  CustomString 2, #AWAY_RESTORE_SLOT, #HUD_H + #LIST_GAP - 1, restoreString$
+End Statement
+
+;; The colour words of the restore strings (SkyColourString{}'s layout: a no-op and a wait, 8 bytes, then register and value words: the high
+;; nibbles' value is the second move's, at byte 14, the low nibbles' the fourth's, at byte 22), written after the next VWait with the All-Stars
+;; sky's (ShowAllStarsSky{}): a string runs on the Copper's pass at once, so poked before the VWait it would change the colour part way down the
+;; frame before.
+Statement PokeHudRestore{}
+  SHARED hudRestoreRed, hudRestoreGreen, hudRestoreBlue
+  highPart.w = (hudRestoreRed/16)*256 + (hudRestoreGreen/16)*16 + hudRestoreBlue/16
+  lowPart.w = (hudRestoreRed AND 15)*256 + (hudRestoreGreen AND 15)*16 + (hudRestoreBlue AND 15)
+  listZeroString.l = Peek.l(Addr CopList(0) + #MYCOP_CUSTOMS) + #START_SLOTS*4
+  listTwoString.l = Peek.l(Addr CopList(2) + #MYCOP_CUSTOMS) + #AWAY_RESTORE_SLOT*4
+  Poke.w listZeroString + 14, highPart
+  Poke.w listZeroString + 22, lowPart
+  Poke.w listTwoString + 14, highPart
+  Poke.w listTwoString + 22, lowPart
 End Statement
 
 ;; The end string in both world lists, at the slot after the given one. Written after every other string of the list (CustomString puts in
@@ -385,7 +427,7 @@ Statement UpdatePalette{}
   SHARED coverKind, paletteCoverShown, paletteKeyValid, cycleColour(), overlayScreenShown
   SHARED hudAwayShown, hudAwayWanted, marioColour(), palettePageTicks, marioSpriteRGB(), hueStepShown, allstarsHueStep, allstarsGlint(), allstarsHue()
   SHARED zoneShown, allstarsZone, allstarsZoneHue()
-  SHARED allstarsSkyWanted, jukeboxSceneShown, paletteSceneShown
+  SHARED allstarsSkyWanted, jukeboxSceneShown, paletteSceneShown, hudRestoreRed, hudRestoreGreen, hudRestoreBlue, hudRestoreWanted
   ; Every frame, so not MOD (about 2.3 lines; a division is 0.08: the main project's OPTIMISATION note, entry 8).
   cycleCount.l = simTickCounter/#CYCLE_TICKS
   stepNow.w = cycleCount - (cycleCount/#CYCLE_STEPS)*#CYCLE_STEPS
@@ -512,6 +554,13 @@ Statement UpdatePalette{}
       EndIf
     EndIf
   EndIf
+  ; Pen 0's colour for the string that puts the sky back after the black HUD (PokeHudRestore{}). Only the whole-palette path can change it.
+  If penChangesOnly = False
+    hudRestoreRed = PaletteComponent{0, 0, stepNow, marioNow, lookNow, coverNow}
+    hudRestoreGreen = PaletteComponent{0, 1, stepNow, marioNow, lookNow, coverNow}
+    hudRestoreBlue = PaletteComponent{0, 2, stepNow, marioNow, lookNow, coverNow}
+    hudRestoreWanted = True
+  EndIf
   DisplayPalette 0, 0
   ;; List 2 (the HUD away) loads the palette too: kept current while it is on show or asked for, and given the whole of it
   ;; as it is switched to (ShowWorldLists{}).
@@ -524,7 +573,12 @@ End Statement
 ;; comes up, the cover's black going to sky bands as it ends). Each place that writes the palette and then waits calls it: the main
 ;; loop, PresentCoverFrame{} and the start.
 Statement ShowAllStarsSky{}
-  SHARED allstarsSkyWanted, allstarsSkyShown
+  SHARED allstarsSkyWanted, allstarsSkyShown, hudRestoreWanted
+  ; The HUD's restore strings (PokeHudRestore{}) go in with the same timing, in both looks.
+  If hudRestoreWanted <> False
+    PokeHudRestore{}
+    hudRestoreWanted = False
+  EndIf
   If #LOOK_ALLSTARS = 0 Then Statement Return
   If allstarsSkyWanted = allstarsSkyShown Then Statement Return
   SetAllStarsSky{allstarsSkyWanted}
