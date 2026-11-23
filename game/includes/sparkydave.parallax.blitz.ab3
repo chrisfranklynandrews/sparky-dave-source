@@ -80,8 +80,8 @@ Statement BuildBandStrings{frontX.q, cloudX.q, hillX.q}
   secondString$ = Mki$(#BPL6PTH) + Mki$(SignedWord{pointer2/65536}) + Mki$(#BPL6PTH + 2) + Mki$(SignedWord{pointer2})
   secondString$ = secondString$ + Mki$(#BPL8PTH) + Mki$(SignedWord{pointer3/65536}) + Mki$(#BPL8PTH + 2) + Mki$(SignedWord{pointer3})
   secondString$ = secondString$ + Mki$(#BPLCON1) + Mki$(SignedWord{control})
-  CustomString 1, #BAND_SLOT_1, #BAND_LINE - 2, firstString$
-  CustomString 1, #BAND_SLOT_1 + #BAND_STRING_B_SLOT, #BAND_LINE - 1, secondString$
+  CustomString 1, #WORLD_START_SLOTS + #BAND_SLOT_1, #BAND_LINE - 2, firstString$
+  CustomString 1, #WORLD_START_SLOTS + #BAND_SLOT_1 + #BAND_STRING_B_SLOT, #BAND_LINE - 1, secondString$
   CustomString 2, #AWAY_BAND_SLOT, #BAND_LINE_AWAY - 2, firstString$
   CustomString 2, #AWAY_BAND_SLOT + #BAND_STRING_B_SLOT, #BAND_LINE_AWAY - 1, secondString$
   If #HUD_OVER_WORLD = 1
