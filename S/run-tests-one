@@ -33,7 +33,7 @@ DELETE sparky-dave:game/tests/test-harness-results-{variant}-{look}.txt QUIET
 DELETE sparky-dave:game/tests/compile-tests-{variant}-{look}.log QUIET
 DELETE RAM:TestHarness QUIET
 
-Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/tests/test-harness.ab3 -e RAM:TestHarness -v 2 > sparky-dave:game/tests/compile-tests-{variant}-{look}.log
+Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/tests/test-harness.ab3 -e RAM:TestHarness -r -v 2 > sparky-dave:game/tests/compile-tests-{variant}-{look}.log
 
 ; The compiler does not always return an error code when it finds errors, so the three checks are
 ; the return code (taken here, before anything else runs), the log (an error is a "Compiler Error"
