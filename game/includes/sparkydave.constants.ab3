@@ -44,7 +44,6 @@
 ;; (SetOverlayFront{}, sparkydave.parallax.blitz.ab3; the main project's AMIGA_RENDERER note, "The overlay").
 #COPPER_SPRITES       = 0
 #PLAYFIELD_PLANES     = 4
-#COPPER_CUSTOMS       = 16
 #COPPER_COLORS        = 32
 #FETCH_GUARD          = 64
 #PLAYFIELD2_PRIORITY  = $40
@@ -1509,7 +1508,8 @@ Macro COVER_PHASE_X:0.75:End Macro
 ;; The back's two bands (sparkydave.parallax.blitz.ab3): the hills' band starts at world list line
 ;; #BAND_LINE (bitmap row #VIEW_TOP + 80 = 112, among the back's empty rows between the clouds at 32
 ;; to 79 and the hills at 160 to 207). Two CustomStrings: 2 instructions each (a no-op and the wait)
-;; plus 4 and 5 moves, so 13 custom instructions on list 1, the second string from slot 6. The
+;; plus 4 and 5 moves, so 13 custom instructions for the band, the second string from slot 6 (counted from the band's own first slot: list 1's
+;; custom area starts with #WORLD_START_SLOTS slots for the sky restore string, so #BAND_POKE_FIRST_1 and #BAND_POKE_SECOND_1 add that shift). The
 ;; CopList object's custom area pointer is its eighth long (displaylib.ab3, NEWTYPE .mycop), and
 ;; the value words of the moves are at these byte offsets in it. #BAND_BLOCK_MASK is an x in
 ;; quarter pixels less its 32 px fine part (#FINE_MASK, in quarter pixels). The copper registers: the even (back) planes' pointers,
@@ -1542,12 +1542,17 @@ Macro COVER_PHASE_X:0.75:End Macro
 ;; on, the border is black, and so is any line inside the window that fetches no planes. It is on in all three lists' headers and in every
 ;; string that writes BPLCON3, so the frame is black all round, the 3 line gap under the HUD is black and nothing switches part way along a
 ;; line (a header's BPLCON3 lands part way along a line: a half black line). The HUD is black too: each list that has the HUD on its first
-;; lines (list 0, list 2) has a start string (#START_SLOTS, ShowHudStart{}) that writes COLOR00 black after the palette load, and a string
-;; that puts the sky (pen 0's colour) back, at line #HUD_H in list 0 (the gap is black by the blank) and #HUD_H + #LIST_GAP in list 2, so
-;; the black is 19 lines in both (#RESTORE_SLOTS, InitHudRestore{} and PokeHudRestore{}).
-#START_SLOTS   = 7
-#RESTORE_SLOTS = 7
-#BORDER_BLANK  = $20
+;; lines (list 0, list 2) has a start string (#START_SLOTS, ShowHudStart{}) that writes COLOR00 black after the palette load. The string that puts
+;; the sky (pen 0's colour) back is the first string of a world list: slot 0 of list 1 (#WORLD_START_SLOTS, which shifts all of list 1's other
+;; strings on) at its line 0, and #AWAY_RESTORE_SLOT of list 2 at its line #HUD_H + #LIST_GAP, the same line, so the black is the HUD, the gap
+;; and the world's first line, 20 lines in both (#RESTORE_SLOTS, InitHudRestore{} and PokeHudRestore{}). List 0 holds only its start string, so
+;; #COPPER_CUSTOMS is #START_SLOTS; a restore string at the end of list 0 broke Amiga Forever (the main project's AMIGA_RENDERER note).
+#START_SLOTS       = 7
+#RESTORE_SLOTS     = 7
+#BORDER_BLANK      = $20
+#COPPER_CUSTOMS    = #START_SLOTS
+#WORLD_START_SLOTS = #RESTORE_SLOTS
+
 ;; List 2's custom area: its start string, then with #HUD_OVER_WORLD its two HUD strings (BuildBandStrings{}): the first is a no-op, a wait and four
 ;; pointer moves (#BAND_STRING_B_SLOT slots), the second a no-op, a wait and six moves, the four and BPLCON1 and BPLCON3 (#HUD_STRING_B_SLOTS);
 ;; the hills' strings follow at slot #AWAY_BAND_SLOT (the world's strings from #AWAY_WORLD_SLOT, in list 1's order), so their pokes are 4 bytes a
@@ -1556,8 +1561,8 @@ Macro COVER_PHASE_X:0.75:End Macro
 #HUD_STRING_B_SLOTS    = 2 + 6
 #HUD_STRING_SLOTS      = #BAND_STRING_B_SLOT + #HUD_STRING_B_SLOTS
 #BAND_SLOT_1           = #SKY_EARLY_BANDS*#SKY_STRING_SLOTS
-#BAND_POKE_FIRST_1     = #BAND_POKE_FIRST + 4*#BAND_SLOT_1
-#BAND_POKE_SECOND_1    = #BAND_POKE_SECOND + 4*#BAND_SLOT_1
+#BAND_POKE_FIRST_1     = #BAND_POKE_FIRST + 4*(#WORLD_START_SLOTS + #BAND_SLOT_1)
+#BAND_POKE_SECOND_1    = #BAND_POKE_SECOND + 4*(#WORLD_START_SLOTS + #BAND_SLOT_1)
 #HUD_POKE_FIRST        = #BAND_POKE_FIRST + 4*#START_SLOTS
 #HUD_POKE_SECOND       = #BAND_POKE_SECOND + 4*#START_SLOTS
 #AWAY_RESTORE_SLOT     = #START_SLOTS + #HUD_STRING_SLOTS*#HUD_OVER_WORLD
@@ -1578,9 +1583,11 @@ Macro COVER_PHASE_X:0.75:End Macro
 #MARIO_BTN_RIGHT = $01
 #MARIO_BTN_LEFT  = $02
 #MARIO_BTN_DOWN  = $04
+
 ; Up climbs a vine (nothing else reads it): the UP key (the cursor Up unless redefined, #KEY_UP) and the joystick's stick up.
 #MARIO_BTN_UP  = $08
 #MARIO_BTN_RUN = $40
+
 ;; The fire button, a bit of its own so the run button and the fire button can be two keys.
 ;; The cartridge's B is both; #MARIO_BTN_FIRE sits where its Select bit is, which this
 ;; engine never sets (the heldBits test in PrepareGroundMotion{} leaves it out).

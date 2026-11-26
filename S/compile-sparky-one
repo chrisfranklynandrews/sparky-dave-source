@@ -36,7 +36,7 @@ IF "$compileresult" EQ "ok"
   DELETE sparky-dave:game/compile-{variant}-{look}.log QUIET
   DELETE sparky-dave:compiled/{program} QUIET
 
-  Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/SparkyDave.ab3 -e sparky-dave:compiled/{program} -v 2 > sparky-dave:game/compile-{variant}-{look}.log
+  Work:AmiBlitz3.13/AmiBlitz3 -s sparky-dave:game/SparkyDave.ab3 -e sparky-dave:compiled/{program} -r -v 2 > sparky-dave:game/compile-{variant}-{look}.log
 
   ; The compiler does not always return an error code when it finds errors, so the three checks
   ; are the return code, the log (an error is a "Compiler Error" line) and the program, which was

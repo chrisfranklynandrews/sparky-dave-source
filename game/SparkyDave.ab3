@@ -169,8 +169,9 @@ EndIf
 skyCustoms.w = #FETCH_OFF_SLOTS
 If #LOOK_ALLSTARS = 1 Then skyCustoms = #ALLSTARS_SKY_BANDS*#SKY_STRING_SLOTS + #FETCH_OFF_SLOTS
 InitCopList 0, hudLine, #HUD_H, hudFlags, #COPPER_SPRITES, paletteColours, #COPPER_CUSTOMS
-; List 1 has no colour instructions: the HUD list loads the palette once and the colour registers hold it for the rest of the frame.
-InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, worldFlags, spriteCount, 0, #BAND_CUSTOMS + skyCustoms
+;; List 1 does not load the palette: the HUD list does, once, and the colour registers hold it for the rest of the frame. Its custom area starts with
+;; the sky restore string (#WORLD_START_SLOTS slots, InitHudRestore{}), which puts pen 0's colour back after the HUD's black, then the band's strings.
+InitCopList 1, hudLine + #HUD_H + #LIST_GAP, #VIEW_H, worldFlags, spriteCount, 0, #WORLD_START_SLOTS + #BAND_CUSTOMS + skyCustoms
 ;; List 2 replaces lists 0 and 1 while Mario is above the top of the world: a single world list starting on the HUD's first line
 ;; (the main project's AMIGA_RENDERER note, "The HUD goes away"). Unlike list 1 it loads the palette (#COPPER_COLORS), as list 0 does, because
 ;; list 0's colour load does not run while list 2 is shown; UpdatePalette{} keeps list 2's colours current. It is not shown until needed.

@@ -271,19 +271,18 @@ Statement ShowHudStart{}
 End Statement
 
 ;; The sky's colour back after the HUD: pen 0's, written by UpdatePalette{} (hudRestoreRed, Green and Blue). A string runs at the END of its line
-;; (its wait is for the line's end: displaylib.ab3, _customstring), so list 0's is at its line #HUD_H - 1, the HUD's last (the gap after it is black by
-;; the blank, so the colour shows from the world's first line); list 2's at #HUD_H + #LIST_GAP - 1, the last line of the gap's place, so the black is 19
-;; lines in both and nothing moves when the lists swap. The strings are written once with CustomString, in
-;; InitBand{} before the world's end strings, and after that only their two colour words are poked (PokeHudRestore{}): CustomString keeps the line
-;; after the last string written as the list's bottom (displaylib.ab3, _customstring: the `bot` it sets), so a string written later, as a colour changed,
-;; would move list 2's bottom up to line 20. List 0's string also moves its bottom (to the line after the HUD), so it ends with BPLCON0 with no
-;; planes, as WorldEndString{} does: the fetch stops at the HUD's last line, and no line of the HUD bitmap's memory shows under it (the first run,
-;; with the string a line late, showed one).
+;; (its wait is for the line's end: displaylib.ab3, _customstring). List 1's is its first string (slot 0) at its line 0, and list 2's at its line
+;; #HUD_H + #LIST_GAP, the same line, so the black is the HUD, the gap and the world's first line, 20 lines, and nothing moves when the lists swap.
+;; It is not in list 0: a string at the end of the HUD list's last line (the first version) made Amiga Forever show the front playfield only from
+;; the hills' band down (the title logo cut off, the ground missing), though FS-UAE and WinUAE were clean (found by switching the pieces off in turn).
+;; The strings are written once with CustomString, in InitBand{} before the band's and the world's end strings (CustomString keeps the line after
+;; the last string written for its line 255 check, so only the order of the calls matters), and after that only their two colour words are poked
+;; (PokeHudRestore{}).
 Statement InitHudRestore{}
   SHARED hudRestoreRed, hudRestoreGreen, hudRestoreBlue
   restoreString$ = SkyColourString{hudRestoreRed, hudRestoreGreen, hudRestoreBlue}
-  CustomString 0, #START_SLOTS, #HUD_H - 1, restoreString$ + Mki$(#BPLCON0) + Mki$($201)
-  CustomString 2, #AWAY_RESTORE_SLOT, #HUD_H + #LIST_GAP - 1, restoreString$
+  CustomString 1, 0, 0, restoreString$
+  CustomString 2, #AWAY_RESTORE_SLOT, #HUD_H + #LIST_GAP, restoreString$
 End Statement
 
 ;; The colour words of the restore strings (SkyColourString{}'s layout: a no-op and a wait, 8 bytes, then register and value words: the high
@@ -294,10 +293,12 @@ Statement PokeHudRestore{}
   SHARED hudRestoreRed, hudRestoreGreen, hudRestoreBlue
   highPart.w = (hudRestoreRed/16)*256 + (hudRestoreGreen/16)*16 + hudRestoreBlue/16
   lowPart.w = (hudRestoreRed AND 15)*256 + (hudRestoreGreen AND 15)*16 + (hudRestoreBlue AND 15)
-  listZeroString.l = Peek.l(Addr CopList(0) + #MYCOP_CUSTOMS) + #START_SLOTS*4
-  listTwoString.l = Peek.l(Addr CopList(2) + #MYCOP_CUSTOMS) + #AWAY_RESTORE_SLOT*4
-  Poke.w listZeroString + 14, highPart
-  Poke.w listZeroString + 22, lowPart
+  listOneString.l = Peek.l(Addr CopList(1) + #MYCOP_CUSTOMS)
+  listTwoCustoms.l = Peek.l(Addr CopList(2) + #MYCOP_CUSTOMS)
+  If listOneString = 0 OR listTwoCustoms = 0 Then Statement Return
+  listTwoString.l = listTwoCustoms + #AWAY_RESTORE_SLOT*4
+  Poke.w listOneString + 14, highPart
+  Poke.w listOneString + 22, lowPart
   Poke.w listTwoString + 14, highPart
   Poke.w listTwoString + 22, lowPart
 End Statement
@@ -306,7 +307,7 @@ End Statement
 ;; the wait for line 255 by the last string written: SetAllStarsSky{}), so: the NES look once after the band's strings (InitBand{}), the
 ;; All-Stars look last in SetAllStarsSky{}.
 Statement ShowWorldEnd{endSlot.w}
-  CustomString 1, endSlot, #VIEW_H, WorldEndString{}
+  CustomString 1, #WORLD_START_SLOTS + endSlot, #VIEW_H, WorldEndString{}
   CustomString 2, #AWAY_WORLD_SLOT + endSlot, #VIEW_H + #HUD_H + #LIST_GAP, WorldEndString{}
 End Statement
 
@@ -331,13 +332,13 @@ Statement SetAllStarsSky{skySet.w}
       skyLineNow = #VIEW_H - 1
     EndIf
     ;; In the Copper's order, which is the lines' order: the bands above the band's line (the first #SKY_EARLY_BANDS, in bands 1 up) first, then
-    ;; the band's own two strings, then the rest and the last string. List 1: from slot 0; list 2: after the HUD's strings.
+    ;; the band's own two strings, then the rest and the last string. List 1: from slot #WORLD_START_SLOTS (after the restore string); list 2: after the HUD's strings.
     skySlot.w = skyOrder*#SKY_STRING_SLOTS
     If skyOrder >= #SKY_EARLY_BANDS Then skySlot = skySlot + #BAND_CUSTOMS
     skyString$ = noSky$
     If skySet = 1 Then skyString$ = SkyColourString{allstarsSky(skyColourBand*3), allstarsSky(skyColourBand*3 + 1), allstarsSky(skyColourBand*3 + 2)}
     If skySet = 2 Then skyString$ = SkyColourString{allstarsSkyWater(skyColourBand*3), allstarsSkyWater(skyColourBand*3 + 1), allstarsSkyWater(skyColourBand*3 + 2)}
-    CustomString 1, skySlot, skyLineNow, skyString$
+    CustomString 1, #WORLD_START_SLOTS + skySlot, skyLineNow, skyString$
     CustomString 2, #AWAY_WORLD_SLOT + skySlot, skyLineNow + #HUD_H + #LIST_GAP, skyString$
   Next
   ; The world's end string, always, the sky on or off.
